@@ -11,6 +11,7 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 ├── .claude-plugin/
 │   └── plugin.json               # plugin manifest
 ├── skills/
+│   ├── dev-workflow-orchestrator/
 │   ├── adversarial-pr-review/
 │   ├── feature-flags-guide/
 │   ├── api-contracts-reference/
@@ -35,6 +36,9 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 ```
 
 ## Skills at a glance
+
+### End-to-end orchestration
+- **dev-workflow-orchestrator** — runs the full chain (PRD → tested + reviewed feature) on a single docs.moolabs.com URL, pausing for sign-off after every stage and persisting each deliverable back to Outline. Delegates the substance of each stage to the skills below. Requires the Outline MCP.
 
 ### Code review
 - **adversarial-pr-review** — multi-round review-fix loop on open PRs with verify-then-fix discipline; never merges without explicit permission.

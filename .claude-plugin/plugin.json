@@ -21,6 +21,7 @@
     "./skills/api-contracts-reference",
     "./skills/backend-api-testing",
     "./skills/backend-unit-testing",
+    "./skills/dev-workflow-orchestrator",
     "./skills/documentation-unifier",
     "./skills/feature-flags-guide",
     "./skills/feature-summariser",
