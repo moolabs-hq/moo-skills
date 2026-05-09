@@ -15,5 +15,26 @@
     "testing",
     "feature-flags",
     "personas"
+  ],
+  "skills": [
+    "./skills/adversarial-pr-review",
+    "./skills/api-contracts-reference",
+    "./skills/backend-api-testing",
+    "./skills/backend-unit-testing",
+    "./skills/documentation-unifier",
+    "./skills/feature-flags-guide",
+    "./skills/feature-summariser",
+    "./skills/frontend-unit-testing",
+    "./skills/grooming-be",
+    "./skills/grooming-contracts",
+    "./skills/grooming-fe",
+    "./skills/grooming-fresh-context-validation",
+    "./skills/grooming-requirements",
+    "./skills/grooming-task-breakdown",
+    "./skills/hld-tech-specs-creator",
+    "./skills/persona-senior-engineer",
+    "./skills/persona-sparring-partner",
+    "./skills/persona-system-design-reviewer",
+    "./skills/testing-qa-persona"
   ]
 }

@@ -69,14 +69,17 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 
 ## Installing the plugin
 
-Local install for a single user:
+This repo doubles as a single-plugin marketplace, so install it through Claude Code's plugin manager — Claude Code only auto-loads plugins that are registered in `installed_plugins.json`, which is populated by `/plugin install`. A bare symlink under `~/.claude*/plugins/` won't be discovered.
 
-```bash
-mkdir -p ~/.claude/plugins
-ln -s "$(pwd)" ~/.claude/plugins/moo-skills
+```text
+/plugin marketplace add /Users/kritivasas.shukla/code/personal/moolabs/moo-skills
+/plugin install moo-skills@moo-skills
+/reload-plugins
 ```
 
-Restart Claude Code (or start a new session) and the `Skill` tool will list all 19 skills under their canonical names.
+(If you previously created a symlink at `~/.claude-moolabs/plugins/moo-skills`, remove it before installing — it isn't tracked by the plugin manager and just clutters the directory.)
+
+After install, the `Skill` tool will list every skill with the `moo-skills:` namespace (e.g. `moo-skills:adversarial-pr-review`, `moo-skills:grooming-be`).
 
 ## Adding or editing a skill
 
