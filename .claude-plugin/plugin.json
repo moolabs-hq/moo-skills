@@ -1,0 +1,19 @@
+{
+  "name": "moo-skills",
+  "version": "0.1.0",
+  "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow (requirements → HLD → contracts → BE/FE), testing blueprints (frontend unit, backend unit, backend API), feature-flag patterns, and reviewer/sparring-partner/architect personas.",
+  "author": {
+    "name": "Moolabs",
+    "email": "kritivasrocks@gmail.com"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "claude-code",
+    "skills",
+    "code-review",
+    "grooming",
+    "testing",
+    "feature-flags",
+    "personas"
+  ]
+}
