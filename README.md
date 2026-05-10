@@ -12,7 +12,7 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 │   └── plugin.json               # plugin manifest
 ├── skills/
 │   ├── dev-workflow-orchestrator/
-│   ├── adversarial-pr-review/
+│   ├── moolabs-pr-review/         # overlay on top of review-skills:adversarial-pr-review
 │   ├── feature-flags-guide/
 │   ├── api-contracts-reference/
 │   ├── frontend-unit-testing/    # blueprint + roadmap.md + usage.md
@@ -41,7 +41,7 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 - **dev-workflow-orchestrator** — runs the full chain (PRD → tested + reviewed feature) on a single docs.moolabs.com URL, pausing for sign-off after every stage and persisting each deliverable back to Outline. Delegates the substance of each stage to the skills below. Requires the Outline MCP.
 
 ### Code review
-- **adversarial-pr-review** — multi-round review-fix loop on open PRs with verify-then-fix discipline; never merges without explicit permission.
+- **moolabs-pr-review** — Moolabs-specific overlay on top of `review-skills:adversarial-pr-review`. The generic loop runs first; this skill adds OM-Namespace middleware checks, customer-key auth path verification, OpenMeter sink single-node-vs-cluster checks, cross-repo coordination across `moolabs-app` / `openmeter` / `nrev-ui-2`, cross-skill routing (feature-flags-guide, grooming-contracts, grooming-be, etc.), and Coda/Outline documentation linkage. Install the [`review-skills`](https://github.com/) plugin separately to get the underlying generic loop.
 
 ### Grooming workflow (run roughly in this order)
 - **grooming-requirements** — turn a Coda PRD + Figma into an exhaustive product-requirements doc; no code, no timelines.

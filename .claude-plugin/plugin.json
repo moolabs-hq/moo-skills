@@ -17,7 +17,6 @@
     "personas"
   ],
   "skills": [
-    "./skills/adversarial-pr-review",
     "./skills/api-contracts-reference",
     "./skills/backend-api-testing",
     "./skills/backend-unit-testing",
@@ -33,6 +32,7 @@
     "./skills/grooming-requirements",
     "./skills/grooming-task-breakdown",
     "./skills/hld-tech-specs-creator",
+    "./skills/moolabs-pr-review",
     "./skills/persona-senior-engineer",
     "./skills/persona-sparring-partner",
     "./skills/persona-system-design-reviewer",
