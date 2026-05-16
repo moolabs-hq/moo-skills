@@ -101,7 +101,8 @@ For each PR:
     Pass 2:  Apply generic lenses
   Phase 3:    Verify and fix confirmed bugs
   Phase 4:    Robustness sweep (sibling search + defensive hardening)
-  Phase 5:    Re-review; repeat 3-4 until all criteria PASS and reviewer is clean
+  Phase 5:    Re-review; repeat 3-4 until criteria PASS + challenges handled +
+              two consecutive rounds with only LOW (MINOR/NIT) confirmed findings
 Final:        Report status. Do not merge unless told.
 ```
 
@@ -163,6 +164,8 @@ None  — OR  — PR #B depends on PR #A because <reason>.
 - Risk map by subsystem (Phase 1g — informed by the now-refined criteria, challenges, and the codebase profile)
 - Verification commands used (chosen from what the codebase profile reveals)
 - Review rounds: 1, 2, 3 with finding counts (split by Pass 1 / Pass 2)
+- Finding severity per round: CRITICAL=X, IMPORTANT=Y, MINOR=Z, NIT=W (CONFIRMED only — rejected false positives excluded; severity is operator-adjusted per Phase 3a, not the reviewer's raw label)
+- Low-only streak counter per round: 0 (any CRIT/IMP) | 1 (first low-only) | 2 (second low-only — exit gate eligible). Rules: reset to 0 on any confirmed CRIT/IMP, +1 on a round of only-LOW, exit at 2. See Phase 5 for full gate logic.
 - Success criteria verification per round: each criterion → PASS | FAIL | not-yet-verified
 - Challenge verification per round: each challenge → handled | unhandled | accepted-residue
 - Operator spot-check per round: which criterion or challenge you personally verified by reading the code (not just trusting the reviewer), and the file/line you read
@@ -190,6 +193,8 @@ Skip the standalone doc. Instead post one compact summary as a PR comment (`gh p
 - Phase 1f self-review: r1 edits <intention X / criterion Y added / challenge Z sharpened>; r2 edits <…>
 - Risk map: <2-3 bullets, file-specific>
 - Review rounds: 1, finding count: N (Pass 1: X, Pass 2: Y)
+- Severity per round: r1 CRIT=A IMP=B MIN=C NIT=D | r2 …  (CONFIRMED only, operator-adjusted)
+- Low-only streak: 0 | 1 | 2 (reset on CRIT/IMP, +1 on LOW-only, exit at 2 — see Phase 5)
 - Bugs fixed: <SHA short — one-line fix description (cite criterion/challenge if applicable)>
 - Findings rejected: <one-line — reason>
 - Operator spot-check: <criterion or challenge you personally verified against the code this round>
@@ -586,6 +591,8 @@ The reviewer can be wrong. Read the file. Is the bug real? Common false positive
 
 If you can't confirm the bug after reading the relevant code, mark it `unverified` in the spec under "Findings rejected" with a one-line reason and skip it. **Do not fix what you cannot reproduce** — speculative fixes introduce new bugs without removing real ones.
 
+**While verifying, also confirm the severity.** The reviewer's CRITICAL / IMPORTANT / MINOR / NIT label is a suggestion — the operator owns the final grade. If a MINOR is actually ship-blocking in this codebase's context (e.g. a "minor" missing nil check is on a hot path), promote it to IMPORTANT. If a CRITICAL is overcalled (e.g. the "race condition" the reviewer flagged can't actually occur because of a lock the reviewer missed), demote it. Record any severity change with a one-line reason in the audit trail next to the finding — Phase 5's exit gate counts CONFIRMED findings by the operator-adjusted severity, not the reviewer's original label.
+
 ### 3b. Fix minimally
 
 The fix is the smallest change that resolves the specific bug.
@@ -695,25 +702,41 @@ git fetch origin <branch>
 NEW_HEAD=$(git rev-parse origin/<branch>)
 ```
 
-Re-invoke the reviewer with the new SHA. Three outcomes:
+Re-invoke the reviewer with the new SHA. After each round, **count CONFIRMED findings by severity** (false positives rejected in Phase 3a do not count). The per-round outcome drives the loop:
 
-| Result | Action |
+| Round outcome | Action |
 |---|---|
-| New real bugs found | Repeat Phases 3-5 |
-| Findings, all unverified or NITs | Document in spec, mark PR as `ready-for-human` |
-| No findings | Mark PR as `ready-for-human` |
+| Any confirmed CRITICAL or IMPORTANT | Repeat Phases 3-5. Reset the "low-only streak" counter to zero. |
+| Only confirmed MINOR / NIT (or zero confirmed findings) | Advance the low-only streak counter by 1. If streak reaches 2, check the exit gate below. |
 
-Stop when ALL of:
+### Exit gate
+
+Stop when ALL of these are true:
 
 - Every success criterion from Phase 1d has been verified PASS (the reviewer found concrete evidence in the diff, or you confirmed it directly)
 - Every codebase-specific challenge from Phase 1e has been verified handled (the diff demonstrably survives the scenario, or the gap is documented as accepted risk with user ack)
-- Reviewer reports no real bugs (Pass 1 or Pass 2)
-- **Operator spot-check:** at least one success criterion or one challenge per round was verified by you (the operator), reading the relevant code yourself — not just trusting the reviewer's PASS verdict. The reviewer hallucinates on bug findings (Phase 3a) and it hallucinates on criterion verification too. Spot-checking one item per round is the cheapest defense against a reviewer that returns all-PASS while missing the contract drift Phase 1c was added to catch. Record the spot-check (which criterion / challenge, which file/line you read) in the audit trail under "Operator spot-check."
+- **Two consecutive rounds produced only LOW-severity confirmed findings** (MINOR or NIT only — no confirmed CRITICAL or IMPORTANT in either round). Zero confirmed findings counts as "only LOW." A CRITICAL or IMPORTANT in any round resets the streak to zero.
+- **Operator spot-check** happened in EACH of the two final rounds: at least one success criterion or one challenge per round was verified by you (the operator) reading the relevant code yourself — not just trusting the reviewer's PASS verdict. The reviewer hallucinates on bug findings (Phase 3a) and it hallucinates on criterion verification too. Spot-checking one item per round is the cheapest defense against a reviewer that returns all-PASS while missing the contract drift Phase 1c was added to catch. Record each spot-check (which criterion / challenge, which file/line you read) in the audit trail under "Operator spot-check."
 
-OR when ANY of:
+### Why two consecutive rounds of LOW, not "reviewer goes quiet"
 
-- All remaining findings are documented as accepted non-blocking risks with the user's explicit ack
-- Three consecutive rounds with no new actionable findings (diminishing returns — flag the PR as ready and surface the residue to the user)
+"No new findings" can mean two very different things: the code is genuinely clean, OR the reviewer ran out of generic bugs to surface. Stopping on a single quiet round risks the second case. Forcing **two consecutive** rounds where every confirmed finding is LOW proves the loop actually converged — round N-1 stayed low even after another full review pass against the latest code.
+
+LOW findings (MINOR / NIT) do not have to be fixed individually to advance the streak. The exit gate is about *confirmed CRITICAL/IMPORTANT absence*, not about driving every cosmetic note to zero. If you have a MINOR you believe is actually ship-blocking, promote it to IMPORTANT during Phase 3a — that's the operator-judgment lever for "this severity feels wrong."
+
+**Accepting an unfixed LOW is the operator's call**, not a separate user-ack step. Record each accepted LOW in the audit trail under "Remaining risks (accepted non-blocking)" with a one-line reason. The user reviews the final report (which lists every accepted residue) and can ask for additional fixes before merging — that's where their ack happens, downstream of the loop. Don't pause the loop for per-MINOR user sign-off; pause the loop for CRITICAL or IMPORTANT only.
+
+### Safety valve — runaway loop
+
+If you've run 5 or more rounds and a CRITICAL or IMPORTANT finding keeps surfacing despite fix commits, **stop the loop and surface to the user.** Don't keep looping indefinitely. Likely one of:
+
+- The fix is incomplete or addressing the wrong root cause — each round patches a symptom but the underlying bug remains.
+- The success criterion is wrong — the reviewer is correctly flagging a violation of what you wrote, but what you wrote doesn't match the PR's actual intent.
+- The codebase has a structural issue this PR was never going to resolve — the bug belongs in a separate refactoring PR.
+
+Document the situation in the audit trail under "Remaining risks" with the round-by-round finding pattern (e.g. "CRITICAL: <description> appeared in rounds 2, 3, 4, 5 with fix commits abc1234, def5678, ghi9012 — pattern suggests <hypothesis>"). Let the user decide whether to merge with the known bug, file a follow-up PR, or revert.
+
+### Sharpness check
 
 A reviewer "going quiet" is not the same as "all success criteria met." The reviewer may simply have run out of generic bugs to find — the PR-specific contract from Phase 1 is still the gate. If a success criterion is unmet but the reviewer didn't flag it, that's a Phase 1 → Phase 2 brief failure: the criterion wasn't sharp enough, or wasn't passed clearly to the reviewer. Sharpen and re-run, don't ship.
 
@@ -769,7 +792,10 @@ Even if the user gave merge permission earlier in the session, re-confirm before
 | Skipping Phase 1.5 because "the stack is obvious" | Even when the stack is obvious, the conventions docs aren't. Five minutes here saves an hour of irrelevant findings. |
 | Trusting green tests today on time-bomb data | A hardcoded "future" date that hasn't aged out yet is a bug, not a passing test. Grep the diff and adjacent test files for absolute dates. |
 | Trusting local-green when the CI runs a different path | A bug class that only manifests under CI (cache globs, missing install steps, env-var divergence) won't appear in your local run. When that's the suspected class, run the CI command path, not the local equivalent. |
-| Looping forever on minor findings | Three rounds with diminishing returns is the signal to stop. Document the residue and hand back. |
+| Stopping after one round of only-LOW findings | Two CONSECUTIVE rounds are required. One quiet round can mean "reviewer ran out of ideas." Two in a row proves the loop converged. |
+| Counting unverified / rejected findings toward the low-only streak | Only CONFIRMED findings count. False positives caught in Phase 3a don't push the streak in either direction. |
+| Letting a recurring CRITICAL run rounds 2-5 without escalating | The 5-round safety valve exists for this. Stop, document the recurrence pattern, surface to user — don't loop indefinitely on the same bug. |
+| Treating MINOR/NIT as automatic ship-blockers | The exit gate accepts LOW findings as remaining risks. If a MINOR is actually critical, promote it in Phase 3a — don't change the gate. |
 | Re-running review with a stale local HEAD | Always `git fetch origin <branch>` between rounds and use the fetched SHA |
 | Treating reviewer output as gospel | False positives are common. Always read the code referenced before fixing. |
 | Introducing a new error-handling style mid-PR during Phase 4b | Match the codebase's existing pattern. New patterns are their own PR. |
