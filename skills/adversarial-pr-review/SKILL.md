@@ -101,8 +101,9 @@ For each PR:
     Pass 2:  Apply generic lenses
   Phase 3:    Verify and fix confirmed bugs
   Phase 4:    Robustness sweep (sibling search + defensive hardening)
-  Phase 5:    Re-review; repeat 3-4 until criteria PASS + challenges handled +
-              two consecutive rounds with only LOW (MINOR/NIT) confirmed findings
+  Phase 5:    Wait for CI on head SHA → re-review; repeat 3-4 until criteria
+              PASS + challenges handled + CI green + two consecutive rounds
+              with only LOW (MINOR/NIT) confirmed findings
 Final:        Report status. Do not merge unless told.
 ```
 
@@ -164,8 +165,9 @@ None  — OR  — PR #B depends on PR #A because <reason>.
 - Risk map by subsystem (Phase 1g — informed by the now-refined criteria, challenges, and the codebase profile)
 - Verification commands used (chosen from what the codebase profile reveals)
 - Review rounds: 1, 2, 3 with finding counts (split by Pass 1 / Pass 2)
-- Finding severity per round: CRITICAL=X, IMPORTANT=Y, MINOR=Z, NIT=W (CONFIRMED only — rejected false positives excluded; severity is operator-adjusted per Phase 3a, not the reviewer's raw label)
-- Low-only streak counter per round: 0 (any CRIT/IMP) | 1 (first low-only) | 2 (second low-only — exit gate eligible). Rules: reset to 0 on any confirmed CRIT/IMP, +1 on a round of only-LOW, exit at 2. See Phase 5 for full gate logic.
+- Finding severity per round: CRITICAL=X, IMPORTANT=Y, MINOR=Z, NIT=W (CONFIRMED only — rejected false positives excluded; severity is operator-adjusted per Phase 3a, not the reviewer's raw label; CI failures count as confirmed without 3a filtering)
+- CI status per round: green | failed (N checks: <names>) | no checks configured (verified) | rerun-after-flake (N retries)
+- Low-only streak counter per round: 0 (any CRIT/IMP, or CI failed) | 1 (first low-only with CI green) | 2 (second low-only with CI green — exit gate eligible). Rules: reset to 0 on any confirmed CRIT/IMP or any CI failure, +1 on a round of only-LOW with CI green, exit at 2. See Phase 5 for full gate logic.
 - Success criteria verification per round: each criterion → PASS | FAIL | not-yet-verified
 - Challenge verification per round: each challenge → handled | unhandled | accepted-residue
 - Operator spot-check per round: which criterion or challenge you personally verified by reading the code (not just trusting the reviewer), and the file/line you read
@@ -193,8 +195,9 @@ Skip the standalone doc. Instead post one compact summary as a PR comment (`gh p
 - Phase 1f self-review: r1 edits <intention X / criterion Y added / challenge Z sharpened>; r2 edits <…>
 - Risk map: <2-3 bullets, file-specific>
 - Review rounds: 1, finding count: N (Pass 1: X, Pass 2: Y)
-- Severity per round: r1 CRIT=A IMP=B MIN=C NIT=D | r2 …  (CONFIRMED only, operator-adjusted)
-- Low-only streak: 0 | 1 | 2 (reset on CRIT/IMP, +1 on LOW-only, exit at 2 — see Phase 5)
+- Severity per round: r1 CRIT=A IMP=B MIN=C NIT=D | r2 …  (CONFIRMED only, operator-adjusted; CI failures count without 3a)
+- CI status per round: r1 green | r2 failed (lint, integration) | …
+- Low-only streak: 0 | 1 | 2 (reset on CRIT/IMP OR CI failure, +1 on LOW-only with CI green, exit at 2 — see Phase 5)
 - Bugs fixed: <SHA short — one-line fix description (cite criterion/challenge if applicable)>
 - Findings rejected: <one-line — reason>
 - Operator spot-check: <criterion or challenge you personally verified against the code this round>
@@ -702,7 +705,37 @@ git fetch origin <branch>
 NEW_HEAD=$(git rev-parse origin/<branch>)
 ```
 
-Re-invoke the reviewer with the new SHA. After each round, **count CONFIRMED findings by severity** (false positives rejected in Phase 3a do not count). The per-round outcome drives the loop:
+### 5.0 Before re-reviewing: wait for CI to complete on the head SHA
+
+Push triggers CI; CI takes time; the reviewer should run against a CI-validated SHA — not just code that compiles locally. The local tests you ran in Phase 3d cover the package you touched; CI runs the full repo suite plus lint, type-check, integration, and any deploy-preview checks. CI failures are findings the reviewer would otherwise miss, and they're authoritative (the test suite verified them — no hallucination filter needed).
+
+Block until CI completes on `NEW_HEAD`:
+
+```bash
+# Interactive: --watch blocks until all checks complete
+gh pr checks <number> --watch
+
+# Snapshot: structured output, parseable, doesn't block
+gh pr checks <number> --json name,state,conclusion
+```
+
+Three CI outcomes drive the next step:
+
+| CI outcome | Action |
+|---|---|
+| **All checks PASS** | Proceed to reviewer re-invocation below. Record CI status = `green` for this round in the audit trail. |
+| **One or more checks FAIL** | Each failing check is a confirmed finding for this round. Skip Phase 3a verification (CI is authoritative, doesn't hallucinate). Severity is the operator's call per Phase 3a's grading rule — most CI failures are CRITICAL or IMPORTANT (production tests broke); some are MINOR (e.g. lint warning on a comment). Loop back to Phase 3 to fix them. Record CI status = `failed (N checks)` in the audit trail. The round counts as having confirmed CRIT/IMP findings, which resets the low-only streak. |
+| **Checks still PENDING** after 15 minutes with no progress | Investigate — that's the floor for "not just slow CI." Did the push event reach the CI provider? Is there a webhook failure? Is a previous queued run blocking this one? Re-trigger the workflow if needed (`gh workflow run <name>`). Don't re-review until checks complete. (Tune the 15-min floor for a repo whose longest-running check legitimately exceeds it — e.g. a slow Playwright suite — but a static threshold is better than an unstated one.) |
+
+**Flake handling.** If a CI failure is a known flake (intermittent, unrelated to the diff), re-run the failing check (`gh run rerun <run-id> --failed`) before treating it as a finding. A check that fails once and passes on retry is a flake, not a finding. A check that fails twice in a row IS a finding regardless of "flakiness" reputation — treat it as confirmed and fix it. Record retries in the audit trail so you can see flake patterns across rounds.
+
+**No-CI-configured edge case.** Some PRs (docs-only, asset-only) have no CI workflows running. Confirm explicitly via `gh pr checks <number>` returning zero checks (not just "all passing") and record in the audit trail: "CI status: no checks configured for this PR (verified)." Don't skip the check silently — make the no-CI condition visible.
+
+**Multi-PR parallelism.** While CI runs on PR #A, you can usefully work on PR #B's Phase 1 (understand, intentions, criteria, challenges) — those don't depend on PR #A's CI. Don't kick off PR #B's Phase 2 reviewer until you've also waited for that PR's CI. The wait is per-PR; the work between waits is what you parallelize.
+
+### 5.1 Re-invoke the reviewer
+
+Once CI is green, re-invoke `superpowers:requesting-code-review` with the new SHA. After each round, **count CONFIRMED findings by severity** (false positives rejected in Phase 3a do not count, but CI failures DO count without 3a filtering). The per-round outcome drives the loop:
 
 | Round outcome | Action |
 |---|---|
@@ -715,7 +748,8 @@ Stop when ALL of these are true:
 
 - Every success criterion from Phase 1d has been verified PASS (the reviewer found concrete evidence in the diff, or you confirmed it directly)
 - Every codebase-specific challenge from Phase 1e has been verified handled (the diff demonstrably survives the scenario, or the gap is documented as accepted risk with user ack)
-- **Two consecutive rounds produced only LOW-severity confirmed findings** (MINOR or NIT only — no confirmed CRITICAL or IMPORTANT in either round). Zero confirmed findings counts as "only LOW." A CRITICAL or IMPORTANT in any round resets the streak to zero.
+- **CI is green on the current head SHA** (or explicitly recorded as `no checks configured for this PR (verified)`). Never declare ready-for-human while CI is red or pending.
+- **Two consecutive rounds produced only LOW-severity confirmed findings AND had green CI** (MINOR or NIT only — no confirmed CRITICAL or IMPORTANT in either round). Zero confirmed findings counts as "only LOW." The streak resets to zero on EITHER (a) any confirmed CRITICAL or IMPORTANT in a round, OR (b) any CI failure in a round, even if the failure is itself low-severity. Shipping with red CI is never "converged enough to ship" — a failing lint check means there's still objective work left, regardless of its severity grade.
 - **Operator spot-check** happened in EACH of the two final rounds: at least one success criterion or one challenge per round was verified by you (the operator) reading the relevant code yourself — not just trusting the reviewer's PASS verdict. The reviewer hallucinates on bug findings (Phase 3a) and it hallucinates on criterion verification too. Spot-checking one item per round is the cheapest defense against a reviewer that returns all-PASS while missing the contract drift Phase 1c was added to catch. Record each spot-check (which criterion / challenge, which file/line you read) in the audit trail under "Operator spot-check."
 
 ### Why two consecutive rounds of LOW, not "reviewer goes quiet"
@@ -797,6 +831,9 @@ Even if the user gave merge permission earlier in the session, re-confirm before
 | Letting a recurring CRITICAL run rounds 2-5 without escalating | The 5-round safety valve exists for this. Stop, document the recurrence pattern, surface to user — don't loop indefinitely on the same bug. |
 | Treating MINOR/NIT as automatic ship-blockers | The exit gate accepts LOW findings as remaining risks. If a MINOR is actually critical, promote it in Phase 3a — don't change the gate. |
 | Re-running review with a stale local HEAD | Always `git fetch origin <branch>` between rounds and use the fetched SHA |
+| Re-invoking the reviewer before CI completes on the head SHA | Wait for CI first (`gh pr checks <number> --watch`). CI runs the full repo suite, lint, type-check, integration; the reviewer can't see what CI catches. Reviewing pre-CI risks missing what would otherwise be caught for free. |
+| Treating a one-off CI flake as a real finding | Re-run the failing check (`gh run rerun <run-id> --failed`) before counting it. Fails-once-passes-on-retry = flake. Fails-twice-in-a-row = finding regardless of "flakiness" reputation. |
+| Skipping CI check silently when the PR has no CI configured | Verify zero-checks explicitly via `gh pr checks` and record "no checks configured (verified)" in the audit trail. Silent skip looks identical to "forgot to check." |
 | Treating reviewer output as gospel | False positives are common. Always read the code referenced before fixing. |
 | Introducing a new error-handling style mid-PR during Phase 4b | Match the codebase's existing pattern. New patterns are their own PR. |
 | `gh pr merge` because the user said "merge" two messages ago about a different PR | Re-confirm merge intent for THIS PR specifically, in the immediate prior turn |
@@ -808,7 +845,7 @@ A PR is ready for human review when:
 - The adversarial review found no remaining real bugs (or only documented accepted residue)
 - All confirmed bugs have fix commits with verification recorded in the audit trail
 - The audit trail (full spec OR compressed PR comment) lists every round, every bug found, every fix, every rejected finding, every accepted residual risk, and the defensive hardening applied
-- The CI on the PR branch is green (or the failures are explicitly documented and unrelated to the fix scope)
+- **CI is green on the current head SHA** (verified via `gh pr checks <number>`), OR the PR has no checks configured and that's been verified and recorded, OR remaining CI failures are explicitly documented as unrelated to the fix scope AND the user has been informed. Never declare ready-for-human while CI is red, pending, or unverified.
 - The user has been told the PR is ready and the merge decision has been handed back to them
 
 Never make the merge decision yourself.
