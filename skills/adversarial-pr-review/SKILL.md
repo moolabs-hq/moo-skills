@@ -90,11 +90,12 @@ For each PR:
   Phase 1:    Understand the PR
     1a:        Read the diff mechanically
     1b:        Read the changed files in context (not just the diff)
-    Phase 1.5: Detect stack and conventions (parallel; feeds 1c-1f)
+    Phase 1.5: Detect stack and conventions (parallel; feeds 1c-1g)
     1c:        Articulate original intention vs new intention
     1d:        Design concrete success criteria (3-7 observable behaviors)
     1e:        Design codebase-specific challenges (3-5 architecture-specific scenarios)
-    1f:        Risk map (informed by 1c-1e + Phase 1.5)
+    1f:        Two-round adversarial self-review of 1c/1d/1e outputs
+    1g:        Risk map (informed by 1c-1e + 1f + Phase 1.5)
   Phase 2:    Adversarial review — two passes:
     Pass 1:  Verify the PR-specific contract (criteria + challenges)
     Pass 2:  Apply generic lenses
@@ -158,7 +159,8 @@ None  — OR  — PR #B depends on PR #A because <reason>.
 - New intention (Phase 1c — what the system should do after, and why)
 - Success criteria (Phase 1d — 3-7 concrete observable behaviors that must hold)
 - Codebase-specific challenges (Phase 1e — 3-5 architecture-specific scenarios the PR must survive)
-- Risk map by subsystem (Phase 1f — informed by criteria, challenges, and the codebase profile)
+- Phase 1f self-review rounds: round 1 edits + round 2 edits (one line each per category) + suspicions deferred to Phase 2
+- Risk map by subsystem (Phase 1g — informed by the now-refined criteria, challenges, and the codebase profile)
 - Verification commands used (chosen from what the codebase profile reveals)
 - Review rounds: 1, 2, 3 with finding counts (split by Pass 1 / Pass 2)
 - Success criteria verification per round: each criterion → PASS | FAIL | not-yet-verified
@@ -185,6 +187,7 @@ Skip the standalone doc. Instead post one compact summary as a PR comment (`gh p
 - Original → new intention: <one line each — what the system did vs what it should do>
 - Success criteria: 1. <…>  2. <…>  3. <…>   (mark each PASS / FAIL after the round)
 - Codebase-specific challenges: 1. <…>  2. <…>  3. <…>  (mark each handled / unhandled)
+- Phase 1f self-review: r1 edits <intention X / criterion Y added / challenge Z sharpened>; r2 edits <…>
 - Risk map: <2-3 bullets, file-specific>
 - Review rounds: 1, finding count: N (Pass 1: X, Pass 2: Y)
 - Bugs fixed: <SHA short — one-line fix description (cite criterion/challenge if applicable)>
@@ -202,7 +205,7 @@ The contract is: **the human can always reconstruct what you did from text you w
 
 Don't review what you don't understand. A reviewer that hasn't built a mental model of the changed code will only catch surface bugs — typos, missing nil checks, obvious lint issues. The deeper bugs (silent behavioral regressions, intention drift, broken invariants) require understanding what the system *did* before and what it's supposed to *do* after.
 
-Phase 1 has six sub-steps. Do 1a and 1b first (mechanical diff + reading changed files), then run **Phase 1.5 (Detect stack and conventions)** in parallel before continuing — Phase 1.5's outputs (codebase profile, architectural choices) feed 1c-1f. Don't skip ahead to the reviewer.
+Phase 1 has seven sub-steps. Do 1a and 1b first (mechanical diff + reading changed files), then run **Phase 1.5 (Detect stack and conventions)** in parallel before continuing — Phase 1.5's outputs (codebase profile, architectural choices) feed 1c-1g. Then write the creative outputs (1c intentions, 1d criteria, 1e challenges), self-review them in two rounds (1f), and finally build the risk map (1g) from the now-refined inputs. Don't skip ahead to the reviewer.
 
 ### 1a. Read the diff mechanically
 
@@ -330,13 +333,91 @@ Codebase-specific challenges for PR #367 (namespace middleware):
 
 These challenges become explicit lenses in the Phase 2 reviewer brief — the reviewer is told to specifically verify each one against the diff.
 
-### 1f. Risk map
+### 1f. Two-round adversarial self-review of 1c, 1d, 1e
 
-Build the risk map AFTER you have the intentions, success criteria, and challenges — the risks are mostly "ways success criterion N could be violated" or "scenarios from the challenge list that the diff doesn't handle." Write each subsystem and its specific risks into the spec under "Risk map by subsystem." Don't generalize — name the function or file.
+The outputs of 1c (intentions), 1d (success criteria), and 1e (challenges) drive **everything downstream** — Phase 2's reviewer brief, Phase 5's exit gate, even Phase 4a's sibling search. If any of these three are sloppy, the entire loop is misdirected: the reviewer hunts for the wrong bugs, the exit gate validates the wrong contract, sibling search misses the real pattern.
+
+The fix is the same one Phase 5 applies to the main review: **don't trust the first pass; iterate twice.** Self-review your 1c/1d/1e outputs before locking them in and invoking the external reviewer.
+
+**How this differs from Phase 5's operator spot-check:** Phase 1f asks "are these criteria/challenges themselves any good?" (criterion *quality* — are they sharp, complete, codebase-specific). Phase 5's spot-check asks "did the reviewer correctly verify these criteria against the diff?" (reviewer *hallucination* — did it return a false PASS). Same operator, different questions, both required. 1f happens once (two rounds) per PR, before Phase 2. The spot-check happens every round after Phase 2.
+
+**Why exactly two rounds:**
+
+- **Round 1** catches obvious slop — vague phrasing, missing coverage, scope creep, generic-sounding challenges. These are the issues the operator can see on a deliberate re-read.
+- **Round 2** catches what the round-1 fixes themselves introduced or missed. The operator is now thinking about the criteria/challenges fresh, with the round-1 edits as anchor — and notices things the first pass was too close to see.
+- **Why not three?** Same diminishing-returns logic Phase 5 uses on the main loop. Past round 2, new findings get rare and the marginal review cost dominates. Let Phase 2's external reviewer catch the rest.
+- **Why not one?** One round leaves blind spots the operator didn't have distance from. Round 2 is where you'd catch "wait, I said three criteria but they're all positive-path — I missed the error contract entirely."
+
+Stop after round 2 even if you suspect more — log the suspicion in the audit trail and proceed to Phase 2.
+
+#### How to run a round
+
+Treat your own 1c/1d/1e outputs as a finding-source. Walk each item against the checklist below; where a check fails, **edit the original 1c/1d/1e output in place** (don't add "addendum" sections — the audit trail should show the refined version, with the round's edits summarized below).
+
+##### Self-review checklist for intentions (1c)
+
+- [ ] Does the stated **new intention** match what the diff actually does? Re-read both. If the intention says "extract X from header" but the diff also adds logging, retries, or a metric, the intention is incomplete.
+- [ ] Does the stated **original intention** match what the code did BEFORE this PR? Check the pre-diff version via `git show <base>:<file>`. If the original is wrong, Phase 2's contract-drift comparison will miss the real change.
+- [ ] Is the **contract change explicit**? It should read like "used to do X with property P; now does Y with property Q." If the diff has multiple unrelated changes, write multiple intention pairs — one per cohesive change.
+- [ ] Are there **hidden intentions** the PR description didn't mention? Renames, default-value changes, removed conditionals, refactors-in-disguise. Silent contract changes are the most dangerous kind — add them if found.
+
+##### Self-review checklist for success criteria (1d)
+
+- [ ] Each criterion: **concrete, observable, failable, intention-tied?** Rewrite any vague ones. "X works correctly" is not a criterion; "the response shape matches the OpenAPI spec for tenant-scoped routes" is.
+- [ ] **Coverage of both contracts**: at least one criterion confirms "old contract still holds for unchanged callers" AND at least one confirms "new contract behaves as specified"? Missing either side is a common pattern.
+- [ ] **Boundary coverage**: at least one criterion covers each of (error path / missing input / empty collection / boundary value / concurrent access) that's relevant to this PR? Add for any relevant gap.
+- [ ] **Test-gap honesty**: for each criterion, does a test today prove it? If not — is one planned in this PR, or are you accepting it as not-testable? Mark explicitly; "not-testable" should be rare and justified.
+- [ ] **Scope discipline**: any criterion exceeds the PR's mandate? Strip it — those are follow-ups, not gates.
+- [ ] **Volume sanity**: 3-7 criteria. Fewer than 3 → you've missed something; more than 7 → the PR is doing too many things, consider proposing a split.
+
+##### Self-review checklist for challenges (1e)
+
+- [ ] Each challenge: **tied to a specific architectural property of THIS codebase**, named explicitly? "What if input is null" is generic; "given the multi-tenant row-level scoping, does the new write path's `INSERT ... ON CONFLICT` clause still scope by tenant_id" is codebase-specific.
+- [ ] Each challenge: **includes the observable failure mode**, not just "what if X"? "What if the consumer fails after partial processing" is incomplete; "...does the partial state stay visible to readers via the read replica until the retry succeeds?" is complete.
+- [ ] **Coverage breadth**: do challenges cover at least three of (concurrency, deployment topology, data flow, error paths, lifecycle/upgrade)? If all challenges are about one architectural axis, you're missing seams.
+- [ ] **Substitution test**: would any challenge make equal sense in a totally different codebase? If yes, sharpen it with a property name from THIS codebase's design.
+- [ ] **Volume sanity**: 3-5 challenges. 1-2 → you haven't engaged with the architecture; 6+ → you're likely re-stating generic lenses (Phase 2 Pass 2's job, not this one's).
+
+#### Record the self-review
+
+After each round, append a one-line note to the audit trail. Show what changed; don't re-paste the full criteria/challenges (the now-refined version IS the criteria/challenges — the round notes are the diff).
+
+```
+## Phase 1f self-review — round 1
+- Intentions: 2 edits (added rate-limit reset to new intention; corrected
+  pre-diff behavior of OAuth callback)
+- Success criteria: 1 added (boundary case for missing OM-Namespace on
+  non-namespaced route), 1 rewritten for testability
+- Challenges: 2 sharpened (multi-tenant scoping, schema-migration window)
+- Re-read of diff after edits: confirmed alignment.
+
+## Phase 1f self-review — round 2
+- Intentions: no edits.
+- Success criteria: 1 added (response-shape stability for streaming
+  connections — caught by re-reading 1e's streaming challenge)
+- Challenges: 1 added (background reconciler — discovered while checking
+  the new criterion)
+- Re-read of diff after edits: confirmed alignment.
+- Suspicions deferred to Phase 2: <any further nagging concerns — log them
+  for the external reviewer to validate>
+```
+
+Two outcomes, two follow-ups:
+
+- **Round 2 found zero edits across all three categories.** Proceed to Phase 2 as normal — your 1c/1d/1e set is stable.
+- **Round 2 found substantial new items** (more than 1 edit in any category). Proceed to Phase 2 anyway (no round 3), AND record this in two places:
+  - audit trail: log the round-2 finding count
+  - Phase 2 reviewer brief: add a one-line note — "Self-review was still finding issues at round 2 — apply extra scrutiny on Pass 1." This tells the external reviewer that the PR-specific contract may still have gaps the operator didn't catch, so it should hunt harder for contract drift and criterion violations.
+
+Either way, don't run round 3 — past round 2, new findings get rare and the marginal review cost dominates. Let Phase 2 catch the rest.
+
+### 1g. Risk map
+
+Build the risk map AFTER 1c-1e are self-reviewed (1f) — the risks are mostly "ways success criterion N could be violated" or "scenarios from the challenge list that the diff doesn't handle." Building the risk map from unreviewed inputs amplifies any errors in them, which is why 1g comes last. Write each subsystem and its specific risks into the spec under "Risk map by subsystem." Don't generalize — name the function or file.
 
 ## Phase 1.5: Detect stack and conventions
 
-Conceptually this is a sub-step of Phase 1 that runs between 1b and 1c — kept as its own top-level section because it's substantial and reusable across PRs in the same repo. Phase 1.5's outputs (stack, test commands, conventions, architectural choices) feed Phase 1c-1f and Phase 2's reviewer brief. Read these in parallel and pull what you find into the spec's "Codebase profile" section:
+Conceptually this is a sub-step of Phase 1 that runs between 1b and 1c — kept as its own top-level section because it's substantial and reusable across PRs in the same repo. Phase 1.5's outputs (stack, test commands, conventions, architectural choices) feed Phase 1c-1g and Phase 2's reviewer brief. Read these in parallel and pull what you find into the spec's "Codebase profile" section:
 
 ### What to look at
 
@@ -437,6 +518,12 @@ Codebase profile (from Phase 1.5):
 - Cross-deployment: <if any>
 - Documented anti-patterns from CLAUDE.md / CONTRIBUTING.md: <list>
 - CI quirks (env vars only set in CI, install steps that differ from dev): <list>
+
+Operator signal (include ONLY if Phase 1f round 2 still found substantial edits —
+otherwise omit):
+- "Self-review was still finding issues at round 2 — apply extra scrutiny on
+   Pass 1. The PR-specific contract may still have gaps the operator didn't
+   catch; hunt aggressively for contract drift and unmet criteria."
 
 Two passes — do both, do not skip pass 2:
 
@@ -669,6 +756,8 @@ Even if the user gave merge permission earlier in the session, re-confirm before
 | Firing this skill when the user is fixing actively-failing tests | That's debugging. Read the failure, fix the bug. Use this skill for *latent* bugs, not active ones. |
 | Skipping this skill on a "small" PR because manual scan feels enough | The MUST-USE rule applies regardless of PR size. Small PRs get compressed Phase 0, not skipped loops. The bugs you'll miss are exactly the small-looking ones. |
 | Re-firing this skill mid-loop when the user asks a follow-up question | Idempotency forbids it. If the audit trail exists for this PR/batch, you're already inside the loop — continue at the appropriate phase, don't restart Phase 0. |
+| Skipping Phase 1f self-review because intentions/criteria "felt right" first try | The whole point of 1f is that "felt right" is what ships bad criteria. Run two rounds even when the first pass looks clean — the round-2 finding is often the highest-value one. |
+| Running more than two rounds of self-review chasing perfection | Past round 2, new findings get rare and the marginal review cost dominates. Log remaining suspicions for Phase 2 and move on. |
 | Skipping Phase 1c (intentions) because "the PR description is enough" | The PR title is what the author *said* they did; the original/new intention is what the *code* actually does and is now supposed to do. Skipping this misses intention-drift bugs entirely. |
 | Vague success criteria like "PR is correct" or "tests pass" | Criteria must be observable and failable. Rewrite until each one points at a specific behavior you could verify. |
 | Treating reviewer "no findings" as success while a criterion is still unverified | The reviewer can be silent and still wrong about your PR-specific contract. The success criteria are the gate, not reviewer silence. |
