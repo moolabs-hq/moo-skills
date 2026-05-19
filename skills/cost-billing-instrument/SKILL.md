@@ -36,6 +36,17 @@ Wire the SDK calls into services/api
 Generate the PR for our pilot customer's instrumentation
 ```
 
+## Operating principles (apply to EVERY codemod decision)
+
+See `cost-billing-shared/operating-principles.md`. Codemod-specific manifestations:
+
+1. **NEVER assume** — the framework adapter, the request-context source, the idempotency anchor. Confirm via the engineer-stage signed doc (`04-final.signed.yaml`), not by guessing from imports.
+2. **When in doubt, ASK** if the human is present at codemod time; if running headless (CI dry-run), emit a CRITICAL severity finding in the PR description rather than silent-default.
+3. **Per-pattern decisions** — sibling-pair vs usage-only vs cost-only — are determined by the engineer's signed doc, NOT by codemod inference. If the signed doc didn't decide, REFUSE to emit that insert; surface in the PR's "TODO from codemod" section.
+4. **PII / PHI guard** — never strip a field silently if it matches a blocklist regex. Always emit a CRITICAL adversarial-review finding so the customer's reviewer SEES + decides.
+5. **Brownfield vs greenfield** — confirmed by the engineer's `telemetry-stack.yaml`. If THAT file says "OTel present" but the customer's actual code doesn't import OTel, that's drift — FAIL, don't silently switch modes.
+6. **Idempotency anchor missing** for an entry — NEVER fabricate one from the handler name. Emit `# REVIEW: codemod could not derive an idempotency anchor — engineer must supply` and surface as MEDIUM finding.
+
 ## Read first (shared/)
 
 - `sdk-surface-reference.md` — **load this every time.** It carries the verified call shapes (`client.meter.events.ingest_events`, cost-via-OTel pattern, what NOT to call).

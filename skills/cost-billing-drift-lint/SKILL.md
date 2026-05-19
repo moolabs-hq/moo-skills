@@ -33,6 +33,19 @@ Run Skill 3 on the customer's main branch
 Is our SDK coverage still complete after this refactor?
 ```
 
+## Operating principles (apply EVERY drift-lint pass — especially in CI)
+
+See `cost-billing-shared/operating-principles.md`. Drift-lint runs UNATTENDED (CI), so the rule is **FAIL LOUDLY, never silent-default**:
+
+1. **NEVER assume** an inventory entry's deletion was intentional. A missing entry could be (a) the feature was deprecated, (b) the engineer renamed but forgot to `workflow_id`-link, or (c) the customer wants the inventory preserved for audit. Always emit a finding; let the integrator decide.
+2. **When in doubt, FAIL the PR**. Drift-lint is the LAST line of defense between the customer's main branch and undetected coverage gaps. False-positive PR-block is recoverable (re-run the chain to re-confirm); false-negative is silent revenue leakage that compounds for months.
+3. **Severity rubric is strict, not gradient**:
+   - **CRITICAL** (block PR) — schema drift on an active billable workflow (`event_type` changed, `unit` changed, `derivation` references a field that no longer exists).
+   - **HIGH** (warn loudly) — workflow_id deleted; rename without history link; new endpoint matches billing signal but has no SDK call.
+   - **MEDIUM** (annotate) — confidence drift (an entry's confidence dropped from HIGH to MEDIUM since last scan, e.g., due to a refactor that moved the call site).
+   - **LOW** (informational) — pure file/line move (workflow_id stable, code moved). Auto-suggested update only.
+4. **Override policy via `.moolabs/drift-policy.yaml`** is OK — customer's CI is their domain. But the SUITE defaults must be conservative (block on CRITICAL, warn on HIGH).
+
 ## Read first (shared/)
 
 - `anchor-taxonomy.md` — what entries / events / linkage are; workflow_id matching strategy.

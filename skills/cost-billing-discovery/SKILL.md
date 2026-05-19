@@ -45,6 +45,20 @@ Run Skill A on this repo
 Build the chargeability map for our pilot customer
 ```
 
+## Operating principles (apply to EVERY decision in this skill)
+
+See `cost-billing-shared/operating-principles.md` for the full rules; the short version:
+
+1. **NEVER assume.** Every default surfaces as a proposal (interactive) or as a confidence flag on the inventory entry (semi-attended).
+2. **When in doubt, ASK** if the human is present; **FAIL LOUDLY** if running unattended (CI). Never silent-default past ambiguity.
+3. **Save state after every artifact emission** (`.moolabs/inventory/*.draft.yaml`) so `--resume` picks up where the session left off.
+
+Discovery-specific manifestations:
+- **Catalog miss** (vendor SDK call detected by AST but not in provider catalog) → surface as **cell ④** finding in `reviews/cell-4-unclassifiable.yaml`. NEVER silently skip.
+- **Refund-test borderline** (terminal-event confidence 0.45-0.55) → surface in `usage-events-inventory.yaml` with `confidence: medium` + a one-line question for the team-PM at review time. NEVER auto-promote.
+- **`file:line` ambiguity** (multiple matches for a vendor call) → emit ALL candidates with `confidence: low`; engineer picks during Stage 3 review. NEVER pick one silently.
+- **Multi-language service** (Python AND TypeScript in same dir) → run independent scans, emit per-language inventories, never merge silently. Engineer reconciles in Stage 3.
+
 ## Refuse-to-run preconditions (customer-context)
 
 The suite is customer-portable; nothing about the customer's product, pricing, repo shape, or terminology is assumed. Before running, **require** these files at `<repo>/.moolabs/customer-context/`:

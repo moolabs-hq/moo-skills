@@ -35,6 +35,16 @@ Audit tag propagation on the customer's AWS account
 Run Skill B for the pilot customer
 ```
 
+## Operating principles (apply to EVERY decision in this skill)
+
+See `cost-billing-shared/operating-principles.md`. Key cloud-bill manifestations:
+
+1. **NEVER assume the customer's clouds.** Cross-reference code imports (`boto3`, `google-cloud-*`, `azure-*`) with EXPLICITLY confirmed cloud accounts. If finance's stage 1 said "AWS only" but the code imports `azure-storage-blob`, ASK before recommending an Azure export.
+2. **When in doubt, ASK.** Untagged spend bucket size: ALWAYS ask "is this real spend, an artifact of incomplete tag propagation, or something else?" Never silently absorb into "cell ③ — unattributable".
+3. **Region setup** — finance set the region(s) in Stage 1. If the cloud account's actual default region differs from finance's commitment, FLAG IT (don't reconcile silently).
+4. **Compliance regimes (from finance)** drive export gotchas — HIPAA → no PHI in export tags → CRM tag must be redacted. Never proceed past a compliance regime requirement without explicit acknowledgement.
+5. **24-48h floor** — communicate clearly; never optimistically "skip the wait" by using stale demo data.
+
 ## Read first (shared/)
 
 - `anchor-taxonomy.md` — what "cell ③" means, attribution-key cascade, FOCUS half-open interval.

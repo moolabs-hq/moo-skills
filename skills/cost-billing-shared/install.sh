@@ -565,6 +565,7 @@ package_skills() {
   echo ""
 
   local shared_handoff="$SUITE_SRC_DIR/cost-billing-shared/chain-handoff.md"
+  local shared_principles="$SUITE_SRC_DIR/cost-billing-shared/operating-principles.md"
   local pkg_count=0
 
   for skill in "${SUITE_SKILLS[@]}"; do
@@ -588,11 +589,16 @@ package_skills() {
     mkdir -p "$stage"
     cp -R "$src"/. "$stage"/
 
-    # Bundle chain-handoff.md into chain-stage skills (so the upload is self-contained).
+    # Bundle shared docs into every skill's references/ so the upload is self-contained
+    # (cross-skill `../cost-billing-shared/*.md` references would break in the cloud sandbox).
+    mkdir -p "$stage/references"
+    if [[ -f "$shared_principles" ]]; then
+      cp "$shared_principles" "$stage/references/operating-principles.md"
+    fi
+    # chain-handoff.md only into the 4 chain-stage skills (the others don't reference it).
     case "$skill" in
       cost-billing-bootstrap-finance|cost-billing-bootstrap-cpo|cost-billing-bootstrap-team-product|cost-billing-bootstrap-team-engineer)
         if [[ -f "$shared_handoff" ]]; then
-          mkdir -p "$stage/references"
           cp "$shared_handoff" "$stage/references/chain-handoff.md"
         fi
         ;;
