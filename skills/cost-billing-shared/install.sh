@@ -17,6 +17,15 @@
 #   ./install.sh --no-prune                   # don't auto-remove stale cost-billing-* skills
 #                                             # (default: prune skills not in the persona's install list,
 #                                             # e.g. deprecated cost-billing-bootstrap or cost-billing-reconcile)
+#   ./install.sh --package                    # skip local install; produce .zip bundles
+#                                             # uploadable to Claude Desktop / web Projects
+#                                             # (Settings → Skills → drag-and-drop). Each .zip
+#                                             # is flat-rooted with SKILL.md at the root + any
+#                                             # scripts/references/assets folders. cost-billing-
+#                                             # shared/chain-handoff.md is bundled INTO each
+#                                             # chain-stage zip so the upload is self-contained.
+#   ./install.sh --package --persona finance  # only package the finance-stage zip(s)
+#   ./install.sh --package-dir <path>         # override default dist/ location
 #
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
@@ -127,6 +136,8 @@ SKIP_CODEGRAPH=0
 FORCE_CODEGRAPH_INGEST=0
 NO_BOOTSTRAP_CTA=0
 NO_PRUNE=0
+PACKAGE_MODE=0
+PACKAGE_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -139,6 +150,8 @@ while [[ $# -gt 0 ]]; do
     --force-codegraph-ingest) FORCE_CODEGRAPH_INGEST=1; shift ;;
     --no-bootstrap-cta) NO_BOOTSTRAP_CTA=1; shift ;;
     --no-prune) NO_PRUNE=1; shift ;;
+    --package) PACKAGE_MODE=1; shift ;;
+    --package-dir) PACKAGE_DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -505,6 +518,11 @@ if [[ -z "$DEST_DIR" ]]; then
 fi
 
 if [[ $UNINSTALL -eq 0 ]]; then
+  # For --package, default to 'all' if no persona specified (typical: package everything for distribution).
+  if [[ $PACKAGE_MODE -eq 1 && -z "$PERSONA" ]]; then
+    PERSONA="all"
+    echo "Note: --package defaulting to --persona all (override with --persona <name>)"
+  fi
   prompt_persona
   prompt_repo
 fi
@@ -521,6 +539,177 @@ echo "Persona      : ${PERSONA:-N/A (uninstall removes all)}"
 echo "Customer repo: ${REPO:-N/A}"
 echo "Skills       : ${#SUITE_SKILLS[@]} (${SUITE_SKILLS[*]})"
 echo ""
+
+# ──────────────────────────────────────────────────────────────────────
+# --package mode: produce .zip bundles + drag-and-drop instructions.
+# Skips local install entirely; just emits artifacts in $PACKAGE_DIR.
+# ──────────────────────────────────────────────────────────────────────
+
+package_skills() {
+  if ! command -v zip >/dev/null 2>&1; then
+    echo "ERROR: 'zip' not on PATH. Install with: brew install zip / apt install zip" >&2
+    exit 1
+  fi
+
+  local dist="${PACKAGE_DIR:-${SUITE_SRC_DIR}/../dist/cost-billing-skills}"
+  dist="$(mkdir -p "$dist" && cd "$dist" && pwd)"     # normalize absolute path
+  rm -f "$dist"/*.zip
+  rm -rf "$dist"/_staging
+  mkdir -p "$dist/_staging"
+
+  echo ""
+  echo "─── Packaging skills for Claude Desktop / web upload ──────────────"
+  echo "Source : $SUITE_SRC_DIR"
+  echo "Dist   : $dist"
+  echo "Persona: $PERSONA"
+  echo ""
+
+  local shared_handoff="$SUITE_SRC_DIR/cost-billing-shared/chain-handoff.md"
+  local pkg_count=0
+
+  for skill in "${SUITE_SKILLS[@]}"; do
+    # cost-billing-shared isn't a slash-invocable skill — its contents get bundled
+    # INTO each chain-stage zip below as references/chain-handoff.md.
+    if [[ "$skill" == "cost-billing-shared" ]]; then continue; fi
+
+    local src="$SUITE_SRC_DIR/$skill"
+    if [[ ! -d "$src" ]]; then
+      echo "  SKIP $skill (not found)" >&2
+      continue
+    fi
+    if [[ ! -f "$src/SKILL.md" ]]; then
+      echo "  SKIP $skill (no SKILL.md)" >&2
+      continue
+    fi
+
+    # Stage the skill in a temp dir so we can bundle shared docs alongside it.
+    local stage="$dist/_staging/$skill"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    cp -R "$src"/. "$stage"/
+
+    # Bundle chain-handoff.md into chain-stage skills (so the upload is self-contained).
+    case "$skill" in
+      cost-billing-bootstrap-finance|cost-billing-bootstrap-cpo|cost-billing-bootstrap-team-product|cost-billing-bootstrap-team-engineer)
+        if [[ -f "$shared_handoff" ]]; then
+          mkdir -p "$stage/references"
+          cp "$shared_handoff" "$stage/references/chain-handoff.md"
+        fi
+        ;;
+    esac
+
+    # Zip with FLAT root (no top-level dir wrapper) — Claude's upload looks for SKILL.md
+    # at the root of the archive.
+    local zip_path="$dist/${skill}.zip"
+    ( cd "$stage" && zip -rq "$zip_path" . \
+        -x ".DS_Store" -x "*/.DS_Store" \
+        -x "__pycache__/*" -x "*/__pycache__/*" \
+        -x ".git/*" -x "*/.git/*" ) || {
+      echo "  FAILED to zip $skill" >&2
+      continue
+    }
+
+    local size; size=$(du -h "$zip_path" | awk '{print $1}')
+    local entries; entries=$(unzip -l "$zip_path" 2>/dev/null | tail -1 | awk '{print $2}')
+    printf "  packaged: %-50s  %s  (%s files)\n" "$(basename "$zip_path")" "$size" "$entries"
+    pkg_count=$((pkg_count + 1))
+  done
+
+  rm -rf "$dist/_staging"
+
+  echo ""
+  echo "✓ Packaged $pkg_count skills."
+  echo ""
+
+  print_upload_instructions "$dist"
+}
+
+print_upload_instructions() {
+  local dist="$1"
+  cat <<EOF
+═══════════════════════════════════════════════════════════════════
+ UPLOAD INSTRUCTIONS — Claude Desktop / claude.ai
+═══════════════════════════════════════════════════════════════════
+
+Each persona gets their OWN Claude Project. Within that project,
+the relevant chain-stage skill is uploaded. The signed YAML between
+stages is downloaded from one project and uploaded to the next as a
+project file attachment (this is the "email/Slack/Drive handoff"
+expressed in the Claude Projects UX).
+
+  ┌──────────────────── Finance / CFO ────────────────────────┐
+  │ Project: "Cost Billing — Finance"                          │
+  │   Settings → Skills → Upload skill                         │
+  │   Drop:  ${dist}/                                          │
+  │           cost-billing-bootstrap-finance.zip                │
+  │           cost-billing-adversarial-review.zip               │
+  │                                                             │
+  │   Run inside the project:                                   │
+  │     /cost-billing-bootstrap-finance                         │
+  │                                                             │
+  │   Output:  01-finance.signed.yaml (in project files)        │
+  │   Hand off: download + send to CPO via Slack/email/Drive    │
+  └─────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────── CPO ──────────────────────────────────┐
+  │ Project: "Cost Billing — CPO"                              │
+  │   Upload: cost-billing-bootstrap-cpo.zip                   │
+  │           cost-billing-adversarial-review.zip               │
+  │   Upload as file: 01-finance.signed.yaml (from CFO)        │
+  │                                                             │
+  │   Run:  /cost-billing-bootstrap-cpo                         │
+  │         --input-from 01-finance.signed.yaml                 │
+  │                                                             │
+  │   Output:  02-cpo.signed.yaml                               │
+  └─────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────── Team Product PM ──────────────────────┐
+  │ Project: "Cost Billing — Team Product"                     │
+  │   Upload: cost-billing-bootstrap-team-product.zip          │
+  │           cost-billing-adversarial-review.zip               │
+  │   Upload as files: 01-finance + 02-cpo signed YAMLs        │
+  │                                                             │
+  │   Run:  /cost-billing-bootstrap-team-product                │
+  │         --input-from 01-finance.signed.yaml                 │
+  │         --input-from 02-cpo.signed.yaml                     │
+  │                                                             │
+  │   Output:  03-team-product.signed.yaml                      │
+  └─────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────── IC Engineer ──────────────────────────┐
+  │ NOTE: engineer's downstream needs LOCAL filesystem +       │
+  │ codegraph + repo access. Claude Projects (cloud) cannot    │
+  │ provide that. Run the engineer stage + downstream skills   │
+  │ on Claude Code CLI, Cursor, Codex CLI, etc.                │
+  │                                                             │
+  │ Local install:                                              │
+  │   ./install.sh --persona engineering --repo /path/to/repo   │
+  └─────────────────────────────────────────────────────────────┘
+
+WHERE TO UPLOAD (Claude Desktop or claude.ai web):
+  1. Open the Project
+  2. Settings (gear icon) → "Skills" section
+  3. "Upload skill" button → drag-and-drop the .zip
+  4. Skill appears in the project's slash-command menu
+
+REQUIREMENTS Anthropic enforces on each upload:
+  - .md file must contain skill name + description as YAML frontmatter ✓
+  - .zip/.skill must contain SKILL.md at the root ✓
+  Both are satisfied by these bundles.
+
+CHATGPT DESKTOP:
+  ChatGPT Desktop does not (as of this writing) support the same skill-
+  upload UX. For ChatGPT, use the Local MCP server path (see
+  cost-billing-shared/desktop-app-guide.md) instead of these zips.
+═══════════════════════════════════════════════════════════════════
+EOF
+}
+
+# Dispatch BEFORE the local-install path so --package short-circuits early.
+if [[ $PACKAGE_MODE -eq 1 ]]; then
+  package_skills
+  exit 0
+fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[dry-run] would create: $DEST_DIR"
