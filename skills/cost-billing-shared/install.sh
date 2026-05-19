@@ -14,6 +14,9 @@
 #   ./install.sh --dry-run                    # show what would happen
 #   ./install.sh --uninstall                  # remove all skills
 #   ./install.sh --no-bootstrap-cta           # don't print the /cost-billing-bootstrap CTA
+#   ./install.sh --no-prune                   # don't auto-remove stale cost-billing-* skills
+#                                             # (default: prune skills not in the persona's install list,
+#                                             # e.g. deprecated cost-billing-bootstrap or cost-billing-reconcile)
 #
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
@@ -123,6 +126,7 @@ UNINSTALL=0
 SKIP_CODEGRAPH=0
 FORCE_CODEGRAPH_INGEST=0
 NO_BOOTSTRAP_CTA=0
+NO_PRUNE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -134,6 +138,7 @@ while [[ $# -gt 0 ]]; do
     --skip-codegraph) SKIP_CODEGRAPH=1; shift ;;
     --force-codegraph-ingest) FORCE_CODEGRAPH_INGEST=1; shift ;;
     --no-bootstrap-cta) NO_BOOTSTRAP_CTA=1; shift ;;
+    --no-prune) NO_PRUNE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -545,8 +550,35 @@ if [[ $UNINSTALL -eq 1 ]]; then
   exit 0
 fi
 
-# Copy skills
+# Auto-prune stale cost-billing-* skills NOT in this persona's install list.
+# Catches: deprecated v0.1-0.2 cost-billing-bootstrap; legacy cost-billing-reconcile;
+# anything from a prior persona install (e.g., user switched from 'all' to 'finance').
+# Opt out via --no-prune.
 mkdir -p "$DEST_DIR"
+if [[ $NO_PRUNE -eq 0 ]]; then
+  pruned_count=0
+  for existing in "$DEST_DIR"/cost-billing-*; do
+    [[ -d "$existing" ]] || continue
+    name="$(basename "$existing")"
+    in_list=0
+    for skill in "${SUITE_SKILLS[@]}"; do
+      if [[ "$name" == "$skill" ]]; then
+        in_list=1
+        break
+      fi
+    done
+    if [[ $in_list -eq 0 ]]; then
+      echo "  PRUNED stale: $name (not in '$PERSONA' install list)"
+      rm -rf "$existing"
+      pruned_count=$((pruned_count + 1))
+    fi
+  done
+  if [[ $pruned_count -gt 0 ]]; then
+    echo "  → pruned $pruned_count stale skill(s) before install"
+  fi
+fi
+
+# Copy skills
 for skill in "${SUITE_SKILLS[@]}"; do
   src="$SUITE_SRC_DIR/$skill"
   dest="$DEST_DIR/$skill"
@@ -581,18 +613,26 @@ echo ""
 echo "Slash-invocable skills installed for persona '$PERSONA':"
 for skill in "${SUITE_SKILLS[@]}"; do
   case "$skill" in
+    cost-billing-bootstrap-finance)
+      echo "  /cost-billing-bootstrap-finance        — Chain Stage 1 (CFO): pricing + compliance + tenancy" ;;
+    cost-billing-bootstrap-cpo)
+      echo "  /cost-billing-bootstrap-cpo            — Chain Stage 2 (CPO): products + features + terminology" ;;
+    cost-billing-bootstrap-team-product)
+      echo "  /cost-billing-bootstrap-team-product   — Chain Stage 3 (team-PM): per-feature unit + input map" ;;
+    cost-billing-bootstrap-team-engineer)
+      echo "  /cost-billing-bootstrap-team-engineer  — Chain Stage 4 (engineer): repo + telemetry + MCP + SDK key" ;;
     cost-billing-bootstrap)
-      echo "  /cost-billing-bootstrap           — first-run customer-context generator (RUN ME FIRST)" ;;
+      echo "  /cost-billing-bootstrap                — DEPRECATED (prints redirect to chain stages)" ;;
     cost-billing-discovery)
-      echo "  /cost-billing-discovery           — Skill A: scan repo, produce inventories" ;;
+      echo "  /cost-billing-discovery                — Skill A: scan repo, produce inventories (post-chain)" ;;
     cost-billing-cloud-bill)
-      echo "  /cost-billing-cloud-bill          — Skill B: wire AWS / GCP / Azure exports" ;;
+      echo "  /cost-billing-cloud-bill               — Skill B: wire AWS / GCP / Azure exports (post-chain)" ;;
     cost-billing-instrument)
-      echo "  /cost-billing-instrument          — Skill 2: codemod that wires SDK calls" ;;
+      echo "  /cost-billing-instrument               — Skill 2: codemod that wires SDK calls (post-chain)" ;;
     cost-billing-drift-lint)
-      echo "  /cost-billing-drift-lint          — Skill 3: CI drift detection" ;;
+      echo "  /cost-billing-drift-lint               — Skill 3: CI drift detection (post-chain)" ;;
     cost-billing-adversarial-review)
-      echo "  /cost-billing-adversarial-review  — Skill R: 5-phase quality gate" ;;
+      echo "  /cost-billing-adversarial-review       — Skill R: per-stage adversarial gate + holistic + post-codemod" ;;
     cost-billing-shared)
       : ;;  # shared dir; not slash-invocable, listed below
   esac
@@ -612,82 +652,152 @@ if [[ $NO_BOOTSTRAP_CTA -eq 0 ]]; then
   case "$PERSONA" in
     finance)
       cat <<'EOF'
-1. Open Claude Code (or your agent surface) in the customer repo:
-     cd <customer-repo>
-2. Run the bootstrap to generate customer-context:
-     /cost-billing-bootstrap
-   You'll be asked for:
-     - product reference doc (path/URL/paste)
-     - pricing page URL
-     - primary repo path
-     - telemetry stack
-     - terminology overrides
-3. Then start the CFO stage:
-     /cost-billing-discovery <customer-repo>
-   You'll fill cfo_metadata blocks in usage-events-inventory.yaml
-   (fair-usage values, billed units, projected revenue).
+You're Stage 1 of 4 in the chain.
 
-After your stage, PM reviews; if PM finds issues, you'll get a Stage 2b cycle.
+1. Open Claude Code (or your agent surface):
+     /cost-billing-bootstrap-finance
+
+2. You'll be asked ~12 questions, ONE AT A TIME:
+     - Pricing model TYPE + sub-aspects
+     - Pricing source of truth
+     - Billable units (in your own words)
+     - Fair-usage thresholds + overages + bundling
+     - Per-customer custom pricing
+     - Compliance regimes (SOC2/HIPAA/GDPR/FedRAMP)
+     - PII / PHI field blocklists
+     - Region(s), environments, multi-tenant shape
+
+3. AI synthesizes a draft, Skill R reviews adversarially, you read R's
+   findings + sign off.
+
+4. Skill writes .moolabs/chain/01-finance.signed.yaml and prints
+   instructions to email/Slack/Drive it to your CPO.
 EOF
       ;;
-    product)
+    product|cpo)
       cat <<'EOF'
-1. Open Claude Code (or your agent surface) in the customer repo:
-     cd <customer-repo>
-2. Run the bootstrap to generate customer-context:
-     /cost-billing-bootstrap
-3. Wait for CFO Stage 1 to be signed off.
-4. Then your stage:
-     /cost-billing-discovery <customer-repo>
-   You'll:
-     - pick billable units per output
-     - build output-input-map.yaml (the bill of materials)
-     - flag CFO reopens if a proposed unit can't be supported
+You're Stage 2 of 4 in the chain.
 
-You're the apex of two review loops:
-  - CFO ⇄ PM (Stage 2b, hard cap 3 cycles)
-  - Engineer ⇄ PM (Stage 3b, uncapped — code reality wins)
+PRECONDITION: you should have received 01-finance.signed.yaml from
+finance/CFO (via email, Slack, Drive, etc.). Save it locally.
+
+1. Run:
+     /cost-billing-bootstrap-cpo --input-from /path/to/01-finance.signed.yaml
+
+2. AI loads finance's commitments + asks YOU 7-9 questions, ONE AT A TIME:
+     - Company + product/vertical names (multi-product split if any)
+     - Product doc sources (folders, URLs, MCPs — multiple OK)
+     - Top features customer-enumerated
+     - Internal-only callouts
+     - End-user term, billable-output term, synonyms, unique concepts
+
+3. AI synthesizes draft, Skill R reviews (catches hallucinated features +
+   contradictions with finance), you sign off.
+
+4. Skill writes .moolabs/chain/02-cpo.signed.yaml. Email/Slack/Drive to
+   your team-product PM.
+EOF
+      ;;
+    team-product)
+      cat <<'EOF'
+You're Stage 3 of 4 in the chain.
+
+PRECONDITION: you should have received BOTH 01-finance.signed.yaml AND
+02-cpo.signed.yaml from upstream personas.
+
+1. Run:
+     /cost-billing-bootstrap-team-product \
+         --input-from /path/to/01-finance.signed.yaml \
+         --input-from /path/to/02-cpo.signed.yaml
+
+2. AI walks per-CPO-feature, ONE AT A TIME:
+     - Confirm/refine CPO's top-features list
+     - Per feature: which finance billable unit does this map to?
+     - Per feature: conceptual input map (which vendor calls feed it)
+     - Event_type naming convention + exact strings
+     - Per-feature synonyms, refund-test pattern, cross-feature trace
+
+3. AI synthesizes draft, Skill R reviews (catches per-feature unit drift
+   vs finance, double-counted inputs, event_type collisions), you sign off.
+
+4. Skill writes .moolabs/chain/03-team-product.signed.yaml. Send to the
+   team engineer.
 EOF
       ;;
     engineering)
       cat <<'EOF'
-1. Open Claude Code (or your agent surface) in the customer repo:
-     cd <customer-repo>
-2. Run the bootstrap to generate customer-context:
-     /cost-billing-bootstrap
-3. (If you skipped --repo earlier, run codegraph manually now:)
-     cd <customer-repo> && codegraph init -i
-4. Wait for CFO Stage 1 + PM Stage 2 + Stage 2b cycle to be signed off.
-5. Then your stage:
-     /cost-billing-discovery <customer-repo>
-   You'll verify file:line, framework adapters, idempotency anchors,
-   and reject false positives.
-6. After all three signoffs + holistic adversarial review:
-     /cost-billing-instrument <customer-repo>
-   This is the codemod that wires the SDK calls into customer code.
-7. Add CI drift-lint (one-time):
-     Copy cost-billing-drift-lint/assets/github-action.yml to .github/workflows/
+You're Stage 4 of 4 — the FINAL stage in the chain.
 
-CodeGraph is installed and ingested — /cost-billing-discovery and drift-lint
-will use it for higher-fidelity code-graph queries.
+PRECONDITION: you should have all three upstream signed docs:
+  01-finance.signed.yaml, 02-cpo.signed.yaml, 03-team-product.signed.yaml
+
+1. (If you skipped --repo at install) run codegraph manually:
+     cd <customer-repo> && codegraph init -i
+
+2. Run:
+     /cost-billing-bootstrap-team-engineer \
+         --input-from /path/to/01-finance.signed.yaml \
+         --input-from /path/to/02-cpo.signed.yaml \
+         --input-from /path/to/03-team-product.signed.yaml \
+         --repo /path/to/customer/repo
+
+3. AI walks technical surface, ONE AT A TIME:
+     - Repo paths, multi-repo shape, sub-services
+     - Build/test commands, branch strategy
+     - Primary tracer, secondary instrumentation, request-context pattern
+     - Attribute prefix collisions
+     - Agent surface, active LLM, MCP inventory + selection + restrictions
+     - SDK key location + read pattern
+   (Region/env/tenancy come from finance — confirm technical source only.)
+
+4. AI synthesizes draft, Skill R reviews, you sign off. Skill generates
+   the consolidated customer-context/ that downstream skills read.
+
+5. AFTER your stage signs off, the downstream pipeline unblocks:
+     /cost-billing-discovery <repo>                  # 3 inventories
+     /cost-billing-cloud-bill --cloud aws|gcp|azure   # if wiring cloud
+     /cost-billing-adversarial-review --phase holistic-pre-codemod
+     /cost-billing-instrument <repo>                  # codemod
+     /cost-billing-adversarial-review --phase post-codemod
+     # CI: add cost-billing-drift-lint/assets/github-action.yml
 EOF
       ;;
     all)
       cat <<'EOF'
-You're set up as an integrator — all skills installed, CodeGraph ingested.
+You're a solo founder / integrator — all 4 chain stages on this machine.
 
-Recommended flow:
-  1. /cost-billing-bootstrap        — generate customer-context
-  2. /cost-billing-cloud-bill       — wire cloud exports (24-48h floor begins)
-  3. /cost-billing-discovery        — produce inventories
-     [CFO Stage 1 → PM Stage 2 → CFO ⇄ PM Stage 2b → Engineer Stage 3 → Engineer ⇄ PM Stage 3b]
-  4. /cost-billing-adversarial-review --phase holistic-pre-codemod
-  5. /cost-billing-instrument       — run the codemod
-  6. /cost-billing-adversarial-review --phase post-codemod
-  7. Add /cost-billing-drift-lint to CI
+Run the chain in order. Each stage's output becomes the next stage's input.
 
-(Skill C — the attribution-validation harness — is Moolabs-internal infrastructure
-and is NOT part of this customer-portable suite.)
+  1. /cost-billing-bootstrap-finance
+     → writes .moolabs/chain/01-finance.signed.yaml
+
+  2. /cost-billing-bootstrap-cpo \
+       --input-from .moolabs/chain/01-finance.signed.yaml
+     → writes .moolabs/chain/02-cpo.signed.yaml
+
+  3. /cost-billing-bootstrap-team-product \
+       --input-from .moolabs/chain/01-finance.signed.yaml \
+       --input-from .moolabs/chain/02-cpo.signed.yaml
+     → writes .moolabs/chain/03-team-product.signed.yaml
+
+  4. /cost-billing-bootstrap-team-engineer \
+       --input-from .moolabs/chain/01-finance.signed.yaml \
+       --input-from .moolabs/chain/02-cpo.signed.yaml \
+       --input-from .moolabs/chain/03-team-product.signed.yaml \
+       --repo /path/to/customer/repo
+     → writes .moolabs/chain/04-final.signed.yaml
+       AND consolidated .moolabs/customer-context/
+
+POST-CHAIN (downstream pipeline):
+  5. /cost-billing-cloud-bill --cloud aws|gcp|azure   (if cloud-bill needed)
+  6. /cost-billing-discovery <repo>                    (produce inventories)
+  7. /cost-billing-adversarial-review --phase holistic-pre-codemod
+  8. /cost-billing-instrument <repo>                   (codemod)
+  9. /cost-billing-adversarial-review --phase post-codemod
+ 10. Wire /cost-billing-drift-lint to CI
+
+(Skill C — attribution validation harness — is Moolabs-internal and NOT
+in this customer-portable suite.)
 EOF
       ;;
   esac
