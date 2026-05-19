@@ -30,30 +30,49 @@ set -euo pipefail
 # cost-billing-shared is required by every persona (loaded by the other skills).
 # cost-billing-reconcile is NOT in this suite — it's Moolabs-engineering-internal infrastructure tracked separately.
 
+# Per-persona skill subsets — the bootstrap is SILOED in v0.3.0 (one persona per machine).
+# Each persona installs ONLY their stage's bootstrap, plus the adversarial-review skill
+# (which fires inside their stage's draft-review phase), plus the shared docs.
+# The engineer persona additionally installs discovery / cloud-bill / instrument /
+# drift-lint since those run post-chain on the engineer's machine.
+
 SKILLS_FINANCE=(
-  cost-billing-bootstrap         # generates customer-context (one-time)
-  cost-billing-discovery         # CFO does Stage 1 here — fair-usage + pricing
-  cost-billing-adversarial-review  # CFO participates in Skill R review of their stage
-  cost-billing-shared            # required by every skill
+  cost-billing-bootstrap-finance          # Stage 1: pricing + compliance + tenancy/region
+  cost-billing-adversarial-review         # Skill R fires inside Stage 4 of finance bootstrap
+  cost-billing-shared                     # required by every skill
 )
+
+# CPO uses persona 'product' (org-level product strategy)
 SKILLS_PRODUCT=(
-  cost-billing-bootstrap
-  cost-billing-discovery         # PM does Stage 2 + Stage 2b/3b loops
-  cost-billing-cloud-bill        # PM reviews cell ③ findings
+  cost-billing-bootstrap-cpo              # Stage 2: company + product + features + terminology
   cost-billing-adversarial-review
   cost-billing-shared
 )
+
+# Team-PM (team product engineer per user's vocabulary) uses persona 'team-product'
+SKILLS_TEAM_PRODUCT=(
+  cost-billing-bootstrap-team-product     # Stage 3: per-feature unit + event_type + input map
+  cost-billing-adversarial-review
+  cost-billing-shared
+)
+
+# Team-engineer (IC engineer) uses persona 'engineering'
 SKILLS_ENGINEERING=(
-  cost-billing-bootstrap
-  cost-billing-discovery         # Engineer does Stage 3 here
-  cost-billing-cloud-bill        # Engineer wires the cloud-bill exports
-  cost-billing-instrument        # Engineer-only: the codemod
-  cost-billing-drift-lint        # Engineer-only: CI drift lint
+  cost-billing-bootstrap-team-engineer    # Stage 4: repo + telemetry + MCP + SDK key
+  cost-billing-discovery                  # post-chain: produce inventories
+  cost-billing-cloud-bill                 # post-chain: wire cloud-bill exports
+  cost-billing-instrument                 # post-chain: codemod
+  cost-billing-drift-lint                 # post-chain: CI drift
   cost-billing-adversarial-review
   cost-billing-shared
 )
+
+# 'all' = solo founder / integrator machine running all 4 stages locally.
 SKILLS_ALL=(
-  cost-billing-bootstrap
+  cost-billing-bootstrap-finance
+  cost-billing-bootstrap-cpo
+  cost-billing-bootstrap-team-product
+  cost-billing-bootstrap-team-engineer
   cost-billing-discovery
   cost-billing-cloud-bill
   cost-billing-instrument
@@ -61,6 +80,9 @@ SKILLS_ALL=(
   cost-billing-adversarial-review
   cost-billing-shared
 )
+# Note: cost-billing-bootstrap (the v0.1-0.2 single-machine bootstrap) is deprecated
+# in v0.3.0; the 4 silo bootstraps replace it. cost-billing-reconcile is not in this
+# suite (Moolabs-engineering-internal, tracked separately).
 # Note: cost-billing-reconcile was removed from this customer-portable suite.
 # It is an engineering-internal Moolabs harness for validating moo-acute's
 # attribution_engine.py against real customer cloud bills; it has no business
@@ -72,13 +94,19 @@ SUITE_SKILLS=()
 
 select_skills_for_persona() {
   case "$PERSONA" in
-    finance)     SUITE_SKILLS=("${SKILLS_FINANCE[@]}") ;;
-    product)     SUITE_SKILLS=("${SKILLS_PRODUCT[@]}") ;;
-    engineering) SUITE_SKILLS=("${SKILLS_ENGINEERING[@]}") ;;
-    all)         SUITE_SKILLS=("${SKILLS_ALL[@]}") ;;
+    finance)        SUITE_SKILLS=("${SKILLS_FINANCE[@]}") ;;
+    product|cpo)    SUITE_SKILLS=("${SKILLS_PRODUCT[@]}") ;;   # 'product' is CPO; alias 'cpo'
+    team-product|team-pm) SUITE_SKILLS=("${SKILLS_TEAM_PRODUCT[@]}") ;;
+    engineering|team-engineer|engineer)  SUITE_SKILLS=("${SKILLS_ENGINEERING[@]}") ;;
+    all)            SUITE_SKILLS=("${SKILLS_ALL[@]}") ;;
     *)
       # Uninstall path: remove every possible skill we might have placed.
-      SUITE_SKILLS=("${SKILLS_ALL[@]}")
+      # Includes the deprecated v0.1-0.2 cost-billing-bootstrap so uninstall cleans
+      # legacy installs too.
+      SUITE_SKILLS=(
+        cost-billing-bootstrap                  # deprecated v0.1-0.2 single-machine bootstrap
+        "${SKILLS_ALL[@]}"
+      )
       ;;
   esac
 }
@@ -188,26 +216,34 @@ prompt_persona() {
   if [[ -n "$PERSONA" ]]; then return; fi
   if [[ ! -t 0 ]]; then
     echo "ERROR: --persona required when stdin is not a terminal" >&2
-    echo "Pass --persona finance|product|engineering|all" >&2
+    echo "Pass --persona finance|product|team-product|engineering|all" >&2
     exit 1
   fi
   echo ""
   echo "Which persona are you installing for?"
   echo ""
-  echo "  1) finance      — CFO / finance reviewer. Reviews pricing + projected revenue."
-  echo "  2) product      — Product Manager. Builds output↔input bill of materials."
-  echo "  3) engineering  — Engineer. Wires SDK calls, runs codemod, reviews drift. (Installs CodeGraph + ingests repo.)"
-  echo "  4) all          — Integrator machine; runs the full pipeline end-to-end."
+  echo "Chain order: finance → product (CPO) → team-product (team-PM) → engineering."
+  echo "Each persona runs their stage on THEIR machine; the signed doc travels"
+  echo "between humans via email / Slack / Drive."
+  echo ""
+  echo "  1) finance       — Stage 1. CFO. Pricing model, compliance, tenancy/region/env."
+  echo "  2) product       — Stage 2. CPO. Company + products + features + terminology."
+  echo "  3) team-product  — Stage 3. Team-PM. Per-feature unit + input map + event_type."
+  echo "  4) engineering   — Stage 4. IC engineer. Repo + telemetry + MCP + SDK key."
+  echo "                    Also installs CodeGraph + downstream skills (discovery,"
+  echo "                    cloud-bill, instrument, drift-lint)."
+  echo "  5) all           — Solo founder / integrator machine. All 4 stages locally."
   echo ""
   local choice=""
   while [[ -z "$choice" ]]; do
-    read -r -p "Choice [1-4]: " choice
+    read -r -p "Choice [1-5]: " choice
     case "$choice" in
-      1|finance)     PERSONA="finance" ;;
-      2|product)     PERSONA="product" ;;
-      3|engineering|eng) PERSONA="engineering" ;;
-      4|all)         PERSONA="all" ;;
-      *) echo "Invalid; pick 1-4 or finance|product|engineering|all"; choice="" ;;
+      1|finance)               PERSONA="finance" ;;
+      2|product|cpo)           PERSONA="product" ;;
+      3|team-product|team-pm)  PERSONA="team-product" ;;
+      4|engineering|eng|engineer|team-engineer) PERSONA="engineering" ;;
+      5|all)                   PERSONA="all" ;;
+      *) echo "Invalid; pick 1-5 or finance|product|team-product|engineering|all"; choice="" ;;
     esac
   done
   echo "Persona: $PERSONA"
