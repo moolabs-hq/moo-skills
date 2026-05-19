@@ -231,42 +231,68 @@ prompt_repo() {
 install_codegraph() {
   echo ""
   echo "─── CodeGraph (engineering persona) ─────────────────────────────────"
+  echo "Package: @colbymchenry/codegraph (https://github.com/colbymchenry/codegraph)"
+
+  local installed_version=""
+  local latest_version=""
+
   if command -v codegraph >/dev/null 2>&1; then
-    echo "CodeGraph found: $(command -v codegraph)"
+    installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    echo "Detected: codegraph v${installed_version} at $(command -v codegraph)"
   else
-    echo "CodeGraph not on PATH. Attempting install..."
-    if command -v npm >/dev/null 2>&1; then
-      # Best-effort install. The exact package name should match the upstream repo —
-      # see https://github.com/colbymchenry/codegraph for the canonical install instructions.
-      if npm install -g @colbymchenry/codegraph 2>/dev/null; then
-        echo "Installed @colbymchenry/codegraph via npm."
-      elif npm install -g codegraph 2>/dev/null; then
-        echo "Installed codegraph via npm."
-      else
-        cat >&2 <<'EOF'
-WARNING: Could not auto-install CodeGraph via npm.
+    echo "Detected: codegraph NOT on PATH."
+  fi
 
-Install manually:
-  See https://github.com/colbymchenry/codegraph for install instructions.
-
-Then come back and run:
-  cd <customer-repo> && codegraph init -i
-
-Continuing skill install without CodeGraph.
-EOF
-        return 0
-      fi
+  # Look up the latest version on npm (best-effort; if offline, skip the comparison)
+  if command -v npm >/dev/null 2>&1; then
+    latest_version="$(npm view @colbymchenry/codegraph version 2>/dev/null | tail -1)"
+    if [[ -n "$latest_version" ]]; then
+      echo "Latest on npm: v${latest_version}"
     else
+      echo "Latest on npm: (offline or registry lookup failed)"
+    fi
+  fi
+
+  # Decision: install fresh / upgrade / leave alone
+  if [[ -z "$installed_version" ]]; then
+    # Not installed — install latest
+    if ! command -v npm >/dev/null 2>&1; then
       cat >&2 <<'EOF'
-WARNING: npm not found. Install Node.js + npm, then:
-  See https://github.com/colbymchenry/codegraph for install instructions.
+WARNING: npm not found. CodeGraph requires Node.js + npm.
+Install Node.js (https://nodejs.org), then:
+  npm install -g @colbymchenry/codegraph
 
 Continuing skill install without CodeGraph.
 EOF
       return 0
     fi
+    echo "Installing @colbymchenry/codegraph (this may take a minute)..."
+    if npm install -g @colbymchenry/codegraph@latest 2>&1 | tail -8; then
+      installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+      echo "Installed: codegraph v${installed_version}"
+    else
+      cat >&2 <<'EOF'
+WARNING: 'npm install -g @colbymchenry/codegraph' failed.
+You may need sudo or to fix your npm global prefix.
+See https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally
+Continuing skill install without CodeGraph.
+EOF
+      return 0
+    fi
+  elif [[ -n "$latest_version" && "$installed_version" != "$latest_version" ]]; then
+    # Installed but outdated — upgrade
+    echo "Outdated: v${installed_version} → latest v${latest_version}. Upgrading..."
+    if npm install -g @colbymchenry/codegraph@latest 2>&1 | tail -8; then
+      installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+      echo "Upgraded to: codegraph v${installed_version}"
+    else
+      echo "WARNING: upgrade failed. Continuing with installed v${installed_version}."
+    fi
+  else
+    echo "Up to date — no action needed."
   fi
 
+  # Ingest: run codegraph init -i in the customer repo if provided
   if [[ -n "$REPO" ]]; then
     if [[ ! -d "$REPO" ]]; then
       echo "WARNING: --repo $REPO does not exist; skipping codegraph init"
@@ -277,8 +303,7 @@ EOF
     else
       echo ""
       echo "Running: codegraph init -i (in $REPO)"
-      echo "(This builds a semantic knowledge graph of the customer codebase;"
-      echo " /cost-billing-discovery + drift-lint use it for higher-fidelity scans.)"
+      echo "(builds the semantic knowledge graph; /cost-billing-discovery + drift-lint use it)"
       echo ""
       ( cd "$REPO" && codegraph init -i ) || {
         echo "WARNING: 'codegraph init -i' failed in $REPO; you can re-run manually." >&2
