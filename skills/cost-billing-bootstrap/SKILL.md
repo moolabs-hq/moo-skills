@@ -35,11 +35,32 @@ Configure the skills for our pilot integration
 First-run setup
 ```
 
-## Operating principle — NEVER assume
+## Operating principles (HARD RULES)
 
-This skill exists because the rest of the suite is portable across customers — different products, different pricing models, different repos, different LLM stacks, different compliance postures. **Every assumption I bake in is wrong for at least one customer.** So you ASK.
+### 1. NEVER assume
+
+The rest of the suite is portable across customers — different products, different pricing models, different repos, different LLM stacks, different compliance postures. **Every assumption I bake in is wrong for at least one customer.** So you ASK.
 
 Defaults exist (e.g. "OpenTelemetry is the typical tracer choice for new projects") but **default values surface as proposals, never as silent assumptions**. The customer either confirms each default or overrides it.
+
+### 2. ONE QUESTION AT A TIME — never dump the whole list
+
+You ask **one question, then STOP and wait for the answer.** Then ask the next. **Never paste a whole category's questions in one message.**
+
+Why: customers context-switch between answering and looking things up. A dump of 5 questions overwhelms — they answer 1, partially-answer 2, and skip 3-5. One-at-a-time keeps the integrator engaged and produces complete, accurate answers.
+
+Concretely:
+
+- ❌ DO NOT post: "Q1.1: Company name? Q1.2: Doc sources? Q1.3: What does it do? Q1.4: Top features? Q1.5: Internal-only?"
+- ✅ DO post: "Q1.1 — What's your company name + product name? (I'll ask product details next.)"
+- After the customer answers Q1.1, THEN post Q1.2.
+- Surface a tiny breadcrumb at the start of each question: `[Category 2 of 7, question 3 of 6]`.
+
+If the customer offers multiple answers in one reply ("company is Acme, product is Acme Generate, docs are at /docs and acme.com/learn") — accept all of them and skip ahead to the next unanswered question. Don't re-ask what they already told you.
+
+### 3. Save state after EVERY answer
+
+After every individual question is answered, immediately persist the answer to a working draft of the relevant `customer-context/<file>.yaml`. If the session crashes mid-bootstrap, the customer can resume with `/cost-billing-bootstrap --resume` and pick up at the next unanswered question — they NEVER re-answer questions they already answered.
 
 The customer's answers are the input; the structured `customer-context/` is the output.
 
@@ -48,6 +69,22 @@ The customer's answers are the input; the structured `customer-context/` is the 
 ## The 7 question categories
 
 Order matters: each category builds on the previous one's answers.
+
+**Question delivery shape** (apply to EVERY question below — see "ONE QUESTION AT A TIME" principle):
+
+```
+[Category N of 7, question M of K] — <one specific question>
+
+(Brief context if helpful — 1-2 sentences max, NO bullet lists of sub-questions.)
+
+(Examples to anchor the answer — fine to include; they help the customer answer
+in the shape you need. But don't ask for multiple things at once.)
+
+(WAIT for the answer. After receiving it, save to draft customer-context, then
+ask the next question.)
+```
+
+You read the question body in each category section below to know **what to ask**, but you ask the customer **one question per message**, in the order listed.
 
 ### Category 1 — Product context
 
@@ -274,13 +311,13 @@ I do NOT need the key value; I need the resolution PATH so codemod's emitted cod
 
 ## Workflow
 
-1. **Pre-check.** If `.moolabs/customer-context/` exists and `--refresh` not passed: show the user what's there with timestamps, ask "use as-is / refresh ALL / refresh ONE section". `--section pricing` jumps straight to category 2.
+1. **Pre-check.** If `.moolabs/customer-context/` exists and `--refresh` not passed: show the user what's there with timestamps, ask "use as-is / refresh ALL / refresh ONE section". `--section pricing` jumps straight to category 2. If `--resume` is passed: load draft state, find the first unanswered question, and continue from there.
 
-2. **Ask** categories 1 → 7 **in order**. Don't skip ahead. The answers chain (Q5 terminology depends on Q2 pricing units; Q6 MCP depends on Q4 telemetry; etc.).
+2. **Ask** categories 1 → 7 **in order**. Within each category, ask questions 1 → K **one at a time**. After EACH answer, save to draft and post the next question. Don't skip ahead and don't dump batches. The answers chain (Q5 terminology depends on Q2 pricing units; Q6 MCP depends on Q4 telemetry; etc.) so a missing answer mid-chain breaks downstream questions.
 
-3. **For each answered category**, immediately synthesize and write the relevant `customer-context/` file. The user sees draft output and can override before moving to the next category.
+3. **For each answered question**, immediately persist the answer to the working draft `.moolabs/customer-context/<file>.draft.yaml`. After the whole category is answered, promote the draft to the final filename.
 
-4. **Validate** every written file against its `$schema` ref. Validation failures surface as clarifying questions ("you said per-token pricing but didn't give me a price — what is it?").
+4. **Validate** every written file against its `$schema` ref. Validation failures surface as ONE clarifying follow-up question (not a batch). ("You said per-token pricing in Q2.1 but didn't give me a price in Q2.3 — what is it?")
 
 5. **Report**:
 
@@ -315,12 +352,14 @@ Next: run /cost-billing-discovery <repo>
 
 ## What this skill MUST NOT do
 
-- **Never** invent answers. If the customer's answer is unclear, ASK A FOLLOW-UP — don't fill in.
+- **Never** dump a whole category's questions in one message. **One question at a time, every time.** This is the highest-priority rule.
+- **Never** invent answers. If the customer's answer is unclear, ASK A FOLLOW-UP (still one question) — don't fill in.
 - **Never** silently default. Every default surfaces as a proposal the customer confirms or overrides.
 - **Never** skip a question because "it seems obvious from context." Customers contradict their own context all the time.
 - **Never** persist `customer-context/` outside the customer's repo unless they pass `--external-context-path=<path>` or answer Q7.5 with "externally archived".
 - **Never** leak content from one customer's bootstrap into another. `customer-context/` is per-integration, not global.
 - **Never** assume a specific MCP is available — ask Q6.3 first.
+- **Never** re-ask a question the customer already answered earlier in the same session (or a prior session, when `--resume` is used). Always check the draft state first.
 
 ## Why "use whatever LLM they're using"
 
