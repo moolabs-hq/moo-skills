@@ -93,6 +93,7 @@ REPO=""
 DRY_RUN=0
 UNINSTALL=0
 SKIP_CODEGRAPH=0
+FORCE_CODEGRAPH_INGEST=0
 NO_BOOTSTRAP_CTA=0
 
 while [[ $# -gt 0 ]]; do
@@ -103,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     --persona) PERSONA="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --skip-codegraph) SKIP_CODEGRAPH=1; shift ;;
+    --force-codegraph-ingest) FORCE_CODEGRAPH_INGEST=1; shift ;;
     --no-bootstrap-cta) NO_BOOTSTRAP_CTA=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -215,13 +217,29 @@ prompt_repo() {
   # Only ask for repo if we'll install CodeGraph
   if [[ "$PERSONA" != "engineering" && "$PERSONA" != "all" ]]; then return; fi
   if [[ $SKIP_CODEGRAPH -eq 1 ]]; then return; fi
-  if [[ -n "$REPO" ]]; then return; fi
+  if [[ -n "$REPO" ]]; then resolve_repo_path; return; fi
   if [[ ! -t 0 ]]; then return; fi
   echo ""
   echo "Path to the customer repository for CodeGraph ingest?"
-  echo "  (Leave blank to skip CodeGraph init; you can run 'codegraph init -i' manually later.)"
+  echo "  (Absolute path strongly preferred — relative paths like '../../' resolve from"
+  echo "   THIS install.sh location, which is rarely what you want.)"
+  echo "  Leave blank to skip CodeGraph init; you can run 'codegraph init -i' manually later."
   read -r -p "Repo path: " REPO
+  resolve_repo_path
+}
+
+# Normalize REPO to absolute path + show user the resolved path before any heavy work.
+resolve_repo_path() {
+  if [[ -z "$REPO" ]]; then return; fi
   REPO="${REPO/#\~/$HOME}"
+  if [[ "$REPO" != /* ]]; then
+    # Relative — resolve against the user's current working directory
+    REPO="$(cd "$REPO" 2>/dev/null && pwd)" || {
+      echo "ERROR: --repo $REPO doesn't resolve to a directory." >&2
+      REPO=""
+      return
+    }
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -231,63 +249,134 @@ prompt_repo() {
 install_codegraph() {
   echo ""
   echo "─── CodeGraph (engineering persona) ─────────────────────────────────"
+  echo "Package: @colbymchenry/codegraph (https://github.com/colbymchenry/codegraph)"
+
+  local installed_version=""
+  local latest_version=""
+
   if command -v codegraph >/dev/null 2>&1; then
-    echo "CodeGraph found: $(command -v codegraph)"
+    installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    echo "Detected: codegraph v${installed_version} at $(command -v codegraph)"
   else
-    echo "CodeGraph not on PATH. Attempting install..."
-    if command -v npm >/dev/null 2>&1; then
-      # Best-effort install. The exact package name should match the upstream repo —
-      # see https://github.com/colbymchenry/codegraph for the canonical install instructions.
-      if npm install -g @colbymchenry/codegraph 2>/dev/null; then
-        echo "Installed @colbymchenry/codegraph via npm."
-      elif npm install -g codegraph 2>/dev/null; then
-        echo "Installed codegraph via npm."
-      else
-        cat >&2 <<'EOF'
-WARNING: Could not auto-install CodeGraph via npm.
+    echo "Detected: codegraph NOT on PATH."
+  fi
 
-Install manually:
-  See https://github.com/colbymchenry/codegraph for install instructions.
-
-Then come back and run:
-  cd <customer-repo> && codegraph init -i
-
-Continuing skill install without CodeGraph.
-EOF
-        return 0
-      fi
-    else
-      cat >&2 <<'EOF'
-WARNING: npm not found. Install Node.js + npm, then:
-  See https://github.com/colbymchenry/codegraph for install instructions.
-
-Continuing skill install without CodeGraph.
-EOF
-      return 0
+  # Look up the latest on npm (best-effort)
+  if command -v npm >/dev/null 2>&1; then
+    latest_version="$(npm view @colbymchenry/codegraph version 2>/dev/null | tail -1)"
+    if [[ -n "$latest_version" ]]; then
+      echo "Latest on npm: v${latest_version}"
     fi
   fi
 
-  if [[ -n "$REPO" ]]; then
-    if [[ ! -d "$REPO" ]]; then
-      echo "WARNING: --repo $REPO does not exist; skipping codegraph init"
+  if [[ -z "$installed_version" ]]; then
+    # Fresh install
+    if ! command -v npm >/dev/null 2>&1; then
+      echo "WARNING: npm not found. Install Node.js (https://nodejs.org), then:" >&2
+      echo "  npm install -g @colbymchenry/codegraph" >&2
+      echo "Continuing skill install without CodeGraph." >&2
       return 0
     fi
-    if [[ -d "$REPO/.codegraph" ]]; then
-      echo "CodeGraph already initialized at $REPO/.codegraph (skipping init -i)"
+    echo "Installing @colbymchenry/codegraph@latest..."
+    if npm install -g @colbymchenry/codegraph@latest 2>&1 | tail -8; then
+      installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+      echo "Installed: codegraph v${installed_version}"
     else
-      echo ""
-      echo "Running: codegraph init -i (in $REPO)"
-      echo "(This builds a semantic knowledge graph of the customer codebase;"
-      echo " /cost-billing-discovery + drift-lint use it for higher-fidelity scans.)"
-      echo ""
-      ( cd "$REPO" && codegraph init -i ) || {
-        echo "WARNING: 'codegraph init -i' failed in $REPO; you can re-run manually." >&2
-      }
+      echo "WARNING: 'npm install -g @colbymchenry/codegraph' failed." >&2
+      echo "(May need sudo or a different npm prefix; install manually then re-run.)" >&2
+      return 0
+    fi
+  elif [[ -n "$latest_version" && "$installed_version" != "$latest_version" ]]; then
+    # Upgrade
+    echo "Outdated: v${installed_version} → latest v${latest_version}. Upgrading..."
+    if npm install -g @colbymchenry/codegraph@latest 2>&1 | tail -8; then
+      installed_version="$(codegraph --version 2>/dev/null | head -1 | awk '{print $NF}')"
+      echo "Upgraded to: codegraph v${installed_version}"
+    else
+      echo "WARNING: upgrade failed. Continuing with installed v${installed_version}."
     fi
   else
+    echo "Up to date — no action needed."
+  fi
+
+  # Ingest — only with safety checks
+  if [[ -z "$REPO" ]]; then
     echo "No --repo provided; skipping codegraph ingest."
     echo "Run manually later: cd <customer-repo> && codegraph init -i"
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
   fi
+
+  if [[ ! -d "$REPO" ]]; then
+    echo "WARNING: --repo $REPO does not exist; skipping codegraph init"
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
+  fi
+
+  # Resolved-absolute path (resolve_repo_path runs earlier in main flow)
+  echo "Target: $REPO"
+
+  if [[ -d "$REPO/.codegraph" ]]; then
+    echo "CodeGraph already initialized at $REPO/.codegraph (skipping init -i)"
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
+  fi
+
+  # SAFETY CHECK — count files before running init -i
+  # Previous OOM crash: a 205k-file parent workspace crashed Node at heap limit.
+  # Warn at 10k files, hard-block at 50k unless --force-codegraph-ingest passed.
+  echo "Counting files in $REPO (excludes .git, node_modules, .venv)..."
+  local file_count
+  file_count=$(find "$REPO" \
+    \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name dist -o -name build -o -name target -o -name __pycache__ \) -prune -o \
+    -type f -print 2>/dev/null | wc -l | tr -d ' ')
+  echo "File count (after excludes): $file_count"
+
+  if [[ "$file_count" -gt 50000 ]]; then
+    cat >&2 <<EOF
+
+WARNING: $REPO contains $file_count files after excludes.
+CodeGraph init has been observed to OOM on ~200k-file workspaces
+(Node.js v8 heap limit hit at 93% progress).
+
+Likely causes:
+  - $REPO is a parent workspace containing multiple repos.
+  - $REPO contains a vendored dependency tree not caught by excludes.
+
+Recommendations:
+  - Re-run with a SMALLER --repo (a single service/repo, not a workspace).
+  - Verify your intended target with: ls -la $REPO
+
+Aborting codegraph init. Skills are still installed and usable.
+Re-run with --force-codegraph-ingest to override this safety check.
+EOF
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
+  fi
+
+  if [[ "$file_count" -gt 10000 ]]; then
+    echo "NOTE: $file_count files is large but under the 50k safety threshold."
+    echo "Init may take 5-15 minutes and consume significant RAM."
+    if [[ -t 0 ]] && [[ $FORCE_CODEGRAPH_INGEST -eq 0 ]]; then
+      local confirm=""
+      read -r -p "Proceed? [y/N]: " confirm
+      if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Skipped codegraph init at user request."
+        echo "Run manually later: cd $REPO && codegraph init -i"
+        echo "─────────────────────────────────────────────────────────────────────"
+        return 0
+      fi
+    fi
+  fi
+
+  echo ""
+  echo "Running: codegraph init -i (in $REPO)"
+  echo "(builds the semantic knowledge graph; /cost-billing-discovery + drift-lint use it)"
+  echo ""
+  ( cd "$REPO" && codegraph init -i ) || {
+    echo "WARNING: 'codegraph init -i' failed in $REPO; you can re-run manually." >&2
+    echo "If this was an OOM: $REPO is probably too big. Try a more focused subdirectory." >&2
+  }
   echo "─────────────────────────────────────────────────────────────────────"
 }
 
@@ -307,11 +396,13 @@ scaffold_customer_context() {
   mkdir -p "$ctx"
   local tpl="$SUITE_SRC_DIR/cost-billing-bootstrap/assets/customer-context-templates"
   if [[ -d "$tpl" ]]; then
-    cp "$tpl/product-summary.template.md"  "$ctx/product-summary.template.md" 2>/dev/null || true
-    cp "$tpl/pricing-model.template.yaml"  "$ctx/pricing-model.template.yaml" 2>/dev/null || true
-    cp "$tpl/repo-info.template.yaml"      "$ctx/repo-info.template.yaml" 2>/dev/null || true
-    cp "$tpl/telemetry-stack.template.yaml" "$ctx/telemetry-stack.template.yaml" 2>/dev/null || true
-    cp "$tpl/terminology.template.yaml"    "$ctx/terminology.template.yaml" 2>/dev/null || true
+    cp "$tpl/product-summary.template.md"        "$ctx/product-summary.template.md" 2>/dev/null || true
+    cp "$tpl/pricing-model.template.yaml"        "$ctx/pricing-model.template.yaml" 2>/dev/null || true
+    cp "$tpl/repo-info.template.yaml"            "$ctx/repo-info.template.yaml" 2>/dev/null || true
+    cp "$tpl/telemetry-stack.template.yaml"      "$ctx/telemetry-stack.template.yaml" 2>/dev/null || true
+    cp "$tpl/terminology.template.yaml"          "$ctx/terminology.template.yaml" 2>/dev/null || true
+    cp "$tpl/mcp-config.template.yaml"           "$ctx/mcp-config.template.yaml" 2>/dev/null || true
+    cp "$tpl/integration-config.template.yaml"   "$ctx/integration-config.template.yaml" 2>/dev/null || true
   fi
   cat > "$ctx/README.md" <<EOF
 # customer-context/ — generated by /cost-billing-bootstrap
