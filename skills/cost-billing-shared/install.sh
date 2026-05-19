@@ -1,66 +1,120 @@
 #!/usr/bin/env bash
-# Install the Cost+Billing Discovery & Instrumentation suite (6 skills + shared dir).
-# Detects the platform (Claude Code, Cursor, Copilot, etc.) and copies each skill into
-# the right install location.
+# Install the Cost+Billing Discovery & Instrumentation suite (7 skills + shared dir).
+# Auto-detects the agent platform (Claude Code, Cursor, Copilot, etc.) and asks the
+# user which persona they're installing for (finance / product / engineering / all).
+# Engineering persona installs CodeGraph and runs ingest on the customer repo.
 #
 # Usage:
-#   ./install.sh                          # auto-detect platform; install all 6 skills
-#   ./install.sh --platform claude-code   # explicit platform
-#   ./install.sh --user                    # install at user scope ($CLAUDE_CONFIG_DIR/skills/ or ~/.claude/skills/)
-#   ./install.sh --project                 # install at project scope (./.claude/skills/)
-#   ./install.sh --dry-run                 # show what would happen
-#   ./install.sh --uninstall               # remove all 6 skills
+#   ./install.sh                              # interactive: prompts for persona + repo
+#   ./install.sh --persona engineering        # skip persona prompt
+#   ./install.sh --persona finance --skip-codegraph
+#   ./install.sh --persona all --repo /path/to/customer/repo
+#   ./install.sh --platform claude-code --user --persona engineering --repo .
+#   ./install.sh --project                    # install at project scope
+#   ./install.sh --dry-run                    # show what would happen
+#   ./install.sh --uninstall                  # remove all skills
+#   ./install.sh --no-bootstrap-cta           # don't print the /cost-billing-bootstrap CTA
 #
 # Env vars honored:
-#   CLAUDE_CONFIG_DIR    # Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
+#   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
 #
-# Skills installed:
-#   cost-billing-discovery
-#   cost-billing-cloud-bill
-#   cost-billing-instrument
-#   cost-billing-drift-lint
-#   cost-billing-adversarial-review
-#   cost-billing-reconcile
-#   cost-billing-shared          (shared docs; not a slash-invocable skill)
+# Personas:
+#   finance       — install all skills + scaffold customer-context-template. CFO works mostly via review surface; no extra tooling.
+#   product       — install all skills + scaffold customer-context-template. PM works via output-input map editor; no extra tooling.
+#   engineering   — install all skills + install CodeGraph + run codegraph ingest on customer repo. Engineer needs deep code-graph access.
+#   all           — engineering setup (CodeGraph) + everything else. Pick this for the integrator-machine that runs the whole pipeline.
 
 set -euo pipefail
 
-SUITE_SKILLS=(
-  "cost-billing-discovery"
-  "cost-billing-cloud-bill"
-  "cost-billing-instrument"
-  "cost-billing-drift-lint"
-  "cost-billing-adversarial-review"
-  "cost-billing-reconcile"
-  "cost-billing-shared"
+# Per-persona skill subsets — only install what that persona actually uses.
+# cost-billing-shared is required by every persona (loaded by the other skills).
+# cost-billing-reconcile is Moolabs-engineering-internal — only included in --persona all.
+
+SKILLS_FINANCE=(
+  cost-billing-bootstrap         # generates customer-context (one-time)
+  cost-billing-discovery         # CFO does Stage 1 here — fair-usage + pricing
+  cost-billing-adversarial-review  # CFO participates in Skill R review of their stage
+  cost-billing-shared            # required by every skill
+)
+SKILLS_PRODUCT=(
+  cost-billing-bootstrap
+  cost-billing-discovery         # PM does Stage 2 + Stage 2b/3b loops
+  cost-billing-cloud-bill        # PM reviews cell ③ findings
+  cost-billing-adversarial-review
+  cost-billing-shared
+)
+SKILLS_ENGINEERING=(
+  cost-billing-bootstrap
+  cost-billing-discovery         # Engineer does Stage 3 here
+  cost-billing-cloud-bill        # Engineer wires the cloud-bill exports
+  cost-billing-instrument        # Engineer-only: the codemod
+  cost-billing-drift-lint        # Engineer-only: CI drift lint
+  cost-billing-adversarial-review
+  cost-billing-shared
+)
+SKILLS_ALL=(
+  cost-billing-bootstrap
+  cost-billing-discovery
+  cost-billing-cloud-bill
+  cost-billing-instrument
+  cost-billing-drift-lint
+  cost-billing-adversarial-review
+  cost-billing-reconcile         # Moolabs-engineering-internal; ONLY in 'all'
+  cost-billing-shared
 )
 
-# Locate the suite source directory (the parent of this script).
+# Will be set to one of the above arrays after persona is known.
+SUITE_SKILLS=()
+
+select_skills_for_persona() {
+  case "$PERSONA" in
+    finance)     SUITE_SKILLS=("${SKILLS_FINANCE[@]}") ;;
+    product)     SUITE_SKILLS=("${SKILLS_PRODUCT[@]}") ;;
+    engineering) SUITE_SKILLS=("${SKILLS_ENGINEERING[@]}") ;;
+    all)         SUITE_SKILLS=("${SKILLS_ALL[@]}") ;;
+    *)
+      # Uninstall path: remove every possible skill we might have placed.
+      SUITE_SKILLS=("${SKILLS_ALL[@]}")
+      ;;
+  esac
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITE_SRC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PLATFORM=""
 SCOPE="user"
+PERSONA=""
+REPO=""
 DRY_RUN=0
 UNINSTALL=0
+SKIP_CODEGRAPH=0
+NO_BOOTSTRAP_CTA=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --platform) PLATFORM="$2"; shift 2 ;;
     --user) SCOPE="user"; shift ;;
     --project) SCOPE="project"; shift ;;
+    --persona) PERSONA="$2"; shift 2 ;;
+    --repo) REPO="$2"; shift 2 ;;
+    --skip-codegraph) SKIP_CODEGRAPH=1; shift ;;
+    --no-bootstrap-cta) NO_BOOTSTRAP_CTA=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
-      head -28 "$0" | tail -27
+      head -32 "$0" | tail -31
       exit 0
       ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
+# ──────────────────────────────────────────────────────────────────────
+# Platform detection
+# ──────────────────────────────────────────────────────────────────────
+
 detect_platform() {
-  # Honor CLAUDE_CONFIG_DIR (Claude Code env var overriding the default ~/.claude location).
   if [[ -n "${CLAUDE_CONFIG_DIR:-}" && -d "$CLAUDE_CONFIG_DIR" ]]; then
     echo "claude-code"
   elif [[ -d "$HOME/.claude" ]] || [[ -d "./.claude" ]]; then
@@ -96,16 +150,13 @@ resolve_dest_dir() {
   local platform="$1" scope="$2"
   case "$platform" in
     claude-code)
-      # Claude Code honors CLAUDE_CONFIG_DIR over $HOME/.claude (per the Claude Code CLI spec).
-      # Examples: CLAUDE_CONFIG_DIR=~/.claude-work, CLAUDE_CONFIG_DIR=~/.claude-moolabs
       local user_root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
       if [[ "$scope" == "project" ]]; then echo "./.claude/skills"
       else echo "${user_root}/skills"; fi ;;
     cursor)
       if [[ "$scope" == "project" ]]; then echo "./.cursor/rules"
       else echo "$HOME/.cursor/rules"; fi ;;
-    copilot)
-      echo "./.github/skills" ;;
+    copilot) echo "./.github/skills" ;;
     windsurf)
       if [[ "$scope" == "project" ]]; then echo "./.windsurf/rules"
       else echo "$HOME/.codeium/windsurf/rules"; fi ;;
@@ -123,13 +174,176 @@ resolve_dest_dir() {
   esac
 }
 
+# ──────────────────────────────────────────────────────────────────────
+# Persona prompt
+# ──────────────────────────────────────────────────────────────────────
+
+prompt_persona() {
+  if [[ -n "$PERSONA" ]]; then return; fi
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: --persona required when stdin is not a terminal" >&2
+    echo "Pass --persona finance|product|engineering|all" >&2
+    exit 1
+  fi
+  echo ""
+  echo "Which persona are you installing for?"
+  echo ""
+  echo "  1) finance      — CFO / finance reviewer. Reviews pricing + projected revenue."
+  echo "  2) product      — Product Manager. Builds output↔input bill of materials."
+  echo "  3) engineering  — Engineer. Wires SDK calls, runs codemod, reviews drift. (Installs CodeGraph + ingests repo.)"
+  echo "  4) all          — Integrator machine; runs the full pipeline end-to-end."
+  echo ""
+  local choice=""
+  while [[ -z "$choice" ]]; do
+    read -r -p "Choice [1-4]: " choice
+    case "$choice" in
+      1|finance)     PERSONA="finance" ;;
+      2|product)     PERSONA="product" ;;
+      3|engineering|eng) PERSONA="engineering" ;;
+      4|all)         PERSONA="all" ;;
+      *) echo "Invalid; pick 1-4 or finance|product|engineering|all"; choice="" ;;
+    esac
+  done
+  echo "Persona: $PERSONA"
+}
+
+prompt_repo() {
+  # Only ask for repo if we'll install CodeGraph
+  if [[ "$PERSONA" != "engineering" && "$PERSONA" != "all" ]]; then return; fi
+  if [[ $SKIP_CODEGRAPH -eq 1 ]]; then return; fi
+  if [[ -n "$REPO" ]]; then return; fi
+  if [[ ! -t 0 ]]; then return; fi
+  echo ""
+  echo "Path to the customer repository for CodeGraph ingest?"
+  echo "  (Leave blank to skip CodeGraph init; you can run 'codegraph init -i' manually later.)"
+  read -r -p "Repo path: " REPO
+  REPO="${REPO/#\~/$HOME}"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# CodeGraph install + ingest
+# ──────────────────────────────────────────────────────────────────────
+
+install_codegraph() {
+  echo ""
+  echo "─── CodeGraph (engineering persona) ─────────────────────────────────"
+  if command -v codegraph >/dev/null 2>&1; then
+    echo "CodeGraph found: $(command -v codegraph)"
+  else
+    echo "CodeGraph not on PATH. Attempting install..."
+    if command -v npm >/dev/null 2>&1; then
+      # Best-effort install. The exact package name should match the upstream repo —
+      # see https://github.com/colbymchenry/codegraph for the canonical install instructions.
+      if npm install -g @colbymchenry/codegraph 2>/dev/null; then
+        echo "Installed @colbymchenry/codegraph via npm."
+      elif npm install -g codegraph 2>/dev/null; then
+        echo "Installed codegraph via npm."
+      else
+        cat >&2 <<'EOF'
+WARNING: Could not auto-install CodeGraph via npm.
+
+Install manually:
+  See https://github.com/colbymchenry/codegraph for install instructions.
+
+Then come back and run:
+  cd <customer-repo> && codegraph init -i
+
+Continuing skill install without CodeGraph.
+EOF
+        return 0
+      fi
+    else
+      cat >&2 <<'EOF'
+WARNING: npm not found. Install Node.js + npm, then:
+  See https://github.com/colbymchenry/codegraph for install instructions.
+
+Continuing skill install without CodeGraph.
+EOF
+      return 0
+    fi
+  fi
+
+  if [[ -n "$REPO" ]]; then
+    if [[ ! -d "$REPO" ]]; then
+      echo "WARNING: --repo $REPO does not exist; skipping codegraph init"
+      return 0
+    fi
+    if [[ -d "$REPO/.codegraph" ]]; then
+      echo "CodeGraph already initialized at $REPO/.codegraph (skipping init -i)"
+    else
+      echo ""
+      echo "Running: codegraph init -i (in $REPO)"
+      echo "(This builds a semantic knowledge graph of the customer codebase;"
+      echo " /cost-billing-discovery + drift-lint use it for higher-fidelity scans.)"
+      echo ""
+      ( cd "$REPO" && codegraph init -i ) || {
+        echo "WARNING: 'codegraph init -i' failed in $REPO; you can re-run manually." >&2
+      }
+    fi
+  else
+    echo "No --repo provided; skipping codegraph ingest."
+    echo "Run manually later: cd <customer-repo> && codegraph init -i"
+  fi
+  echo "─────────────────────────────────────────────────────────────────────"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Customer-context scaffold
+# ──────────────────────────────────────────────────────────────────────
+
+scaffold_customer_context() {
+  if [[ -z "$REPO" || ! -d "$REPO" ]]; then return; fi
+  local ctx="$REPO/.moolabs/customer-context"
+  if [[ -d "$ctx" ]]; then
+    echo "customer-context/ already exists at $ctx (leaving as-is)"
+    return
+  fi
+  echo ""
+  echo "Scaffolding customer-context/ at $ctx ..."
+  mkdir -p "$ctx"
+  local tpl="$SUITE_SRC_DIR/cost-billing-bootstrap/assets/customer-context-templates"
+  if [[ -d "$tpl" ]]; then
+    cp "$tpl/product-summary.template.md"  "$ctx/product-summary.template.md" 2>/dev/null || true
+    cp "$tpl/pricing-model.template.yaml"  "$ctx/pricing-model.template.yaml" 2>/dev/null || true
+    cp "$tpl/repo-info.template.yaml"      "$ctx/repo-info.template.yaml" 2>/dev/null || true
+    cp "$tpl/telemetry-stack.template.yaml" "$ctx/telemetry-stack.template.yaml" 2>/dev/null || true
+    cp "$tpl/terminology.template.yaml"    "$ctx/terminology.template.yaml" 2>/dev/null || true
+  fi
+  cat > "$ctx/README.md" <<EOF
+# customer-context/ — generated by /cost-billing-bootstrap
+
+This directory holds the customer-specific reference files every skill in the
+Cost+Billing suite reads before running. It is currently SCAFFOLDED with
+.template.* files but NOT YET POPULATED.
+
+Run \`/cost-billing-bootstrap\` from the agent surface (Claude Code, Cursor,
+Gemini CLI, etc.) to fill these in by answering 5 questions about your product.
+
+Files (after bootstrap):
+
+  product-summary.md       — 200-400 line synthesis of your product docs
+  pricing-model.yaml       — billable units + prices + fair-usage thresholds
+  repo-info.yaml           — services, languages, frameworks, existing instrumentation
+  telemetry-stack.yaml     — primary tracer (OTel/Datadog/Sentry/none) + brownfield-vs-greenfield
+  terminology.yaml         — your words for things (e.g. "generation" not "completion")
+  bootstrap-log.yaml       — when bootstrap last ran, which LLM, what source artifacts
+
+Persona at install: $PERSONA
+Generated by: install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  echo "  scaffolded: $ctx/README.md + 5 .template.* files"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────
+
 if [[ -z "$PLATFORM" ]]; then
   PLATFORM="$(detect_platform)"
 fi
-
 if [[ -z "$PLATFORM" ]]; then
-  cat >&2 <<EOF
-ERROR: Could not auto-detect platform.
+  cat >&2 <<'EOF'
+ERROR: Could not auto-detect agent platform.
 
 Pass one explicitly:
   ./install.sh --platform claude-code
@@ -144,25 +358,32 @@ Pass one explicitly:
   ./install.sh --platform goose
   ./install.sh --platform opencode
   ./install.sh --platform universal
-
-Or install to a generic universal path (works with most agent CLIs):
-  ./install.sh --platform universal --user
 EOF
   exit 1
 fi
 
 DEST_DIR="$(resolve_dest_dir "$PLATFORM" "$SCOPE")"
-
 if [[ -z "$DEST_DIR" ]]; then
   echo "ERROR: Unknown platform: $PLATFORM" >&2
   exit 1
 fi
 
+if [[ $UNINSTALL -eq 0 ]]; then
+  prompt_persona
+  prompt_repo
+fi
+
+# Resolve which skills to install (or remove) based on persona.
+select_skills_for_persona
+
+echo ""
 echo "Suite source : $SUITE_SRC_DIR"
 echo "Platform     : $PLATFORM"
 echo "Scope        : $SCOPE"
 echo "Dest dir     : $DEST_DIR"
-echo "Skills       : ${#SUITE_SKILLS[@]}"
+echo "Persona      : ${PERSONA:-N/A (uninstall removes all)}"
+echo "Customer repo: ${REPO:-N/A}"
+echo "Skills       : ${#SUITE_SKILLS[@]} (${SUITE_SKILLS[*]})"
 echo ""
 
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -170,6 +391,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
   for skill in "${SUITE_SKILLS[@]}"; do
     echo "[dry-run] would copy:   $SUITE_SRC_DIR/$skill  →  $DEST_DIR/$skill"
   done
+  if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
+    echo "[dry-run] would install codegraph + run codegraph init -i in ${REPO:-<no-repo>}"
+  fi
+  if [[ -n "$REPO" ]]; then
+    echo "[dry-run] would scaffold customer-context/ at $REPO/.moolabs/customer-context/"
+  fi
   exit 0
 fi
 
@@ -183,12 +410,12 @@ if [[ $UNINSTALL -eq 1 ]]; then
     fi
   done
   echo ""
-  echo "Uninstall complete."
+  echo "Uninstall complete. (customer-context/ in repo NOT touched — remove manually if desired.)"
   exit 0
 fi
 
+# Copy skills
 mkdir -p "$DEST_DIR"
-
 for skill in "${SUITE_SKILLS[@]}"; do
   src="$SUITE_SRC_DIR/$skill"
   dest="$DEST_DIR/$skill"
@@ -203,24 +430,136 @@ for skill in "${SUITE_SKILLS[@]}"; do
   echo "  installed $skill"
 done
 
+# Engineering persona: CodeGraph
+if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
+  install_codegraph
+fi
+
+# Scaffold customer-context-template if repo given
+scaffold_customer_context
+
+# ──────────────────────────────────────────────────────────────────────
+# Final report
+# ──────────────────────────────────────────────────────────────────────
+
 echo ""
-echo "Install complete."
+echo "═════════════════════════════════════════════════════════════════════"
+echo " Install complete — persona: $PERSONA"
+echo "═════════════════════════════════════════════════════════════════════"
 echo ""
-echo "Slash-invocable skills:"
-echo "  /cost-billing-discovery           — Skill A: scan repo, produce inventories"
-echo "  /cost-billing-cloud-bill          — Skill B: wire AWS / GCP / Azure exports"
-echo "  /cost-billing-instrument          — Skill 2: codemod that wires SDK calls"
-echo "  /cost-billing-drift-lint          — Skill 3: CI drift detection"
-echo "  /cost-billing-adversarial-review  — Skill R: 5-phase quality gate"
-echo "  /cost-billing-reconcile           — Skill C: WAPE/Coverage validation"
+echo "Slash-invocable skills installed for persona '$PERSONA':"
+for skill in "${SUITE_SKILLS[@]}"; do
+  case "$skill" in
+    cost-billing-bootstrap)
+      echo "  /cost-billing-bootstrap           — first-run customer-context generator (RUN ME FIRST)" ;;
+    cost-billing-discovery)
+      echo "  /cost-billing-discovery           — Skill A: scan repo, produce inventories" ;;
+    cost-billing-cloud-bill)
+      echo "  /cost-billing-cloud-bill          — Skill B: wire AWS / GCP / Azure exports" ;;
+    cost-billing-instrument)
+      echo "  /cost-billing-instrument          — Skill 2: codemod that wires SDK calls" ;;
+    cost-billing-drift-lint)
+      echo "  /cost-billing-drift-lint          — Skill 3: CI drift detection" ;;
+    cost-billing-adversarial-review)
+      echo "  /cost-billing-adversarial-review  — Skill R: 5-phase quality gate" ;;
+    cost-billing-reconcile)
+      echo "  /cost-billing-reconcile           — Skill C: WAPE/Coverage validation (Moolabs-internal)" ;;
+    cost-billing-shared)
+      : ;;  # shared dir; not slash-invocable, listed below
+  esac
+done
 echo ""
 echo "Shared docs (read-only, not slash-invocable):"
-echo "  cost-billing-shared/README.md"
+echo "  cost-billing-shared/SUITE_README.md"
 echo "  cost-billing-shared/anchor-taxonomy.md"
 echo "  cost-billing-shared/sdk-surface-reference.md"
 echo "  cost-billing-shared/v1-decisions-log.md"
 echo "  cost-billing-shared/three-role-review.md"
 echo "  cost-billing-shared/gaps-tracker.md"
 echo ""
-echo "Open a new agent session and type:"
-echo "  /cost-billing-discovery /path/to/customer/repo"
+
+if [[ $NO_BOOTSTRAP_CTA -eq 0 ]]; then
+  echo "─── Next step for the $PERSONA persona ──────────────────────────────"
+  case "$PERSONA" in
+    finance)
+      cat <<'EOF'
+1. Open Claude Code (or your agent surface) in the customer repo:
+     cd <customer-repo>
+2. Run the bootstrap to generate customer-context:
+     /cost-billing-bootstrap
+   You'll be asked for:
+     - product reference doc (path/URL/paste)
+     - pricing page URL
+     - primary repo path
+     - telemetry stack
+     - terminology overrides
+3. Then start the CFO stage:
+     /cost-billing-discovery <customer-repo>
+   You'll fill cfo_metadata blocks in usage-events-inventory.yaml
+   (fair-usage values, billed units, projected revenue).
+
+After your stage, PM reviews; if PM finds issues, you'll get a Stage 2b cycle.
+EOF
+      ;;
+    product)
+      cat <<'EOF'
+1. Open Claude Code (or your agent surface) in the customer repo:
+     cd <customer-repo>
+2. Run the bootstrap to generate customer-context:
+     /cost-billing-bootstrap
+3. Wait for CFO Stage 1 to be signed off.
+4. Then your stage:
+     /cost-billing-discovery <customer-repo>
+   You'll:
+     - pick billable units per output
+     - build output-input-map.yaml (the bill of materials)
+     - flag CFO reopens if a proposed unit can't be supported
+
+You're the apex of two review loops:
+  - CFO ⇄ PM (Stage 2b, hard cap 3 cycles)
+  - Engineer ⇄ PM (Stage 3b, uncapped — code reality wins)
+EOF
+      ;;
+    engineering)
+      cat <<'EOF'
+1. Open Claude Code (or your agent surface) in the customer repo:
+     cd <customer-repo>
+2. Run the bootstrap to generate customer-context:
+     /cost-billing-bootstrap
+3. (If you skipped --repo earlier, run codegraph manually now:)
+     cd <customer-repo> && codegraph init -i
+4. Wait for CFO Stage 1 + PM Stage 2 + Stage 2b cycle to be signed off.
+5. Then your stage:
+     /cost-billing-discovery <customer-repo>
+   You'll verify file:line, framework adapters, idempotency anchors,
+   and reject false positives.
+6. After all three signoffs + holistic adversarial review:
+     /cost-billing-instrument <customer-repo>
+   This is the codemod that wires the SDK calls into customer code.
+7. Add CI drift-lint (one-time):
+     Copy cost-billing-drift-lint/assets/github-action.yml to .github/workflows/
+
+CodeGraph is installed and ingested — /cost-billing-discovery and drift-lint
+will use it for higher-fidelity code-graph queries.
+EOF
+      ;;
+    all)
+      cat <<'EOF'
+You're set up as an integrator — all skills installed, CodeGraph ingested.
+
+Recommended flow:
+  1. /cost-billing-bootstrap        — generate customer-context
+  2. /cost-billing-cloud-bill       — wire cloud exports (24-48h floor begins)
+  3. /cost-billing-discovery        — produce inventories
+     [CFO Stage 1 → PM Stage 2 → CFO ⇄ PM Stage 2b → Engineer Stage 3 → Engineer ⇄ PM Stage 3b]
+  4. /cost-billing-adversarial-review --phase holistic-pre-codemod
+  5. /cost-billing-instrument       — run the codemod
+  6. /cost-billing-adversarial-review --phase post-codemod
+  7. Add /cost-billing-drift-lint to CI
+
+Skill C (/cost-billing-reconcile) runs in Moolabs's CI, not in the customer pipeline.
+EOF
+      ;;
+  esac
+  echo "─────────────────────────────────────────────────────────────────────"
+fi

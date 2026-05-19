@@ -1,7 +1,7 @@
 ---
 name: cost-billing-cloud-bill
 description: >-
-  Walk Moolabs customers through wiring AWS / GCP / Azure cloud-bill exports into moo-acute Tier 5. Configures AWS CUR 2.0 (hourly, with INCLUDE_RESOURCES + INCLUDE_IAM_PRINCIPAL_DATA for Bedrock attribution), GCP BigQuery billing export, and Azure Cost Management Export (daily-only — Azure has no hourly, communicated up-front). Audits tag-propagation health per cloud (AWS 48h activation lag, services not propagating tags, Azure resource-group-only exclusion). Produces cell ③ findings — cost that's real but cannot be attributed to a feature/customer — for PM/finance review with absorb-vs-fix decisions. Communicates the unavoidable 24-48h floor before first usable data. Skill B in the suite; feeds moo-acute cloud_cost_imports and serves as input corpus for cost-billing-reconcile. Triggers on "wire cloud bills", "set up AWS CUR", "GCP billing export", "Azure cost management export", "Skill B", "audit tag propagation", "find untagged AI spend".
+  Walk Moolabs customers through wiring AWS / GCP / Azure cloud-bill exports into the Moolabs platform's cloud-bill ingestion path. Configures AWS CUR 2.0 (hourly, with INCLUDE_RESOURCES + INCLUDE_IAM_PRINCIPAL_DATA for Bedrock attribution), GCP BigQuery billing export, and Azure Cost Management Export (daily-only — Azure has no hourly, communicated up-front). Audits tag-propagation health per cloud (AWS 48h activation lag, services not propagating tags, Azure resource-group-only exclusion). Produces cell ③ findings — cost that's real but cannot be attributed to a feature/customer — for PM/finance review with absorb-vs-fix decisions. Communicates the unavoidable 24-48h floor before first usable data. Skill B in the suite; feeds the Moolabs platform's cloud-bill ingestion and serves as input corpus for cost-billing-reconcile. Triggers on "wire cloud bills", "set up AWS CUR", "GCP billing export", "Azure cost management export", "Skill B", "audit tag propagation", "find untagged AI spend".
 license: MIT
 metadata:
   author: Moolabs
@@ -179,9 +179,9 @@ findings:
 
 | File | Consumed by |
 |---|---|
-| `.moolabs/cloud-bill/aws-cur-config.yaml` | moo-acute Tier 5 connector config |
-| `.moolabs/cloud-bill/gcp-bq-config.yaml` | moo-acute Tier 5 connector config |
-| `.moolabs/cloud-bill/azure-cost-config.yaml` | moo-acute Tier 5 connector config |
+| `.moolabs/cloud-bill/aws-cur-config.yaml` | the Moolabs platform's cloud-bill ingestion connector config |
+| `.moolabs/cloud-bill/gcp-bq-config.yaml` | the Moolabs platform's cloud-bill ingestion connector config |
+| `.moolabs/cloud-bill/azure-cost-config.yaml` | the Moolabs platform's cloud-bill ingestion connector config |
 | `.moolabs/cloud-bill/tag-propagation-report.md` | customer engineer + finance |
 | `.moolabs/cloud-bill/cell-3-findings.yaml` | PM/finance review (in three-role surface) |
 | `.moolabs/cloud-bill/wait-status.yaml` | tracks 24–48h floor for resume |
@@ -228,5 +228,5 @@ After the first-export scan completes, invoke `/cost-billing-adversarial-review 
 
 ## Assets
 
-- `assets/connector-config.schema.yaml` — JSON-Schema for the per-cloud connector configs (moo-acute Tier 5 contract).
+- `assets/connector-config.schema.yaml` — JSON-Schema for the per-cloud connector configs (the Moolabs platform's cloud-bill ingestion contract).
 - `assets/aws-untaggable-services.yaml` — known AWS services that don't propagate tags to child resources.

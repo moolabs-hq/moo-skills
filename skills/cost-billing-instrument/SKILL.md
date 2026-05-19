@@ -42,7 +42,18 @@ Generate the PR for our pilot customer's instrumentation
 - `v1-decisions-log.md` — your defaults come from here (Option B blocking insert, Python+TS v1, coverage-first).
 - `anchor-taxonomy.md` — the three patterns (sibling-pair / usage-only / cost-only).
 
-## Refuse-to-run preconditions — sequential workflow with TWO review loops
+## Refuse-to-run preconditions
+
+### Customer-context (always required)
+
+This skill reads `<repo>/.moolabs/customer-context/` for terminology, pricing-model, telemetry stack, and repo info. If absent, refuse with: "customer-context/ not found. Run `/cost-billing-bootstrap` first."
+
+Specifically required:
+- `customer-context/terminology.yaml` — codemod uses customer terms in `event_type` strings and PR descriptions.
+- `customer-context/telemetry-stack.yaml` — codemod picks brownfield vs greenfield per service from this.
+- `customer-context/repo-info.yaml` — codemod picks per-language, per-framework templates from this.
+
+### Sequential workflow with TWO review loops
 
 Per `cost-billing-shared/three-role-review.md`, the workflow is CFO → PM ⇄ PM → Engineer with two PM-centered loops. The codemod refuses to run unless ALL of these exist:
 
