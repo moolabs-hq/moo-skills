@@ -1,0 +1,116 @@
+{# Python + FastAPI codemod template for /cost-billing-instrument
+   Variables expected:
+     entry.pattern              — sibling-pair | usage-only | cost-only
+     entry.event_type           — e.g. "completion.delivered"
+     entry.workflow_id          — stable identifier
+     entry.idempotency_anchor   — { handler, path_param, confidence }
+     entry.refund_unit          — { unit, derivation }
+     entry.cost_workflow_ids    — list of cost-event workflow_ids that feed this usage event
+     trace_context_source       — "otel-via-fastapi-instrumentation" | "datadog" | ...
+     attribution_keys           — list of available attribution keys at this site
+     is_brownfield              — bool; true if customer already has OTel
+#}
+{% if entry.pattern == "sibling-pair" %}
+# ─────────────────────────────────────────────────────────────────────────────
+# moolabs SDK inserts (sibling-pair pattern)
+# usage event → client.meter.events.ingest_events
+# cost events → emitted as OTel span attributes (read by moo-acute Tier 2/4)
+#
+# SDK is blocking by design (~35ms typical round-trip). See PR description for
+# latency profile. v1 default is Option B (blocking + documented).
+# ─────────────────────────────────────────────────────────────────────────────
+
+from opentelemetry import trace as _moolabs_trace
+{% if not is_brownfield %}from moolabs import Moolabs as _MoolabsClient
+_moolabs_client = _MoolabsClient(api_key=os.environ["MOOLABS_API_KEY"]){% endif %}
+
+# Annotate the current span with moolabs.* cost attributes
+_moolabs_span = _moolabs_trace.get_current_span()
+if _moolabs_span and _moolabs_span.is_recording():
+    _moolabs_span.set_attribute("moolabs.workflow_id", "{{ entry.workflow_id }}")
+    _moolabs_span.set_attribute("moolabs.event_type", "{{ entry.event_type }}")
+    {% for cost_wf in entry.cost_workflow_ids %}
+    _moolabs_span.set_attribute("moolabs.cost.{{ loop.index }}.workflow_id", "{{ cost_wf }}")
+    {% endfor %}
+    {% if "request_id" in attribution_keys %}
+    _moolabs_span.set_attribute("moolabs.request.id", request.state.request_id)
+    {% endif %}
+    {% if "customer_id" in attribution_keys %}
+    _moolabs_span.set_attribute("moolabs.customer.id", str(customer_id))
+    {% endif %}
+    {% if "feature_id" in attribution_keys %}
+    _moolabs_span.set_attribute("moolabs.feature.id", "{{ entry.workflow_id.split('.')[1] }}")
+    {% endif %}
+
+# Idempotency key — derived per v1 heuristic
+# REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
+_moolabs_idempotency_key = f"{{ entry.idempotency_anchor.handler }}.{{ '{' }}{{ entry.idempotency_anchor.path_param }}{{ '}' }}.{int(time.time())}"
+
+# Emit the usage event — failure paths don't emit (see PR description)
+try:
+    _moolabs_client.meter.events.ingest_events([{
+        "id": _moolabs_idempotency_key,
+        "type": "{{ entry.event_type }}",
+        "subject": str({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "request.state.request_id" }}),
+        "time": datetime.utcnow().isoformat() + "Z",
+        "data": {
+            "quantity": {{ entry.refund_unit.derivation }},
+            "unit": "{{ entry.refund_unit.unit }}",
+        },
+    }])
+except Exception as _moolabs_err:
+    # Log + continue — don't fail the user-facing handler on telemetry failure
+    import logging as _moolabs_log
+    _moolabs_log.getLogger("moolabs").warning(
+        "ingest_events failed for %s: %s", "{{ entry.workflow_id }}", _moolabs_err
+    )
+
+{% elif entry.pattern == "usage-only" %}
+# ─────────────────────────────────────────────────────────────────────────────
+# moolabs SDK insert (usage-only pattern)
+# Single usage event; no cost-bearing call at this site.
+# ─────────────────────────────────────────────────────────────────────────────
+
+{% if not is_brownfield %}from moolabs import Moolabs as _MoolabsClient
+_moolabs_client = _MoolabsClient(api_key=os.environ["MOOLABS_API_KEY"]){% endif %}
+
+_moolabs_idempotency_key = f"{{ entry.idempotency_anchor.handler }}.{{ '{' }}{{ entry.idempotency_anchor.path_param }}{{ '}' }}.{int(time.time())}"
+
+try:
+    _moolabs_client.meter.events.ingest_events([{
+        "id": _moolabs_idempotency_key,
+        "type": "{{ entry.event_type }}",
+        "subject": str({{ entry.idempotency_anchor.path_param }}),
+        "time": datetime.utcnow().isoformat() + "Z",
+        "data": {
+            "quantity": {{ entry.refund_unit.derivation }},
+            "unit": "{{ entry.refund_unit.unit }}",
+        },
+    }])
+except Exception as _moolabs_err:
+    import logging as _moolabs_log
+    _moolabs_log.getLogger("moolabs").warning(
+        "ingest_events failed for %s: %s", "{{ entry.workflow_id }}", _moolabs_err
+    )
+
+{% elif entry.pattern == "cost-only" %}
+# ─────────────────────────────────────────────────────────────────────────────
+# moolabs cost-only emission via OTel
+# TODO: blocked on acute SDK (§10 #3); replace with client.acute.events.ingest_events
+#       when the acute namespace ships in moolabs-py / -ts / -go.
+# Reference: cost-billing-shared/sdk-surface-reference.md §"acute SDK gap"
+# ─────────────────────────────────────────────────────────────────────────────
+
+from opentelemetry import trace as _moolabs_trace
+
+_moolabs_span = _moolabs_trace.get_current_span()
+if _moolabs_span and _moolabs_span.is_recording():
+    _moolabs_span.set_attribute("moolabs.workflow_id", "{{ entry.workflow_id }}")
+    _moolabs_span.set_attribute("moolabs.cost.kind", "{{ entry.workflow_id.split('.')[-1] }}")
+    {% if "request_id" in attribution_keys %}
+    _moolabs_span.set_attribute("moolabs.request.id", request.state.request_id)
+    {% endif %}
+    {% if "customer_id" in attribution_keys %}
+    _moolabs_span.set_attribute("moolabs.customer.id", str(customer_id))
+    {% endif %}
+{% endif %}

@@ -1,0 +1,154 @@
+# Terminal-event heuristics for the refund test
+# Used by /cost-billing-discovery Phase 4 (refund_test.py).
+# Each signal adds to a confidence score in [0, 1]. Final candidates need ≥ 0.50.
+
+version: "0.1.0"
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 1: Verb pattern in handler name
+# Captures the linguistic shape of a "delivered output" event.
+# ──────────────────────────────────────────────────────────────────────────
+
+handler_verb_patterns:
+  strong_signal_weight: 0.30
+  patterns:
+    - "_completed"
+    - "_delivered"
+    - "_returned"
+    - "_generated"
+    - "_finished"
+    - "_emitted"
+    - "_sent"
+    - "_published"
+    - "_rendered"
+    - "_transcribed"
+    - "_summarized"
+    - "_translated"
+
+  weak_signal_weight: 0.10
+  weak_patterns:
+    - "process_"
+    - "handle_"
+    - "compute_"
+    - "calculate_"
+
+  negative_signal_weight: -0.20
+  negative_patterns:
+    # Patterns indicating internal handlers, not terminal events
+    - "_internal"
+    - "_helper"
+    - "_util"
+    - "_validate"
+    - "_check"
+    - "_retry"
+    - "_health"
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 2: OpenTelemetry span.kind
+# Server-span parents indicate user-facing handlers.
+# Requires OTel telemetry to be available; if not, signal is skipped.
+# ──────────────────────────────────────────────────────────────────────────
+
+otel_span_kind:
+  server_weight: 0.25
+  internal_weight: -0.15
+  client_weight: -0.10
+  producer_weight: 0.10
+  consumer_weight: 0.05
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 3: Pricing page intersection
+# If the customer provided --pricing-page, look for the handler name in copy.
+# Substring match (case-insensitive); word-boundary preferred.
+# ──────────────────────────────────────────────────────────────────────────
+
+pricing_page_intersection:
+  match_weight: 0.20
+  word_boundary_bonus: 0.05
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 4: Response shape
+# Handlers returning user-addressable artifacts are more likely terminal.
+# ──────────────────────────────────────────────────────────────────────────
+
+response_shape:
+  url_returned_weight: 0.20
+  id_returned_weight: 0.15
+  content_block_returned_weight: 0.20
+  empty_return_weight: -0.10        # internal-only handlers often return nothing
+  side_effect_only_weight: -0.15    # writes to DB but returns ack only
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 5: Subscription pattern
+# Recognized "subscription" / "plan" URL prefixes that may emit ZERO billing events.
+# Important: don't penalize; mark for cost-only-pattern review.
+# ──────────────────────────────────────────────────────────────────────────
+
+subscription_url_patterns:
+  - "/subscription/"
+  - "/subscriptions/"
+  - "/plan/"
+  - "/plans/"
+  - "/membership/"
+  - "/seat/"
+  - "/seats/"
+  - "/activate"
+  - "/cancel"
+  - "/renew"
+
+# Action when subscription pattern matches:
+# - Mark the entry as `pattern: usage-only` with confidence ≤ 0.50, OR
+# - If the matching cost-event is in the same handler subtree, prefer `pattern: cost-only`
+#   (the canonical subscription-customer case).
+
+# ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 6: HTTP method
+# POST/PUT/PATCH more likely user-facing than GET (which is often read-only).
+# ──────────────────────────────────────────────────────────────────────────
+
+http_method:
+  POST_weight: 0.10
+  PUT_weight: 0.05
+  PATCH_weight: 0.05
+  GET_weight: -0.05
+  DELETE_weight: 0.0      # ambiguous — sometimes a billable cancellation event
+
+# ──────────────────────────────────────────────────────────────────────────
+# FOUR-SCENARIO VALIDATION (refund test passed 2026-05-11)
+# Per requirements §2 + Doc 3 §6.4:
+#
+#   agentic     → terminal fires on agent final-answer, not per-step
+#   streaming   → terminal fires on stream-complete, not per-token
+#   hybrid      → terminal fires per addressable output (mix)
+#   subscription → ZERO terminal events; cost-events still emit via cost-only pattern
+#
+# Tests in /cost-billing-discovery/scripts/refund_test.py exercise these four shapes.
+# ──────────────────────────────────────────────────────────────────────────
+
+scenario_targets:
+  agentic:
+    minimum_score: 0.50
+    description: "Multi-step agent; only the final-answer step should score > 0.50."
+  streaming:
+    minimum_score: 0.50
+    description: "Stream-complete handler scores > 0.50; per-token chunks score < 0.30."
+  hybrid:
+    minimum_score: 0.50
+    description: "Each addressable output handler scores > 0.50."
+  subscription:
+    expected_score: "<0.30 OR cost-only-pattern"
+    description: "Subscription handlers emit zero usage events; flag cost-only."
+
+# ──────────────────────────────────────────────────────────────────────────
+# CALIBRATION
+# These weights are v1 defaults. Re-tune after first 5 customer integrations
+# using empirical accuracy on confirmed inventories.
+# ──────────────────────────────────────────────────────────────────────────
+
+calibration:
+  v1_baseline_threshold: 0.50
+  ideal_distribution:
+    high_confidence_terminal: ">0.75"      # auto-accept eligible
+    medium_confidence_terminal: "0.50-0.75" # review needed
+    rejected: "<0.50"                       # not a terminal event
+  recalibration_trigger: "after 5 customer integrations OR engineer disagreement >15%"

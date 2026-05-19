@@ -1,0 +1,142 @@
+# JSON-Schema (YAML form) for output-input-map.yaml — the LINKAGE GRAPH.
+# This is the load-bearing artifact: PM owns and certifies it.
+# The chargeability map's natural form per requirements §0.
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/output-input-map/0.1.0
+title: Output-input map (chargeability graph)
+type: object
+required: [version, last_synced, edges]
+properties:
+  version:
+    type: string
+    const: "0.1.0"
+  last_synced:
+    type: string
+    format: date-time
+  service_path:
+    type: string
+  edges:
+    type: array
+    items:
+      $ref: "#/$defs/output_edge"
+
+$defs:
+  output_edge:
+    type: object
+    required: [output_workflow_id, inputs, edge_review_signoff]
+    properties:
+      output_workflow_id:
+        type: string
+        description: |
+          References an entry by workflow_id in usage-events-inventory.yaml.
+          Many-to-many supported — same output may appear in multiple edges only if PM splits by sub-feature.
+      inputs:
+        type: array
+        items:
+          $ref: "#/$defs/input_link"
+      derivation_strategy:
+        type: string
+        enum:
+          - equal_split
+          - proportional_usage
+          - fixed_percentage
+          - amortization
+          - manual_weights
+        description: |
+          v1 default = equal_split. PM can override per edge.
+          Matches moo-acute's four allocation rules; selection here informs Tier 5 allocation rule.
+      derivation_strategy_note:
+        type: string
+        description: When manual_weights, the rationale for the chosen weights.
+
+      edge_review_signoff:
+        type: object
+        properties:
+          pm:
+            type: string
+            enum: [pending, approved, rejected, re-link-requested]
+          pm_note:
+            type: string
+
+      _audit:
+        type: object
+        properties:
+          proposed_by:
+            type: string
+            const: "/cost-billing-discovery"
+          proposed_at:
+            type: string
+            format: date-time
+          revision_history:
+            type: array
+            items:
+              type: object
+              properties:
+                ts: { type: string, format: date-time }
+                actor: { type: string }
+                change: { type: string }
+
+  input_link:
+    type: object
+    required: [cost_workflow_id, weight, link_confidence, rationale]
+    properties:
+      cost_workflow_id:
+        type: string
+        description: References an entry by workflow_id in cost-events-inventory.yaml.
+      weight:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+        description: |
+          Share of this output's cost attribution that comes from this input.
+          v1 default for equal_split = 1.0 / number-of-inputs.
+          PM can set any weight. Sum across an output's inputs should be in [0.95, 1.05]
+          (loose bound — small numerical drift is OK).
+      link_confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+        description: |
+          Per-edge confidence — Skill A's confidence THIS input feeds THIS output.
+          Distinct from per-entry confidence (per §6.4a #19o).
+      rationale:
+        type: string
+        description: |
+          One-line reason for the link. Examples:
+          - "co-located in same handler function"
+          - "OTel trace co-occurrence 0.97 over 30d"
+          - "named similarly and live in same router"
+      attribution_keys_shared:
+        type: array
+        items:
+          type: string
+          enum: [request_id, trace_id, customer_id, feature_id]
+        description: |
+          Which attribution keys appear on BOTH the cost-event and the usage-event call sites.
+          Higher overlap → higher link_confidence.
+
+example:
+  version: "0.1.0"
+  last_synced: "2026-05-19T07:42:00Z"
+  edges:
+    - output_workflow_id: "api.completion.completion-delivered"
+      derivation_strategy: equal_split
+      inputs:
+        - cost_workflow_id: "api.completion.openai-chat"
+          weight: 1.0
+          link_confidence: 0.92
+          rationale: "co-located in handler; OTel trace co-occurrence 0.97"
+          attribution_keys_shared: [request_id, trace_id, customer_id]
+        - cost_workflow_id: "api.completion.pinecone-query"
+          weight: 0.5
+          link_confidence: 0.71
+          rationale: "retrieval augment; sometimes skipped on cache hit"
+          attribution_keys_shared: [request_id, trace_id]
+      edge_review_signoff:
+        pm: pending
+        pm_note: ""
+      _audit:
+        proposed_by: "/cost-billing-discovery"
+        proposed_at: "2026-05-19T07:42:00Z"
+        revision_history: []

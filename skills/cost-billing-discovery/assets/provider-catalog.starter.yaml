@@ -1,0 +1,230 @@
+# Moolabs provider catalog — starter set
+# Used by /cost-billing-discovery Phase 3 (AST scan + catalog match).
+# Catalog miss → cell ④ finding (per §10 #6 v1: always surface, never silent-skip).
+#
+# To extend: add an entry under the right vendor. Each entry includes:
+#   - patterns: per-language detection patterns (AST matchers preferred over regex)
+#   - cost_dimension: maps to cost-events.schema.yaml#cost_dimension
+#   - response_keys: where to find usage figures in the response object
+#   - rate_source: how Moolabs prices this call (catalog / vendor API / unknown)
+
+version: "0.1.0"
+schema: "https://moolabs.com/schemas/provider-catalog/0.1.0"
+last_updated: "2026-05-19"
+
+vendors:
+
+  # ────────────────────────────────  LLM PROVIDERS  ────────────────────────────────
+
+  openai:
+    sdk_packages:
+      python: [openai]
+      typescript: [openai, "@openai/sdk"]
+      go: [github.com/sashabaranov/go-openai, github.com/openai/openai-go]
+    operations:
+      - id: chat.completions.create
+        patterns:
+          python: "openai.chat.completions.create"
+          typescript: "openai.chat.completions.create"
+          go: "ChatCompletion.New"
+        cost_dimension: llm_tokens
+        response_keys:
+          input_tokens: "response.usage.prompt_tokens"
+          output_tokens: "response.usage.completion_tokens"
+        rate_source: moolabs-rate-catalog
+      - id: completions.create
+        patterns:
+          python: "openai.completions.create"
+          typescript: "openai.completions.create"
+        cost_dimension: llm_tokens
+        response_keys:
+          input_tokens: "response.usage.prompt_tokens"
+          output_tokens: "response.usage.completion_tokens"
+        rate_source: moolabs-rate-catalog
+      - id: embeddings.create
+        patterns:
+          python: "openai.embeddings.create"
+          typescript: "openai.embeddings.create"
+        cost_dimension: llm_tokens
+        response_keys:
+          input_tokens: "response.usage.prompt_tokens"
+        rate_source: moolabs-rate-catalog
+      - id: images.generate
+        patterns:
+          python: "openai.images.generate"
+          typescript: "openai.images.generate"
+        cost_dimension: llm_image
+        response_keys: {}     # priced per image; quantity inferred from response.data length
+        rate_source: moolabs-rate-catalog
+
+  anthropic:
+    sdk_packages:
+      python: [anthropic]
+      typescript: ["@anthropic-ai/sdk"]
+    operations:
+      - id: messages.create
+        patterns:
+          python: "anthropic.messages.create"
+          typescript: "anthropic.messages.create"
+        cost_dimension: llm_tokens
+        response_keys:
+          input_tokens: "response.usage.input_tokens"
+          output_tokens: "response.usage.output_tokens"
+        rate_source: moolabs-rate-catalog
+
+  # ────────────────────────────────  IMAGE / VIDEO  ────────────────────────────────
+
+  replicate:
+    sdk_packages:
+      python: [replicate]
+      typescript: [replicate]
+    operations:
+      - id: predictions.create
+        patterns:
+          python: "replicate.run"
+          typescript: "replicate.run"
+        cost_dimension: gpu_seconds
+        response_keys:
+          gpu_seconds: "prediction.metrics.predict_time"
+        rate_source: vendor-api-response
+
+  # ────────────────────────────────  VECTOR / SEARCH  ────────────────────────────────
+
+  pinecone:
+    sdk_packages:
+      python: [pinecone, pinecone-client]
+      typescript: ["@pinecone-database/pinecone"]
+    operations:
+      - id: index.query
+        patterns:
+          python: "pinecone.Index"
+          typescript: "pinecone.index"
+        cost_dimension: vector_search
+        rate_source: moolabs-rate-catalog
+      - id: index.upsert
+        patterns:
+          python: "Index.upsert"
+          typescript: "Index.upsert"
+        cost_dimension: vector_search
+        rate_source: moolabs-rate-catalog
+
+  # ────────────────────────────────  AWS  ────────────────────────────────
+
+  aws-s3:
+    sdk_packages:
+      python: [boto3]
+      typescript: ["@aws-sdk/client-s3"]
+      go: [github.com/aws/aws-sdk-go-v2/service/s3]
+    operations:
+      - id: put_object
+        patterns:
+          python: "boto3.client('s3').put_object"
+          typescript: "S3Client.send(PutObjectCommand)"
+        cost_dimension: storage_requests
+        rate_source: moolabs-rate-catalog
+      - id: get_object
+        patterns:
+          python: "boto3.client('s3').get_object"
+          typescript: "S3Client.send(GetObjectCommand)"
+        cost_dimension: storage_requests
+        rate_source: moolabs-rate-catalog
+
+  aws-bedrock:
+    sdk_packages:
+      python: [boto3]
+      typescript: ["@aws-sdk/client-bedrock-runtime"]
+    operations:
+      - id: invoke_model
+        patterns:
+          python: "boto3.client('bedrock-runtime').invoke_model"
+          typescript: "BedrockRuntimeClient.send(InvokeModelCommand)"
+        cost_dimension: llm_tokens
+        notes: |
+          Pre-2026-04-08 invocations lack IAM-principal data in CUR; cost-events for those
+          dates have lower attribution confidence. See cost-billing-cloud-bill/Bedrock notes.
+        rate_source: moolabs-rate-catalog
+      - id: invoke_model_with_response_stream
+        patterns:
+          python: "boto3.client('bedrock-runtime').invoke_model_with_response_stream"
+        cost_dimension: llm_tokens
+        notes: streaming variant — usage event emits on stream-complete.
+        rate_source: moolabs-rate-catalog
+
+  # ────────────────────────────────  GCP  ────────────────────────────────
+
+  gcp-vertex:
+    sdk_packages:
+      python: [google-cloud-aiplatform, vertexai]
+      typescript: ["@google-cloud/aiplatform"]
+    operations:
+      - id: predict
+        patterns:
+          python: "vertexai.preview.language_models"
+        cost_dimension: llm_tokens
+        rate_source: moolabs-rate-catalog
+
+  # ────────────────────────────────  AZURE  ────────────────────────────────
+
+  azure-openai:
+    sdk_packages:
+      python: [openai]   # same SDK as OpenAI, different config
+      typescript: [openai]
+    operations:
+      - id: chat.completions.create
+        patterns:
+          python: "AzureOpenAI.chat.completions.create"
+        cost_dimension: llm_tokens
+        rate_source: moolabs-rate-catalog
+        notes: |
+          Detection requires looking at the client constructor — AzureOpenAI vs OpenAI base class
+          determines this is Azure-routed.
+
+  # ────────────────────────────────  COMMS  ────────────────────────────────
+
+  stripe:
+    sdk_packages:
+      python: [stripe]
+      typescript: [stripe]
+    operations:
+      - id: PaymentIntents.create
+        patterns:
+          python: "stripe.PaymentIntent.create"
+          typescript: "stripe.paymentIntents.create"
+        cost_dimension: api_call
+        rate_source: vendor-api-response
+        notes: typically not a customer-billable cost-event; surface for review.
+
+  twilio:
+    sdk_packages:
+      python: [twilio]
+      typescript: [twilio]
+    operations:
+      - id: messages.create
+        patterns:
+          python: "client.messages.create"
+        cost_dimension: sms_sent
+        rate_source: vendor-api-response
+
+  sendgrid:
+    sdk_packages:
+      python: [sendgrid]
+      typescript: ["@sendgrid/mail"]
+    operations:
+      - id: send
+        patterns:
+          python: "SendGridAPIClient.send"
+          typescript: "sgMail.send"
+        cost_dimension: email_sent
+        rate_source: vendor-api-response
+
+# ────────────────────────────────  EXTENDING  ────────────────────────────────
+#
+# To add a vendor:
+#   1. Add an entry under vendors:
+#   2. Provide SDK package names per language
+#   3. Provide AST matchers per language (use ast-grep syntax preferred over plain regex)
+#   4. Map cost_dimension to one of cost-events.schema.yaml#cost_dimension's enum values
+#   5. Provide response_keys when the SDK returns usage figures
+#
+# Catalog misses (vendor used but not in this file) get surfaced as cell ④ findings
+# under /cost-billing-discovery — engineer/PM decides add-to-catalog / non-billable / future.
