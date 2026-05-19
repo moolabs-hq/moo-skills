@@ -1,11 +1,11 @@
 ---
 name: moolabs-pr-review
-description: Moolabs-specific overlay on top of review-skills:adversarial-pr-review. Run the generic adversarial loop FIRST; this skill adds the company-specific checks the generic detection won't surface — internal middleware behavior (OM-Namespace, customer-key path, OpenMeter sink single-node-vs-cluster), cross-skill checks (feature-flags-guide if FF code changed; grooming-contracts if API surface changed; feature-summariser as the post-merge gate), Coda PRD linkage in the PR description, Outline architecture-doc handoff to docs.moolabs.com, and multi-repo coordination across moolabs-app / openmeter / nrev-ui-2. Use this — not the generic skill alone — when reviewing PRs on Moolabs repos. Triggers on "moolabs review", "review this <repo> PR", or any adversarial review request inside the Moolabs codebases. Requires review-skills:adversarial-pr-review and references the existing Moolabs grooming/testing/feature-flag/feature-summariser skills.
+description: Moolabs-specific overlay on top of moo-skills:adversarial-pr-review. Run the generic adversarial loop FIRST; this skill adds the company-specific checks the generic detection won't surface — internal middleware behavior (OM-Namespace, customer-key path, OpenMeter sink single-node-vs-cluster), cross-skill checks (feature-flags-guide if FF code changed; grooming-contracts if API surface changed; feature-summariser as the post-merge gate), Coda PRD linkage in the PR description, Outline architecture-doc handoff to docs.moolabs.com, and multi-repo coordination across moolabs-app / openmeter / nrev-ui-2. Use this — not the generic skill alone — when reviewing PRs on Moolabs repos. Triggers on "moolabs review", "review this <repo> PR", or any adversarial review request inside the Moolabs codebases. Requires moo-skills:adversarial-pr-review and references the existing Moolabs grooming/testing/feature-flag/feature-summariser skills.
 ---
 
 # Moolabs PR Review Overlay
 
-This skill is a checklist that sits on top of the generic adversarial loop. It does not replace `review-skills:adversarial-pr-review` — it adds Moolabs-only items the generic detection step won't surface, and it routes to other moo-skills when their domain shows up in the diff.
+This skill is a checklist that sits on top of the generic adversarial loop. It does not replace `moo-skills:adversarial-pr-review` — it adds Moolabs-only items the generic detection step won't surface, and it routes to other moo-skills when their domain shows up in the diff.
 
 ## When this applies
 
@@ -15,11 +15,11 @@ The user is asking for an adversarial review on a PR in a Moolabs-owned repo:
 - `nrev-ui-2` — frontend (TypeScript / Next.js)
 - Any other repo under `moolabs-hq/`
 
-If the PR is in a non-Moolabs repo, use `review-skills:adversarial-pr-review` directly without this overlay.
+If the PR is in a non-Moolabs repo, use `moo-skills:adversarial-pr-review` directly without this overlay.
 
 ## Procedure
 
-1. **Run `review-skills:adversarial-pr-review` first.** That skill creates the spec, detects the stack, and runs the loop. Don't reimplement any of it here.
+1. **Run `moo-skills:adversarial-pr-review` first.** That skill creates the spec, detects the stack, and runs the loop. Don't reimplement any of it here.
 2. **Before the first review round**, add the items below to the spec's "Risk map" section so the reviewer briefing in Phase 2 includes them.
 3. **Verify each Moolabs-specific item before declaring the PR ready-for-human.** Add a "Moolabs-specific verifications" subsection to the spec's per-PR detail.
 
@@ -91,6 +91,6 @@ The merge decision still belongs to the user — same rule as the generic skill,
 
 ## When to bypass this overlay
 
-- Documentation-only PRs in a Moolabs repo — use `review-skills:adversarial-pr-review` alone.
+- Documentation-only PRs in a Moolabs repo — use `moo-skills:adversarial-pr-review` alone.
 - Renovate / dependabot dependency-bump PRs — the cross-skill checklist is mostly noise; rely on the generic loop and CI.
 - Hot-fix PRs already pre-discussed where the user has explicitly waived the overlay checklist.

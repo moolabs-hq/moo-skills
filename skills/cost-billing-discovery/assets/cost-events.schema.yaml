@@ -1,0 +1,177 @@
+# JSON-Schema (YAML form) for cost-events-inventory.yaml
+# This is the INPUT side of the chargeability graph.
+# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument and /cost-billing-drift-lint.
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-events-inventory/0.1.0
+title: Cost-events inventory
+type: object
+required: [version, last_synced, entries]
+properties:
+  version:
+    type: string
+    const: "0.1.0"
+  last_synced:
+    type: string
+    format: date-time
+    description: ISO-8601 UTC; updated whenever discovery re-runs.
+  service_path:
+    type: string
+    description: Repo-relative path to the service this inventory covers; empty for monorepo-root scan.
+  entries:
+    type: array
+    items:
+      $ref: "#/$defs/cost_event_entry"
+
+$defs:
+  cost_event_entry:
+    type: object
+    required: [workflow_id, file, line, vendor, operation, confidence, pattern, emission_path]
+    properties:
+      workflow_id:
+        type: string
+        description: Stable identifier surviving renames; matched by /cost-billing-drift-lint.
+        pattern: "^[a-z0-9][a-z0-9-]*\\.[a-z0-9-]+(\\.[a-z0-9-]+)*$"
+
+      file:
+        type: string
+        description: Repo-relative path.
+      line:
+        type: integer
+        minimum: 1
+
+      vendor:
+        type: string
+        enum:
+          - openai
+          - anthropic
+          - replicate
+          - pinecone
+          - aws-s3
+          - aws-bedrock
+          - aws-ec2
+          - aws-lambda
+          - aws-rds
+          - gcp-vertex
+          - gcp-storage
+          - azure-openai
+          - azure-cosmos
+          - stripe
+          - twilio
+          - sendgrid
+          - cloudflare-r2
+          - other          # cell ④ candidates; require a vendor_label
+
+      vendor_label:
+        type: string
+        description: Required when vendor=other; the actual vendor name as discovered.
+
+      operation:
+        type: string
+        description: Specific operation in the vendor SDK (e.g. "chat.completions.create").
+
+      cost_dimension:
+        type: string
+        enum:
+          - llm_tokens
+          - llm_image
+          - gpu_seconds
+          - storage_bytes
+          - storage_requests
+          - bandwidth_bytes
+          - api_call
+          - email_sent
+          - sms_sent
+          - vector_search
+          - other
+
+      confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+        description: |
+          Skill A's confidence this is a real cost-bearing call.
+          1.0 = catalog match; 0.7-0.95 = pattern match; <0.7 = surfaced for review.
+
+      pattern:
+        type: string
+        enum: [sibling-pair, usage-only, cost-only]
+        description: Which codemod pattern applies (see /cost-billing-instrument).
+
+      emission_path:
+        type: string
+        enum: [otel-span, sdk-direct-acute-future, sdk-cls-billing]
+        description: |
+          v1 only `otel-span` is valid for cost events.
+          `sdk-direct-acute-future` is reserved for when client.acute.* lands.
+
+      attribution_keys_available:
+        type: array
+        items:
+          type: string
+          enum: [request_id, trace_id, customer_id, feature_id, tags]
+        description: Which attribution keys are present at this call site.
+
+      idempotency_anchor:
+        type: object
+        properties:
+          handler:
+            type: string
+          path_param:
+            type: string
+          confidence:
+            type: number
+        description: How idempotency keys will be derived; surfaced to /cost-billing-instrument.
+
+      rate_source:
+        type: string
+        enum:
+          - moolabs-rate-catalog
+          - vendor-api-response
+          - manual-override
+          - unknown
+        description: Where the cost rate comes from when reconciling.
+
+      review_signoff:
+        type: object
+        properties:
+          engineer: { type: string, enum: [pending, approved, rejected] }
+
+      framework:
+        type: string
+        description: Detected framework (fastapi, django, express, nestjs, etc.); informs codemod adapter.
+
+      review_notes:
+        type: array
+        items: { type: string }
+
+      _verification_command:
+        type: string
+        description: |
+          Optional. The grep / AST command that, when re-run, should re-discover this entry.
+          Used by /cost-billing-adversarial-review for verification.
+
+example:
+  version: "0.1.0"
+  last_synced: "2026-05-19T07:42:00Z"
+  service_path: "services/api"
+  entries:
+    - workflow_id: "api.completion.openai-chat"
+      file: "services/api/handlers/completion.py"
+      line: 41
+      vendor: openai
+      operation: "chat.completions.create"
+      cost_dimension: llm_tokens
+      confidence: 1.00
+      pattern: sibling-pair
+      emission_path: otel-span
+      attribution_keys_available: [request_id, trace_id, customer_id, feature_id]
+      idempotency_anchor:
+        handler: complete_chat
+        path_param: conversation_id
+        confidence: 0.92
+      rate_source: moolabs-rate-catalog
+      framework: fastapi
+      review_signoff:
+        engineer: pending
+      _verification_command: "ast-grep -p 'openai.chat.completions.create($$$)' services/api/handlers/completion.py"

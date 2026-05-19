@@ -1,0 +1,150 @@
+# JSON-Schema (YAML form) for usage-events-inventory.yaml
+# This is the OUTPUT side of the chargeability graph.
+# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument, /cost-billing-drift-lint, moo-meter rule synthesis.
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/usage-events-inventory/0.1.0
+title: Usage-events inventory
+type: object
+required: [version, last_synced, entries]
+properties:
+  version:
+    type: string
+    const: "0.1.0"
+  last_synced:
+    type: string
+    format: date-time
+  service_path:
+    type: string
+  entries:
+    type: array
+    items:
+      $ref: "#/$defs/usage_event_entry"
+
+$defs:
+  usage_event_entry:
+    type: object
+    required: [workflow_id, file, line, event_type, confidence, pattern, refund_unit, cfo_metadata]
+    properties:
+      workflow_id:
+        type: string
+        pattern: "^[a-z0-9][a-z0-9-]*\\.[a-z0-9-]+(\\.[a-z0-9-]+)*$"
+
+      file: { type: string }
+      line: { type: integer, minimum: 1 }
+      framework: { type: string }
+
+      event_type:
+        type: string
+        description: |
+          The SDK event type (e.g. "completion.delivered", "image.rendered", "video.transcribed").
+          Will be passed as `type` field on `client.meter.events.ingest_events()`.
+
+      confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+
+      pattern:
+        type: string
+        enum: [sibling-pair, usage-only, cost-only]
+        description: cost-only here is the rare case where this entry is a non-billing terminal event (e.g. subscription customers — entry exists for completeness but emits no usage event).
+
+      refund_unit:
+        type: object
+        required: [unit, derivation]
+        properties:
+          unit:
+            type: string
+            enum: [per_token_1k, per_request, per_render, per_minute, per_seat, per_completion, per_byte_gb, custom]
+          custom_unit_label:
+            type: string
+            description: Required when unit=custom.
+          derivation:
+            type: string
+            description: How quantity is computed at emit time (e.g. "len(response.choices[0].message.content.split())").
+
+      lifecycle_states_emitted:
+        type: array
+        items:
+          type: string
+          enum: [succeeded, failed, cancelled, partial-stream-collapse]
+        description: |
+          Per requirements §4.3 — don't emit usage events on errors by default;
+          emit partials per customer policy.
+
+      cfo_metadata:
+        type: object
+        description: First-class CFO data — survives drift-lint.
+        properties:
+          proposed_billed_unit:
+            type: string
+            description: Human-readable unit ("per 1k tokens", "per render", "per minute").
+          proposed_unit_price_usd:
+            type: number
+            minimum: 0
+          fair_usage_threshold:
+            type: object
+            description: |
+              Optional. Free-tier threshold per end-user before overage rates kick in.
+              When present, survives drift-lint per §6.4a #19m.
+            properties:
+              quantity: { type: number }
+              unit: { type: string }
+              period: { type: string, enum: [day, week, month, lifetime] }
+          projected_monthly_revenue_usd:
+            type: number
+
+      attribution_keys_required:
+        type: array
+        items:
+          type: string
+          enum: [request_id, trace_id, customer_id, feature_id, tags]
+
+      review_signoff:
+        type: object
+        description: |
+          Sequential signoffs per three-role-review.md. Each stage MUST be approved
+          (or explicitly marked re-open) before the next stage's signoff is valid.
+        properties:
+          cfo_stage1: { type: string, enum: [pending, approved, re-open] }
+          pm_stage2: { type: string, enum: [pending, approved, re-open-cfo] }
+          cfo_stage2b: { type: string, enum: [pending, approved, re-open-pm] }
+          engineer_stage3: { type: string, enum: [pending, approved, re-open-pm] }
+          pm_stage3b: { type: string, enum: [pending, approved, re-open-engineer, bubble-up-to-cfo] }
+
+      review_notes:
+        type: array
+        items: { type: string }
+
+      _verification_command:
+        type: string
+
+example:
+  version: "0.1.0"
+  last_synced: "2026-05-19T07:42:00Z"
+  service_path: "services/api"
+  entries:
+    - workflow_id: "api.completion.completion-delivered"
+      file: "services/api/handlers/completion.py"
+      line: 47
+      framework: fastapi
+      event_type: "completion.delivered"
+      confidence: 0.94
+      pattern: sibling-pair
+      refund_unit:
+        unit: per_token_1k
+        derivation: "response.usage.completion_tokens"
+      lifecycle_states_emitted: [succeeded]
+      cfo_metadata:
+        proposed_billed_unit: "per 1k tokens"
+        proposed_unit_price_usd: 0.02
+        fair_usage_threshold:
+          quantity: 50000
+          unit: tokens
+          period: month
+        projected_monthly_revenue_usd: 3200.00
+      attribution_keys_required: [request_id, customer_id, feature_id]
+      review_signoff:
+        cfo: pending
+        engineer: pending
