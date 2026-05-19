@@ -14,80 +14,38 @@ The PM sits at the apex. PM converts CFO's economic spec into a billable-unit sp
 
 ## Workflow shape — a Y with PM at the apex
 
-```
-                ┌─────────────────────────────────────────┐
-                │  STAGE 1 — CFO generates cfo-spec       │
-                │  Fair-usage value per product;          │
-                │  proposed billed unit; proposed price;  │
-                │  projected monthly revenue.             │
-                │  Output: cfo-fills-in usage-events YAML │
-                └─────────────────────────────────────────┘
-                                  │
-                                  ▼  (PM reads CFO's doc)
-                ┌─────────────────────────────────────────┐
-                │  STAGE 2 — PM generates pm-spec         │
-                │  Billable-unit specs (per output);      │
-                │  output↔input map (bill of materials);  │
-                │  per-edge weights + attribution rules.  │
-                │  Output: output-input-map.yaml + PM     │
-                │  edits to usage-events-inventory.yaml   │
-                └─────────────────────────────────────────┘
-                          │              ▲
-              (CFO reads  │              │  (PM revises after CFO feedback)
-               PM's doc)  │              │
-                          ▼              │
-                ┌─────────────────────────────────────────┐
-                │  STAGE 2b — CFO ⇄ PM loop               │
-                │  CFO reviews PM's doc.                  │
-                │  Disagree → PM revises → CFO reviews    │
-                │  again. Converges within 3 cycles or    │
-                │  escalates.                             │
-                │  Outputs: cfo-stage2b-signoff,          │
-                │  pm-stage2-signoff (both status:        │
-                │  approved).                             │
-                └─────────────────────────────────────────┘
-                                  │
-                                  ▼  (Engineer reads PM's approved doc)
-                ┌─────────────────────────────────────────┐
-                │  STAGE 3 — Engineer generates eng-spec  │
-                │  file:line per entry; framework adapter │
-                │  choice; idempotency anchor decision;   │
-                │  false-positive rejects; sibling moves. │
-                │  Output: engineer-edits to cost-events- │
-                │  inventory + engineer-spec.yaml         │
-                └─────────────────────────────────────────┘
-                          │              ▲
-              (PM reads   │              │  (Engineer revises after PM feedback)
-               Eng's doc) │              │
-                          ▼              │
-                ┌─────────────────────────────────────────┐
-                │  STAGE 3b — Engineer ⇄ PM loop          │
-                │  PM reviews engineer's doc.             │
-                │  If engineer's code reality breaks a    │
-                │  PM unit/mapping decision (e.g., the    │
-                │  "completion" event is actually a       │
-                │  stream, no single completion point),   │
-                │  PM updates pm-spec → engineer revises  │
-                │  engineer-spec. Loop until both         │
-                │  approved.                              │
-                │  Engineer-initiated reopens that        │
-                │  require CFO involvement bubble up to   │
-                │  Stage 2b.                              │
-                └─────────────────────────────────────────┘
-                                  │
-                                  ▼
-                ┌─────────────────────────────────────────┐
-                │  STAGE 4 — Holistic Skill R gate        │
-                │  /cost-billing-adversarial-review       │
-                │  invocation 5 (holistic-pre-codemod).   │
-                │  Final blocking authority.              │
-                └─────────────────────────────────────────┘
-                                  │
-                                  ▼
-                ┌─────────────────────────────────────────┐
-                │  /cost-billing-instrument               │
-                │  codemod runs.                          │
-                └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    S1["<b>STAGE 1 — CFO generates cfo-spec</b><br/>Fair-usage value per product<br/>Proposed billed unit + price<br/>Projected monthly revenue<br/><i>Output: cfo_metadata in usage-events YAML</i>"]
+
+    S2["<b>STAGE 2 — PM generates pm-spec</b><br/>Billable-unit specs per output<br/>Output↔input map (bill of materials)<br/>Per-edge weights + attribution rules<br/><i>Output: output-input-map.yaml + PM edits to usage-events-inventory</i>"]
+
+    S2b{{"<b>STAGE 2b — CFO ⇄ PM loop</b><br/>CFO reviews PM's doc<br/>Disagree → PM revises → CFO reviews again<br/>Converges within 3 cycles or escalates<br/><i>Outputs: cfo-stage2b-signoff + pm-stage2-signoff approved</i>"}}
+
+    S3["<b>STAGE 3 — Engineer generates engineer-spec</b><br/>file:line per entry<br/>Framework adapter choice<br/>Idempotency anchor decision<br/>False-positive rejects + sibling moves<br/><i>Output: engineer-edits to cost-events-inventory + engineer-spec.yaml</i>"]
+
+    S3b{{"<b>STAGE 3b — Engineer ⇄ PM loop</b><br/>PM reviews engineer's doc<br/>If code reality breaks PM's unit/mapping<br/>(e.g. completion is actually a stream)<br/>PM updates pm-spec → engineer revises<br/>Engineer-initiated reopens needing CFO bubble up to Stage 2b"}}
+
+    R["<b>STAGE 4 — Holistic Skill R gate</b><br/>/cost-billing-adversarial-review --phase holistic-pre-codemod<br/>Final blocking authority"]
+
+    CM["<b>/cost-billing-instrument</b><br/>codemod runs<br/><i>(the only stage that emits new code)</i>"]
+
+    S1 -- "PM reads CFO's doc" --> S2
+    S2 -- "CFO reads PM's doc" --> S2b
+    S2b -- "PM revises after CFO feedback" --> S2
+    S2b -- "Engineer reads PM's approved doc" --> S3
+    S3 -- "PM reads engineer's doc" --> S3b
+    S3b -- "Engineer revises after PM feedback" --> S3
+    S3b --> R
+    R --> CM
+
+    style S1  fill:#fff7e0,stroke:#b58900,color:#000
+    style S2  fill:#e7e9ff,stroke:#2c39a3,color:#000
+    style S2b fill:#fff,stroke:#666,stroke-dasharray:4 2,color:#000
+    style S3  fill:#e0f5e7,stroke:#1d7a3d,color:#000
+    style S3b fill:#fff,stroke:#666,stroke-dasharray:4 2,color:#000
+    style R   fill:#ffe0e0,stroke:#a32c2c,color:#000
+    style CM  fill:#222,stroke:#000,color:#fff
 ```
 
 ---
@@ -111,24 +69,18 @@ Each role generates one or more artifacts; the next role's review either approve
 
 ## The graph (one underlying artifact, three projections)
 
-```
-                  ┌──────────────────────────────────────────┐
-                  │  cost-events-inventory.yaml    (INPUTS)  │
-                  │  Engineer's doc — file:line, framework,  │
-                  │  idempotency anchors verified.           │
-                  └──────────────────────────────────────────┘
-                                     ▲
-                                     │
-                                     │  output-input-map.yaml
-                                     │  PM's doc — bill of materials.
-                                     │  per-edge weights + attribution rules.
-                                     │
-                                     ▼
-                  ┌──────────────────────────────────────────┐
-                  │  usage-events-inventory.yaml   (OUTPUTS) │
-                  │  CFO's doc — fair-usage values, price,   │
-                  │  billable unit, projected revenue.       │
-                  └──────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    COST["<b>cost-events-inventory.yaml</b> (INPUTS)<br/><i>Engineer's doc</i><br/>file:line, framework, idempotency anchors verified"]
+    MAP["<b>output-input-map.yaml</b><br/><i>PM's doc — bill of materials</i><br/>per-edge weights + attribution rules"]
+    USAGE["<b>usage-events-inventory.yaml</b> (OUTPUTS)<br/><i>CFO's doc</i><br/>fair-usage values, price, billable unit, projected revenue"]
+
+    COST <--> MAP
+    MAP <--> USAGE
+
+    style COST fill:#e0f5e7,stroke:#1d7a3d,color:#000
+    style MAP fill:#e7e9ff,stroke:#2c39a3,color:#000
+    style USAGE fill:#fff7e0,stroke:#b58900,color:#000
 ```
 
 Each artifact is a YAML file; each role's "doc" is the section of that YAML they own + the markdown narrative that explains their rationale.

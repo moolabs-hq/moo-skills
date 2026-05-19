@@ -17,26 +17,37 @@ Six sibling skills implement the framework from `docs/grooming/2026-05-19-cost-b
 
 ## Pipeline order
 
+```mermaid
+flowchart TD
+    D[discovery: 1A→1B→1C→1D inventories]
+    BOOT[/cost-billing-bootstrap: customer-context/]
+    CFO[CFO Stage 1]
+    PM[PM Stage 2]
+    CFOPM[CFO ⇄ PM Stage 2b]
+    ENG[Engineer Stage 3]
+    ENGPM[Engineer ⇄ PM Stage 3b]
+    RH[Skill R: holistic-pre-codemod]
+    CODEMOD[/cost-billing-instrument: codemod/]
+    DRIFT[drift-lint CI]
+    CLOUD[cloud-bill]
+    RECON[reconcile<br/>Moolabs-internal]
+
+    BOOT --> D --> CFO --> PM
+    PM <--> CFOPM
+    CFOPM --> ENG
+    ENG <--> ENGPM
+    ENGPM --> RH --> CODEMOD --> DRIFT
+    CLOUD -.-> RECON
+
+    style CODEMOD fill:#222,stroke:#000,color:#fff
+    style RH fill:#ffe0e0,stroke:#a32c2c,color:#000
+    style CFO fill:#fff7e0,stroke:#b58900,color:#000
+    style PM fill:#e7e9ff,stroke:#2c39a3,color:#000
+    style ENG fill:#e0f5e7,stroke:#1d7a3d,color:#000
+    style RECON fill:#eee,stroke:#666,color:#000
 ```
-        ┌────────────────────────────────────────────────────────────────┐
-        │                  one customer integration                       │
-        └────────────────────────────────────────────────────────────────┘
 
-  discovery ─[R]→ discovery ─[R]→ discovery ─[R]→ inventories
-     (1A)            (1B)            (1C)            (1D)
-                                                       │
-                                                      [R holistic]
-                                                       │
-                                                       ▼
-                                                  instrument ─[R]→ PR
-                                                                       │
-                                                                       ▼
-                                                                  drift-lint  (continuous CI)
-
-  cloud-bill ───────────────────────────────────► reconcile  (Moolabs-internal)
-```
-
-`[R]` marks Skill R invocation points (6 total per pipeline; see `gaps-tracker.md` §6.3 for the v1 decision on whether R also runs on B and C).
+Skill R adversarial-review fires at every stage handoff (post-discovery, post-cfo-stage1, post-pm-stage2, post-engineer-stage3, holistic-pre-codemod, post-codemod) — see `gaps-tracker.md` §6.3 for the v1 decision on whether R also runs on B and C.
 
 ## Read these before invoking any skill
 

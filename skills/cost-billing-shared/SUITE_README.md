@@ -24,38 +24,42 @@ Plus `cost-billing-shared/` — not a slash-invocable skill; holds the documenta
 
 ## Pipeline diagram
 
+```mermaid
+flowchart LR
+    subgraph DISCOVERY ["discovery (Skill A)"]
+        D1[1A doc-tree] --> D2[1B code-graph] --> D3[1C unconfirmed inventory] --> D4[1D confirmed inventory]
+    end
+
+    subgraph ROLES ["three-role workflow (Y with PM at apex)"]
+        CFO1[CFO Stage 1] --> PM2[PM Stage 2]
+        PM2 <--> CFOPM["CFO ⇄ PM Stage 2b<br/>(≤3 cycles)"]
+        CFOPM --> ENG3[Engineer Stage 3]
+        ENG3 <--> ENGPM["Engineer ⇄ PM Stage 3b<br/>(uncapped)"]
+    end
+
+    R1[Skill R: post-discovery]
+    RH["Skill R: holistic-pre-codemod"]
+    CODEMOD[/cost-billing-instrument: codemod emits PR/]
+    RPR[Skill R: post-codemod]
+    DRIFT[drift-lint: continuous CI per PR]
+    CLOUD[cloud-bill]
+    RECON[reconcile<br/>Moolabs-internal]
+
+    DISCOVERY --> R1 --> ROLES
+    ENGPM --> RH --> CODEMOD --> RPR --> DRIFT
+    CLOUD -.-> RECON
+
+    style CODEMOD fill:#222,stroke:#000,color:#fff
+    style RH fill:#ffe0e0,stroke:#a32c2c,color:#000
+    style R1 fill:#ffe0e0,stroke:#a32c2c,color:#000
+    style RPR fill:#ffe0e0,stroke:#a32c2c,color:#000
+    style CFO1 fill:#fff7e0,stroke:#b58900,color:#000
+    style PM2 fill:#e7e9ff,stroke:#2c39a3,color:#000
+    style ENG3 fill:#e0f5e7,stroke:#1d7a3d,color:#000
+    style RECON fill:#eee,stroke:#666,color:#000
 ```
-  ┌─────────────────────────  one customer integration ─────────────────────────┐
 
-  discovery(1A doc-tree) ──[R]──> discovery(1B code-graph) ──[R]──> discovery(1C unconfirmed)
-                                                                          │
-                                                                         [R]
-                                                                          │
-                                                                          ▼
-                                                              discovery(1D confirmed)
-                                                                          │
-                                                              CFO Stage 1 → PM Stage 2
-                                                              CFO ⇄ PM Stage 2b (≤3 cycles)
-                                                              Engineer Stage 3
-                                                              Engineer ⇄ PM Stage 3b
-                                                                          │
-                                                                  [R holistic]
-                                                                          │
-                                                                          ▼
-                                                                    instrument
-                                                                          │
-                                                                         [R]
-                                                                          │
-                                                                          ▼
-                                                                    PR(s) emitted
-                                                                          │
-                                                                          ▼
-                                                                    drift-lint  (continuous CI)
-
-  cloud-bill ────────────────────────────────────────────────────────────► reconcile  (Moolabs-internal)
-```
-
-`[R]` = Skill R adversarial-review invocation. PM is the apex of the review workflow with two loops (CFO ⇄ PM upstream, Engineer ⇄ PM downstream); engineer never talks directly to CFO in v1.
+Skill R fires at every stage handoff. PM is the apex of the review workflow with two loops (CFO ⇄ PM upstream, Engineer ⇄ PM downstream); engineer never talks directly to CFO in v1. Finance + Product generate plan-documents (no code); Engineer's spec points at existing code (no new code); the codemod is the only stage that emits new code.
 
 ---
 
