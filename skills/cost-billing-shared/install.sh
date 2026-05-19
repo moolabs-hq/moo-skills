@@ -28,7 +28,7 @@ set -euo pipefail
 
 # Per-persona skill subsets — only install what that persona actually uses.
 # cost-billing-shared is required by every persona (loaded by the other skills).
-# cost-billing-reconcile is Moolabs-engineering-internal — only included in --persona all.
+# cost-billing-reconcile is NOT in this suite — it's Moolabs-engineering-internal infrastructure tracked separately.
 
 SKILLS_FINANCE=(
   cost-billing-bootstrap         # generates customer-context (one-time)
@@ -59,9 +59,13 @@ SKILLS_ALL=(
   cost-billing-instrument
   cost-billing-drift-lint
   cost-billing-adversarial-review
-  cost-billing-reconcile         # Moolabs-engineering-internal; ONLY in 'all'
   cost-billing-shared
 )
+# Note: cost-billing-reconcile was removed from this customer-portable suite.
+# It is an engineering-internal Moolabs harness for validating moo-acute's
+# attribution_engine.py against real customer cloud bills; it has no business
+# running in a customer environment. Tracked separately as Moolabs internal
+# infrastructure — see cost-billing-shared/v1-decisions-log.md.
 
 # Will be set to one of the above arrays after persona is known.
 SUITE_SKILLS=()
@@ -462,8 +466,6 @@ for skill in "${SUITE_SKILLS[@]}"; do
       echo "  /cost-billing-drift-lint          — Skill 3: CI drift detection" ;;
     cost-billing-adversarial-review)
       echo "  /cost-billing-adversarial-review  — Skill R: 5-phase quality gate" ;;
-    cost-billing-reconcile)
-      echo "  /cost-billing-reconcile           — Skill C: WAPE/Coverage validation (Moolabs-internal)" ;;
     cost-billing-shared)
       : ;;  # shared dir; not slash-invocable, listed below
   esac
@@ -557,7 +559,8 @@ Recommended flow:
   6. /cost-billing-adversarial-review --phase post-codemod
   7. Add /cost-billing-drift-lint to CI
 
-Skill C (/cost-billing-reconcile) runs in Moolabs's CI, not in the customer pipeline.
+(Skill C — the attribution-validation harness — is Moolabs-internal infrastructure
+and is NOT part of this customer-portable suite.)
 EOF
       ;;
   esac

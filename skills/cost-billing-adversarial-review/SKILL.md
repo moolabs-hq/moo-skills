@@ -1,7 +1,7 @@
 ---
 name: cost-billing-adversarial-review
 description: >-
-  Five-phase adversarial review pattern applied as the hostile gate at every workflow handoff in the Cost+Billing suite. Reviews each role's plan-document (finance / product / engineer generate NO code — just plans) AND the codemod's PR (the only stage that emits new code). Six invocation points: post-discovery, post-cfo-stage1 (pricing + fair-usage plan), post-pm-stage2 (output-input bill-of-materials), post-engineer-stage3 (file:line + adapter + idempotency spec), holistic-pre-codemod, post-codemod (generated PR). Risks tuned per artifact: hallucinated billable features, pricing inconsistency, orphan outputs, refund-unit drift, wrong file:line, idempotency collisions, security footguns. Cross-model reviewer, 5-round cap, CRITICAL/HIGH/MEDIUM/LOW severity stops at no CRITICAL or HIGH remaining. Applies to A/B/2, NOT C. Triggers on "adversarial review", "Skill R", "review the CFO plan", "review the PM plan", "review the engineer spec", "hostile review of codemod PR".
+  Five-phase adversarial review pattern applied as the hostile gate at every workflow handoff in the Cost+Billing suite. Reviews each role's plan-document (finance / product / engineer generate NO code — just plans) AND the codemod's PR (the only stage that emits new code). Six invocation points: post-discovery, post-cfo-stage1 (pricing + fair-usage plan), post-pm-stage2 (output-input bill-of-materials), post-engineer-stage3 (file:line + adapter + idempotency spec), holistic-pre-codemod, post-codemod (generated PR). Risks tuned per artifact: hallucinated billable features, pricing inconsistency, orphan outputs, refund-unit drift, wrong file:line, idempotency collisions, security footguns. Cross-model reviewer, 5-round cap, CRITICAL/HIGH/MEDIUM/LOW severity stops at no CRITICAL or HIGH remaining. Triggers on "adversarial review", "Skill R", "review the CFO plan", "review the PM plan", "review the engineer spec", "hostile review of codemod PR".
 license: MIT
 metadata:
   author: Moolabs
@@ -190,7 +190,7 @@ Default review-spec location is `docs/superpowers/reviews/<...>` inside the **cu
 - **Never** label a finding as a real bug without running its verification command.
 - **Never** apply a fix without producing the three-column "what was wrong / what changed / what we ran" entry.
 - **Never** loop past 5 iterations. Escalate.
-- **Never** review Skill C output — Skill C is itself a validation skill (per `gaps-tracker.md` §6.5 #27).
+- **Never** review Moolabs-internal infrastructure outputs (e.g., the attribution-engine reconciliation harness) — those have their own internal validation.
 - **Never** write outside the customer's repo unless `--review-spec-out=<path>` is explicitly passed.
 
 ## Related skill

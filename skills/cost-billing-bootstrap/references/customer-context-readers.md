@@ -56,10 +56,6 @@ Optional files (warn if missing; degrade gracefully):
 - `terminology.yaml` — review specs use customer terms in summaries.
 - `product-summary.md` — informs "does this feature actually exist?" checks (catches hallucinated features).
 
-### `/cost-billing-reconcile`
-
-- N/A — Skill C is engineering-internal at Moolabs; it does NOT read customer-context.
-
 ## Reading pattern (pseudocode)
 
 ```python

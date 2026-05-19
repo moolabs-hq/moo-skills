@@ -104,7 +104,6 @@ All three SDKs (`moolabs-py`, `moolabs-go`, `moolabs-ts`) are auto-generated fro
 | `/cost-billing-discovery` | Knows what surface to wire (`client.meter.events.ingest_events`) and what NOT to wire (direct cost-event call absent — emit OTel for cost). |
 | `/cost-billing-instrument` | Template selector reads `{language, framework} → template file`; templates reference verified call shapes here. |
 | `/cost-billing-drift-lint` | When scanning customer code, looks for `client.meter.events.*` calls (positive match) and flags any direct `EventsApi`/`MetersApi` calls (anti-pattern). |
-| `/cost-billing-reconcile` | Reconciles cost spans against cloud-bill imports — until direct cost-event SDK ships, cost emission audit-trail is span-only. |
 | `/cost-billing-adversarial-review` | Risk class "wrong namespace" — must flag any insert that uses `client.usage.*` or calls `EventsApi` directly. |
 | `/cost-billing-cloud-bill` | No direct dependency — cloud-bill ingestion is configured server-side, not via SDK. |
 

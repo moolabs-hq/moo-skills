@@ -4,16 +4,18 @@ This directory holds material that **all six skills** in the suite depend on. It
 
 ## The Suite
 
-Six sibling skills implement the framework from `docs/grooming/2026-05-19-cost-billing-discovery-requirements.md`. Each is independently invocable; together they form the customer integration pipeline.
+Six sibling skills implement the customer-facing portion of the framework from `docs/grooming/2026-05-19-cost-billing-discovery-requirements.md`. Each is independently invocable; together they form the customer integration pipeline.
 
 | Order | Skill | Purpose |
 |-------|-------|---------|
+| 0 | `/cost-billing-bootstrap` | Customer-context generator (run first). LLM-driven setup. |
 | 1 | `/cost-billing-discovery` | Skill A — scan customer repo, produce three inventories (cost / usage / output↔input). |
 | 2 | `/cost-billing-cloud-bill` | Skill B — wire AWS CUR / GCP BigQuery export / Azure Cost Management; surface cell ③ findings. |
 | 3 | `/cost-billing-instrument` | Skill 2 — codemod that wires SDK calls (cost + usage) into customer code. **Framework's core deliverable.** |
 | 4 | `/cost-billing-drift-lint` | Skill 3 — CI step that diffs code against saved inventories on every PR. |
-| 5 | `/cost-billing-adversarial-review` | Skill R — 5-phase adversarial review gate; runs 6 times per pipeline. |
-| 6 | `/cost-billing-reconcile` | Skill C — WAPE/Coverage validation harness; engineering-internal (Moolabs). |
+| 5 | `/cost-billing-adversarial-review` | Skill R — 5-phase adversarial review gate; runs at every workflow handoff. |
+
+> Skill C (attribution-engine reconciliation harness, WAPE/Coverage validation) is **engineering-internal Moolabs infrastructure** and is not part of this customer-portable suite. Tracked separately.
 
 ## Pipeline order
 

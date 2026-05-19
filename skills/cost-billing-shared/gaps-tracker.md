@@ -49,7 +49,7 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 | # | Question | v1 status | Path |
 |---|---|---|---|
 | 10 | Customer NDA template | **OPEN** (legal) | Required before Phase 2. Not skill-suite-blocking, but Phase 2 cannot start without it. |
-| 11 | Local-only run model | **OPEN** (HLD) | Aggregate metrics list: per-service WAPE, per-service Coverage, algorithm firing rates, failure-pattern counts. Codified in `cost-billing-reconcile/references/local-only-metrics.md`. |
+| 11 | Local-only run model | **MOVED OUT** | Skill C is no longer in this customer-portable suite (engineering-internal Moolabs infrastructure). Local-only run model is now a question for the separate Moolabs-internal validation harness, not this suite. |
 | 12 | Corpus retention policy | **DEFERRED** (legal) | v1 = customer-opt-in 1-year; per-customer purge-on-request. GDPR/CCPA review at GA. |
 | 13 | CI runtime cost | **OPEN** (engineering) | v1 = no sampling; full re-run on every PR. Sampling if runtime > 30 min. |
 | 14 | WAPE/Coverage thresholds per service/pattern | **OPEN** (HLD) | v1 = uniform (10% / 80%); per-service thresholds = post-GA. |

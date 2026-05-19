@@ -1,6 +1,6 @@
 # JSON-Schema (YAML form) for cost-events-inventory.yaml
 # This is the INPUT side of the chargeability graph.
-# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument, /cost-billing-drift-lint, /cost-billing-reconcile.
+# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument and /cost-billing-drift-lint.
 
 $schema: https://json-schema.org/draft/2020-12/schema
 $id: https://moolabs.com/schemas/cost-events-inventory/0.1.0

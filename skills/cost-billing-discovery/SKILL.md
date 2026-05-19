@@ -196,7 +196,7 @@ The HTML previews are static (no server). CFO and PM can read them; engineer rev
 
 | File | Consumed by |
 |---|---|
-| `.moolabs/inventory/cost-events-inventory.yaml` | `/cost-billing-instrument` (codemod), `/cost-billing-drift-lint` (CI), `/cost-billing-reconcile` (validation) |
+| `.moolabs/inventory/cost-events-inventory.yaml` | `/cost-billing-instrument` (codemod), `/cost-billing-drift-lint` (CI) |
 | `.moolabs/inventory/usage-events-inventory.yaml` | `/cost-billing-instrument`, `/cost-billing-drift-lint`, `moo-meter` rule synthesis |
 | `.moolabs/inventory/output-input-map.yaml` | All downstream — the chargeability graph |
 | `.moolabs/discovery/repo-profile.yaml` | All downstream (informs codemod template selection) |
