@@ -177,7 +177,15 @@ Unlike stages 1-3 which produce stage-specific docs, your output is the **consol
 
 ### Phase 5 — Human reviews R findings + draft + signs off.
 
-### Phase 6 — Generate consolidated customer-context/
+### Phase 6 — Generate consolidated customer-context/ (no upstream handoff — engineer is LAST)
+
+The engineer stage is the final stage in the chain. There's no next persona to hand off to. Instead, this phase:
+
+1. Writes `.moolabs/chain/04-final.signed.yaml` (local source of truth).
+2. Reads the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default) — but ONLY honors the `download` mode (copies a local archive of the final doc to `${download_to}` so the engineer has an offline copy). `shared-folder` / `mcp` / `manual` modes are no-ops at this stage (no recipient).
+3. Generates the consolidated flattened customer-context/ view below.
+
+
 
 After signoff, take `.moolabs/chain/04-final.signed.yaml` and write the flattened `customer-context/` view that downstream skills read:
 

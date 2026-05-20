@@ -151,26 +151,56 @@ Show the customer:
 
 Ask for a free-form note (`signoff.notes`) — MANDATORY if any R finding was accepted-as-risk.
 
-### Phase 6 — Export + handoff instructions
-Write `.moolabs/chain/01-finance.signed.yaml` (with full `signoff` block from Phase 5 + the `adversarial_review` block from Phase 4). Print:
+### Phase 6 — Export + handoff (mode-aware)
+
+ALWAYS write `.moolabs/chain/01-finance.signed.yaml` first (local source of truth).
+
+Then read the handoff config (CASCADE — first found wins):
+1. `<repo>/.moolabs/handoff-config.yaml` (per-customer-repo override)
+2. `$HOME/.moolabs/handoff-config.yaml` (per-user — written by install.sh)
+3. fall back to `mode: manual`
+
+Dispatch on `mode`:
+
+**`mode: download`** (most common when no MCP is configured)
+1. Copy `01-finance.signed.yaml` to `${download_to}/01-finance.signed.yaml`.
+2. If `open_after_write: true`: run `open <path>` (macOS) or `xdg-open <path>` (Linux) — opens in default app.
+3. Print:
+   ```
+   ✓ Signed doc copied to: <download_to>/01-finance.signed.yaml
+   ✓ Opened in default app.
+   NEXT: attach this file to email/Slack and send to your CPO.
+   The CPO will then run:
+     /cost-billing-bootstrap-cpo --input-from 01-finance.signed.yaml
+   ```
+
+**`mode: shared-folder`**
+1. Copy `01-finance.signed.yaml` to `${shared_folder}/01-finance.signed.yaml`.
+2. Print:
+   ```
+   ✓ Signed doc copied to: <shared_folder>/01-finance.signed.yaml
+   The CPO (who shares this folder) will see it auto-sync and run:
+     /cost-billing-bootstrap-cpo --input-from <shared_folder>/01-finance.signed.yaml
+   ```
+
+**`mode: mcp`**
+1. Look up the MCP named in `mcp_name` (must be available in the agent surface).
+2. Invoke the MCP's upload tool with the signed YAML. Typical mappings:
+   - `google-drive` MCP → upload to a known folder (e.g., `/Moolabs Chain/<customer>/`)
+   - `notion` MCP → create a page with the YAML as a block / attachment
+   - `s3` MCP → upload + emit a pre-signed URL
+3. Print the upload result + how the CPO retrieves it.
+
+**`mode: manual`** (legacy default — used if no config or `mode: manual` explicitly)
+Print the original channel-list table (email / Slack / Drive / S3 / encrypted blob) and let the customer choose.
+
+In every mode, finish with:
 
 ```
 ✓ Stage 1 (Finance) complete.
-
 Signed doc:  .moolabs/chain/01-finance.signed.yaml
 SHA-256:     <hash>
-Size:        <bytes>
 R verdict:   clean | clean-with-accepted-risks | blocked
-
-NEXT STEP — send this file to your CPO via your preferred channel:
-  • Email attachment
-  • Slack DM with attachment
-  • Google Drive / SharePoint shared folder
-  • Signed S3 URL
-  • Encrypted blob (1Password / pass / age) — required if compliance_regimes includes HIPAA or FedRAMP
-
-The CPO will run:
-  /cost-billing-bootstrap-cpo --input-from 01-finance.signed.yaml
 ```
 
 ---

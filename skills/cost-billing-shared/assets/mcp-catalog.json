@@ -1,0 +1,249 @@
+{
+  "$schema": "https://moolabs.com/schemas/mcp-catalog/0.1.0",
+  "version": "0.1.0",
+  "comment": "Curated catalog of MCP servers the Cost+Billing suite knows how to leverage. install.sh --mcp <name> reads this catalog. For custom MCPs not listed, use --mcp-config <path-to-your-config.json>.",
+  "mcps": {
+    "outline": {
+      "name": "Outline",
+      "description": "Read product docs from a self-hosted or cloud Outline workspace.",
+      "suite_uses": ["product-doc-ingest"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-outline"],
+      "env_vars": [
+        {
+          "name": "OUTLINE_API_KEY",
+          "prompt": "Outline API key (Outline → Settings → API)",
+          "secret": true,
+          "required": true
+        },
+        {
+          "name": "OUTLINE_URL",
+          "prompt": "Outline base URL (e.g., https://docs.acme.com)",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-cpo",
+        "cost-billing-bootstrap-team-product"
+      ]
+    },
+
+    "notion": {
+      "name": "Notion",
+      "description": "Read product docs / pricing pages / internal specs from Notion.",
+      "suite_uses": ["product-doc-ingest", "pricing-source"],
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env_vars": [
+        {
+          "name": "NOTION_TOKEN",
+          "prompt": "Notion integration token (Notion → Settings → Integrations)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-cpo",
+        "cost-billing-bootstrap-team-product"
+      ]
+    },
+
+    "google-drive": {
+      "name": "Google Drive",
+      "description": "Read product docs from Drive AND/OR use a Drive folder as the chain handoff channel.",
+      "suite_uses": ["product-doc-ingest", "handoff"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-gdrive"],
+      "env_vars": [
+        {
+          "name": "GDRIVE_CREDENTIALS_PATH",
+          "prompt": "Path to Google service account JSON (do NOT paste the key value here)",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-finance",
+        "cost-billing-bootstrap-cpo",
+        "cost-billing-bootstrap-team-product",
+        "cost-billing-bootstrap-team-engineer"
+      ]
+    },
+
+    "github": {
+      "name": "GitHub",
+      "description": "Read pricing source-of-truth from a private repo, OR read the customer's own repo metadata (for the engineer-stage repo-info questions).",
+      "suite_uses": ["pricing-source", "repo-info"],
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env_vars": [
+        {
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "prompt": "GitHub fine-grained PAT (scoped to read:repo for the customer's repo)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-finance",
+        "cost-billing-bootstrap-team-engineer",
+        "cost-billing-discovery"
+      ]
+    },
+
+    "filesystem": {
+      "name": "Filesystem (local handoff folder)",
+      "description": "Local file access for chain handoff folder — use this when no cloud-sync MCP is available and the customer wants the chain handoff to live in a local path (e.g., NFS mount, SharePoint sync target).",
+      "suite_uses": ["handoff"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${FILESYSTEM_ALLOWED_PATH}"],
+      "env_vars": [
+        {
+          "name": "FILESYSTEM_ALLOWED_PATH",
+          "prompt": "Absolute path the MCP is allowed to read/write (e.g., ~/MoolabsChain)",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-finance",
+        "cost-billing-bootstrap-cpo",
+        "cost-billing-bootstrap-team-product",
+        "cost-billing-bootstrap-team-engineer"
+      ]
+    },
+
+    "1password": {
+      "name": "1Password",
+      "description": "Read Moolabs SDK API key + cloud creds from 1Password without exposing values. Codemod's emitted code uses `op://` references instead of inlining secret reads.",
+      "suite_uses": ["secret-resolution"],
+      "command": "npx",
+      "args": ["-y", "@1password/op-mcp"],
+      "env_vars": [
+        {
+          "name": "OP_SERVICE_ACCOUNT_TOKEN",
+          "prompt": "1Password service account token (1Password → Developer → Service Accounts)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-team-engineer",
+        "cost-billing-instrument"
+      ]
+    },
+
+    "vault": {
+      "name": "HashiCorp Vault",
+      "description": "Read SDK keys / AWS creds from Vault. Codemod's emitted code uses Vault read calls.",
+      "suite_uses": ["secret-resolution"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-vault"],
+      "env_vars": [
+        {
+          "name": "VAULT_ADDR",
+          "prompt": "Vault server address (e.g., https://vault.acme.com)",
+          "secret": false,
+          "required": true
+        },
+        {
+          "name": "VAULT_TOKEN",
+          "prompt": "Vault token (or use AppRole — see Vault docs)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-team-engineer",
+        "cost-billing-instrument"
+      ]
+    },
+
+    "playwright": {
+      "name": "Playwright (web fetch)",
+      "description": "Headless browser for fetching the customer's public pricing page (JS-rendered). Use when pricing-page URL is JavaScript-heavy and simple fetch fails.",
+      "suite_uses": ["pricing-source"],
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"],
+      "env_vars": [],
+      "used_by_skills": [
+        "cost-billing-bootstrap-finance"
+      ]
+    },
+
+    "linear": {
+      "name": "Linear",
+      "description": "Read open compliance / pricing tickets to surface as constraints during the finance/CPO stages.",
+      "suite_uses": ["compliance-context", "product-doc-ingest"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-linear"],
+      "env_vars": [
+        {
+          "name": "LINEAR_API_KEY",
+          "prompt": "Linear API key (Linear → Settings → API → Personal API keys)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "used_by_skills": [
+        "cost-billing-bootstrap-finance",
+        "cost-billing-bootstrap-cpo"
+      ]
+    }
+  },
+
+  "platform_mcp_paths": {
+    "comment": "Where each agent platform stores its MCP config. install.sh writes to the file matching the install --platform.",
+    "claude-code": {
+      "user_path": "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/mcp.json",
+      "project_path": ".claude/mcp.json",
+      "config_key": "mcpServers",
+      "restart_command": "Restart Claude Code (Cmd+Q / quit, then relaunch)"
+    },
+    "claude-desktop": {
+      "user_path_macos": "$HOME/Library/Application Support/Claude/claude_desktop_config.json",
+      "user_path_windows": "%APPDATA%/Claude/claude_desktop_config.json",
+      "user_path_linux": "$HOME/.config/Claude/claude_desktop_config.json",
+      "config_key": "mcpServers",
+      "restart_command": "Quit and relaunch Claude Desktop"
+    },
+    "cursor": {
+      "user_path": "$HOME/.cursor/mcp.json",
+      "project_path": ".cursor/mcp.json",
+      "config_key": "mcpServers",
+      "restart_command": "Reload Cursor window (Cmd+Shift+P → 'Developer: Reload Window')"
+    },
+    "codex": {
+      "user_path": "$HOME/.codex/mcp.json",
+      "config_key": "mcpServers",
+      "restart_command": "Restart Codex CLI"
+    },
+    "windsurf": {
+      "user_path": "$HOME/.codeium/windsurf/mcp_config.json",
+      "config_key": "mcpServers",
+      "restart_command": "Restart Windsurf"
+    },
+    "cline": {
+      "project_path": ".cline/mcp.json",
+      "config_key": "mcpServers",
+      "restart_command": "Reload VS Code window"
+    },
+    "goose": {
+      "user_path": "$HOME/.config/goose/mcp.json",
+      "config_key": "mcpServers",
+      "restart_command": "Restart Goose"
+    },
+    "chatgpt-desktop": {
+      "user_path_note": "ChatGPT Desktop configures MCPs via UI Settings → MCP servers (no file). install.sh prints the snippet for manual paste.",
+      "config_key": "n/a"
+    }
+  }
+}

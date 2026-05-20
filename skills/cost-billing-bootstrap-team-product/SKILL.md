@@ -122,15 +122,26 @@ ONLY ASK if finance's per-unit fair-usage was marked `tbd-team-product` for any 
 - **Q8 refund-test pattern mismatches Q3 input shape** — e.g., said "agentic refund" but Q3 lists single-call vendor.
 
 ### Phase 5 — Human reviews R findings + draft + signs off.
-### Phase 6 — Export + handoff:
+### Phase 6 — Export + handoff (mode-aware)
+
+Always write `.moolabs/chain/03-team-product.signed.yaml` first. Then read the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default). Dispatch on `mode`:
+
+- **`download`**: copy to `${download_to}/03-team-product.signed.yaml` + `open` it.
+- **`shared-folder`**: copy to `${shared_folder}/03-team-product.signed.yaml`.
+- **`mcp`**: upload via the named MCP server.
+- **`manual`**: print the channel-list table.
+
+In every mode, conclude with:
+
 ```
 ✓ Stage 3 (Team Product) complete.
 Signed:  .moolabs/chain/03-team-product.signed.yaml
-NEXT — send to the team engineer. They will run:
+NEXT — the team engineer will run:
   /cost-billing-bootstrap-team-engineer \
       --input-from 01-finance.signed.yaml \
       --input-from 02-cpo.signed.yaml \
-      --input-from 03-team-product.signed.yaml
+      --input-from 03-team-product.signed.yaml \
+      --repo /path/to/customer/repo
 ```
 
 ---

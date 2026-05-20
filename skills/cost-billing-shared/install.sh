@@ -27,6 +27,27 @@
 #   ./install.sh --package --persona finance  # only package the finance-stage zip(s)
 #   ./install.sh --package-dir <path>         # override default dist/ location
 #
+#   ./install.sh --list-mcps                  # print catalog of MCPs install.sh knows
+#   ./install.sh --mcp outline                # configure ONE MCP (writes to platform's
+#                                             # MCP config file; prompts for required env vars)
+#   ./install.sh --mcp outline,notion,github  # multiple MCPs (CSV or repeatable --mcp)
+#   ./install.sh --mcp outline --mcp notion   # repeatable form
+#   ./install.sh --mcp-target claude-desktop  # override which platform's MCP config to write
+#                                             # (default: same platform as the skill install)
+#   ./install.sh --mcp-config my-mcp.json     # add a CUSTOM MCP from a JSON file
+#                                             # (format: see cost-billing-shared/assets/mcp-catalog.json)
+#
+#   ./install.sh --handoff download           # copies each signed YAML to ~/Downloads
+#                                             # + opens it (macOS: open; linux: xdg-open) so
+#                                             # the user can attach to email/Slack/etc.
+#   ./install.sh --handoff download --download-to ~/Desktop/MoolabsChain
+#   ./install.sh --handoff mcp --handoff-mcp google-drive
+#                                             # bootstrap uses the named MCP to push docs
+#   ./install.sh --handoff shared-folder --shared-folder ~/Drive/MoolabsChain
+#                                             # bootstrap writes to a cloud-sync folder
+#   ./install.sh --handoff manual             # just print channel instructions (legacy default)
+#   ./install.sh --no-handoff-prompt          # skip interactive handoff prompt entirely
+#
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
 #
@@ -138,6 +159,15 @@ NO_BOOTSTRAP_CTA=0
 NO_PRUNE=0
 PACKAGE_MODE=0
 PACKAGE_DIR=""
+MCP_NAMES=()
+MCP_TARGET=""
+MCP_CONFIG_PATH=""
+LIST_MCPS=0
+HANDOFF_MODE=""
+HANDOFF_DOWNLOAD_TO=""
+HANDOFF_SHARED_FOLDER=""
+HANDOFF_MCP_NAME=""
+HANDOFF_NO_PROMPT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -152,6 +182,21 @@ while [[ $# -gt 0 ]]; do
     --no-prune) NO_PRUNE=1; shift ;;
     --package) PACKAGE_MODE=1; shift ;;
     --package-dir) PACKAGE_DIR="$2"; shift 2 ;;
+    --mcp)
+      # Repeatable: --mcp outline --mcp notion. Also supports CSV: --mcp outline,notion
+      IFS=',' read -ra _mcp_list <<< "$2"
+      for _m in "${_mcp_list[@]}"; do
+        MCP_NAMES+=("$_m")
+      done
+      shift 2 ;;
+    --mcp-target) MCP_TARGET="$2"; shift 2 ;;
+    --mcp-config) MCP_CONFIG_PATH="$2"; shift 2 ;;
+    --list-mcps) LIST_MCPS=1; shift ;;
+    --handoff) HANDOFF_MODE="$2"; shift 2 ;;
+    --download-to) HANDOFF_DOWNLOAD_TO="$2"; shift 2 ;;
+    --shared-folder) HANDOFF_SHARED_FOLDER="$2"; shift 2 ;;
+    --handoff-mcp) HANDOFF_MCP_NAME="$2"; shift 2 ;;
+    --no-handoff-prompt) HANDOFF_NO_PROMPT=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -294,6 +339,156 @@ resolve_repo_path() {
       return
     }
   fi
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Handoff-config helpers (where signed YAMLs flow between chain personas)
+# DEFINED EARLY so they are visible at the call site (prompt_handoff runs in
+# the main flow alongside prompt_persona / prompt_repo).
+# ──────────────────────────────────────────────────────────────────────
+
+default_download_dir() {
+  case "$(uname -s)" in
+    Darwin) echo "$HOME/Downloads" ;;
+    Linux)
+      if [[ -d "$HOME/Downloads" ]]; then echo "$HOME/Downloads"
+      else echo "$HOME"; fi ;;
+    *) echo "$HOME/Downloads" ;;
+  esac
+}
+
+prompt_handoff() {
+  if [[ -n "$HANDOFF_MODE" ]]; then return; fi
+  if [[ $HANDOFF_NO_PROMPT -eq 1 ]]; then return; fi
+  if [[ ! -t 0 ]]; then return; fi
+  if [[ $UNINSTALL -eq 1 ]]; then return; fi
+
+  echo ""
+  echo "How should signed YAMLs flow between chain personas?"
+  echo "(The CFO's signed YAML needs to reach the CPO, the CPO's needs to reach"
+  echo "the team-PM, and so on.)"
+  echo ""
+  echo "  1) MCP push       — use an MCP server you'll configure (--mcp ...)"
+  echo "                       Best for: teams with Drive/Notion/S3 MCP already running."
+  echo "  2) Download       — bootstrap copies each signed YAML to your Downloads folder"
+  echo "                       and opens it. You attach to email/Slack manually."
+  echo "                       Best for: no cloud-sync, no MCP, want zero friction."
+  echo "  3) Shared folder  — write to a cloud-sync folder (Drive/Dropbox/OneDrive)."
+  echo "                       Other personas pull from the same folder."
+  echo "                       Best for: teams already on Drive without an MCP."
+  echo "  4) Manual         — print the channel-list table (current default)."
+  echo "                       Best for: customers who pick a channel per-doc."
+  echo "  5) Skip           — don't write a handoff config (skill defaults to manual)."
+  echo ""
+  local choice=""
+  while [[ -z "$choice" ]]; do
+    read -r -p "Choice [1-5]: " choice
+    case "$choice" in
+      1|mcp)            HANDOFF_MODE="mcp" ;;
+      2|download)       HANDOFF_MODE="download" ;;
+      3|shared|shared-folder) HANDOFF_MODE="shared-folder" ;;
+      4|manual)         HANDOFF_MODE="manual" ;;
+      5|skip)           HANDOFF_MODE="skip" ;;
+      *) echo "Invalid; pick 1-5"; choice="" ;;
+    esac
+  done
+  echo "Handoff mode: $HANDOFF_MODE"
+
+  case "$HANDOFF_MODE" in
+    download)
+      local default_dl; default_dl="$(default_download_dir)"
+      read -r -p "Download path [default: $default_dl]: " HANDOFF_DOWNLOAD_TO
+      HANDOFF_DOWNLOAD_TO="${HANDOFF_DOWNLOAD_TO:-$default_dl}"
+      HANDOFF_DOWNLOAD_TO="${HANDOFF_DOWNLOAD_TO/#\~/$HOME}"
+      ;;
+    shared-folder)
+      read -r -p "Shared folder path (must be cloud-synced — Drive, Dropbox, etc.): " HANDOFF_SHARED_FOLDER
+      HANDOFF_SHARED_FOLDER="${HANDOFF_SHARED_FOLDER/#\~/$HOME}"
+      [[ -d "$HANDOFF_SHARED_FOLDER" ]] || echo "(Note: $HANDOFF_SHARED_FOLDER doesn't exist yet — bootstrap will create it.)"
+      ;;
+    mcp)
+      if [[ -z "$HANDOFF_MCP_NAME" && ${#MCP_NAMES[@]} -gt 0 ]]; then
+        HANDOFF_MCP_NAME="${MCP_NAMES[0]}"
+        echo "  (using first configured MCP for handoff: $HANDOFF_MCP_NAME)"
+      elif [[ -z "$HANDOFF_MCP_NAME" ]]; then
+        echo "  (no --mcp passed; you can set --handoff-mcp <name> later or"
+        echo "   pass --mcp <name> in this install so the handoff has a target.)"
+        read -r -p "Which MCP should the chain use for handoff?: " HANDOFF_MCP_NAME
+      fi
+      ;;
+  esac
+}
+
+write_handoff_config() {
+  if [[ -z "$HANDOFF_MODE" || "$HANDOFF_MODE" == "skip" ]]; then return; fi
+  if [[ $UNINSTALL -eq 1 ]]; then return; fi
+
+  local cfg_dir="$HOME/.moolabs"
+  local cfg_path="$cfg_dir/handoff-config.yaml"
+  mkdir -p "$cfg_dir"
+
+  case "$HANDOFF_MODE" in
+    download)
+      [[ -z "$HANDOFF_DOWNLOAD_TO" ]] && HANDOFF_DOWNLOAD_TO="$(default_download_dir)"
+      cat > "$cfg_path" <<EOF
+# Cost+Billing chain handoff configuration — generated by install.sh
+\$schema: https://moolabs.com/schemas/cost-billing-handoff/0.1.0
+mode: download
+download_to: $HANDOFF_DOWNLOAD_TO
+open_after_write: true
+notes: |
+  Each chain stage will:
+    1. Write .moolabs/chain/<NN>-<stage>.signed.yaml (local source of truth)
+    2. ALSO copy to $HANDOFF_DOWNLOAD_TO/<NN>-<stage>.signed.yaml
+    3. Open with OS default app (macOS: open, Linux: xdg-open) so the user
+       can attach to email/Slack/whatever.
+  Switch modes by re-running install.sh --handoff <mode>.
+EOF
+      ;;
+    shared-folder)
+      mkdir -p "$HANDOFF_SHARED_FOLDER" 2>/dev/null || true
+      cat > "$cfg_path" <<EOF
+\$schema: https://moolabs.com/schemas/cost-billing-handoff/0.1.0
+mode: shared-folder
+shared_folder: $HANDOFF_SHARED_FOLDER
+notes: |
+  Bootstrap stages write signed YAMLs to this folder. Cloud-synced (Drive /
+  Dropbox / OneDrive) is recommended so next personas see the file auto-sync.
+EOF
+      ;;
+    mcp)
+      cat > "$cfg_path" <<EOF
+\$schema: https://moolabs.com/schemas/cost-billing-handoff/0.1.0
+mode: mcp
+mcp_name: ${HANDOFF_MCP_NAME:-unknown}
+notes: |
+  Bootstrap stages invoke the named MCP server to push signed YAMLs.
+  Required: the MCP must be configured (./install.sh --mcp $HANDOFF_MCP_NAME).
+EOF
+      ;;
+    manual)
+      cat > "$cfg_path" <<EOF
+\$schema: https://moolabs.com/schemas/cost-billing-handoff/0.1.0
+mode: manual
+notes: |
+  Bootstrap stages just print the channel-list table at handoff time;
+  user picks email/Slack/Drive/etc. per signed YAML.
+EOF
+      ;;
+  esac
+
+  echo ""
+  echo "─── Handoff config written ─────────────────────────────────────────"
+  echo "  $cfg_path"
+  echo "  mode: $HANDOFF_MODE"
+  case "$HANDOFF_MODE" in
+    download)      echo "  download_to: $HANDOFF_DOWNLOAD_TO" ;;
+    shared-folder) echo "  shared_folder: $HANDOFF_SHARED_FOLDER" ;;
+    mcp)           echo "  mcp_name: $HANDOFF_MCP_NAME" ;;
+  esac
+  echo "  → Each chain stage's Phase 6 reads this file to decide handoff behavior."
+  echo "  → Switch modes later: ./install.sh --handoff <mode>"
+  echo "─────────────────────────────────────────────────────────────────────"
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -525,6 +720,11 @@ if [[ $UNINSTALL -eq 0 ]]; then
   fi
   prompt_persona
   prompt_repo
+  # Only personas that PRODUCE handoff docs need the prompt — finance / cpo /
+  # team-product / all. Engineer is last in the chain; doesn't hand off further.
+  if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
+    prompt_handoff
+  fi
 fi
 
 # Resolve which skills to install (or remove) based on persona.
@@ -717,6 +917,288 @@ if [[ $PACKAGE_MODE -eq 1 ]]; then
   exit 0
 fi
 
+# ──────────────────────────────────────────────────────────────────────
+# MCP configuration helpers
+# ──────────────────────────────────────────────────────────────────────
+
+mcp_catalog_path() {
+  echo "$SUITE_SRC_DIR/cost-billing-shared/assets/mcp-catalog.json"
+}
+
+# Print the curated catalog of MCPs.
+list_mcps() {
+  local catalog
+  catalog="$(mcp_catalog_path)"
+  if [[ ! -f "$catalog" ]]; then
+    echo "ERROR: mcp-catalog.json not found at $catalog" >&2
+    exit 1
+  fi
+  echo ""
+  echo "Curated MCP catalog (use with --mcp <name>):"
+  echo ""
+  python3 - "$catalog" <<'PYEOF'
+import json, sys, textwrap
+catalog = json.load(open(sys.argv[1]))
+for name, mcp in sorted(catalog["mcps"].items()):
+    print(f"  {name}")
+    print(f"    {mcp['description']}")
+    print(f"    suite_uses: {', '.join(mcp['suite_uses'])}")
+    env = mcp.get("env_vars", [])
+    if env:
+        secrets = [v["name"] for v in env if v.get("secret")]
+        configs = [v["name"] for v in env if not v.get("secret")]
+        if secrets:
+            print(f"    secrets:    {', '.join(secrets)}")
+        if configs:
+            print(f"    config:     {', '.join(configs)}")
+    print()
+
+print("Platforms install.sh can write MCP config to:")
+for plat in catalog["platform_mcp_paths"]:
+    print(f"  {plat}")
+print("")
+print("Custom MCP not in catalog?  Use --mcp-config <path-to-json>.")
+print("JSON format: see cost-billing-shared/assets/mcp-catalog.json structure.")
+PYEOF
+}
+
+# Resolve target platform for the MCP write — defaults to the install platform.
+resolve_mcp_target() {
+  if [[ -n "$MCP_TARGET" ]]; then echo "$MCP_TARGET"; return; fi
+  echo "$PLATFORM"
+}
+
+# Resolve the MCP config file path for a given target platform.
+resolve_mcp_config_file() {
+  local target="$1"
+  case "$target" in
+    claude-code)    echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/mcp.json" ;;
+    claude-desktop)
+      case "$(uname -s)" in
+        Darwin)  echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
+        Linux)   echo "$HOME/.config/Claude/claude_desktop_config.json" ;;
+        *)       echo "$HOME/.config/Claude/claude_desktop_config.json" ;;
+      esac ;;
+    cursor)         echo "$HOME/.cursor/mcp.json" ;;
+    codex)          echo "$HOME/.codex/mcp.json" ;;
+    windsurf)       echo "$HOME/.codeium/windsurf/mcp_config.json" ;;
+    cline)          echo "./.cline/mcp.json" ;;
+    goose)          echo "$HOME/.config/goose/mcp.json" ;;
+    chatgpt-desktop) echo "" ;;  # UI-only — install.sh prints snippet instead
+    *)              echo "" ;;
+  esac
+}
+
+# Write one MCP entry to the target platform's config file.
+# Reads from catalog (or --mcp-config custom JSON), prompts for required env vars,
+# writes a placeholder ${VAR_NAME} into the config (NOT the actual secret value).
+configure_one_mcp() {
+  local mcp_name="$1"
+  local catalog="$(mcp_catalog_path)"
+  local target="$(resolve_mcp_target)"
+  local config_file="$(resolve_mcp_config_file "$target")"
+
+  echo ""
+  echo "─── Configuring MCP '$mcp_name' for $target ─────────────────────────"
+
+  # Verify the MCP exists in the catalog.
+  if ! python3 -c "
+import json, sys
+c = json.load(open('$catalog'))
+sys.exit(0 if '$mcp_name' in c['mcps'] else 1)
+" 2>/dev/null; then
+    echo "ERROR: MCP '$mcp_name' not in catalog." >&2
+    echo "Run './install.sh --list-mcps' to see the catalog." >&2
+    echo "For custom MCPs, use './install.sh --mcp-config <path>'." >&2
+    return 1
+  fi
+
+  # Special case: chatgpt-desktop has no config file (UI-only)
+  if [[ "$target" == "chatgpt-desktop" ]]; then
+    echo "ChatGPT Desktop configures MCPs via UI (no file). Copy this snippet:"
+    python3 - "$catalog" "$mcp_name" <<'PYEOF'
+import json, sys
+c = json.load(open(sys.argv[1]))
+mcp = c["mcps"][sys.argv[2]]
+snippet = {
+    "name": sys.argv[2],
+    "command": mcp["command"],
+    "args": mcp["args"],
+    "env": {v["name"]: f"${{{v['name']}}}" for v in mcp.get("env_vars", [])}
+}
+print(json.dumps(snippet, indent=2))
+PYEOF
+    echo ""
+    echo "ChatGPT Desktop → Settings → MCP servers → Add new server → paste."
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
+  fi
+
+  if [[ -z "$config_file" ]]; then
+    echo "ERROR: no MCP config path known for target '$target'." >&2
+    return 1
+  fi
+
+  # Make sure the parent dir exists.
+  mkdir -p "$(dirname "$config_file")"
+
+  # Bootstrap the config file if missing.
+  if [[ ! -f "$config_file" ]]; then
+    echo '{"mcpServers": {}}' > "$config_file"
+  fi
+
+  # Merge the MCP entry into the config file (preserves existing mcpServers entries).
+  python3 - "$catalog" "$mcp_name" "$config_file" <<'PYEOF'
+import json, sys, os, pathlib
+
+catalog_path, mcp_name, config_path = sys.argv[1], sys.argv[2], sys.argv[3]
+catalog = json.load(open(catalog_path))
+mcp = catalog["mcps"][mcp_name]
+
+# Load existing config; tolerate empty/invalid.
+try:
+    config = json.load(open(config_path))
+except Exception:
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+config.setdefault("mcpServers", {})
+
+# Build the MCP entry. Env values are PLACEHOLDERS ${VAR_NAME} — install.sh does
+# NOT prompt for or store secret values. The user sets the env vars in their
+# shell profile before launching the agent.
+entry = {
+    "command": mcp["command"],
+    "args": mcp["args"],
+}
+env_block = {v["name"]: f"${{{v['name']}}}" for v in mcp.get("env_vars", [])}
+if env_block:
+    entry["env"] = env_block
+
+config["mcpServers"][mcp_name] = entry
+
+# Write back, preserving any other top-level keys (some platforms use them).
+pathlib.Path(config_path).write_text(json.dumps(config, indent=2) + "\n")
+print(f"Wrote MCP entry '{mcp_name}' to {config_path}")
+
+# Print required env vars for the user.
+required = [v for v in mcp.get("env_vars", []) if v.get("required")]
+if required:
+    print("")
+    print("REQUIRED — set these env vars BEFORE next agent start:")
+    for v in required:
+        if v.get("secret"):
+            print(f"  export {v['name']}=<your_value>           # {v['prompt']}")
+        else:
+            print(f"  export {v['name']}=<value>               # {v['prompt']}")
+    print("")
+    print("Recommended: store the secrets in 1Password / Vault / Doppler and")
+    print("reference them with `op read`, `vault read`, etc. — don't paste raw")
+    print("secrets into your shell history.")
+
+skills_using = mcp.get("used_by_skills", [])
+if skills_using:
+    print("")
+    print(f"This MCP will be used by these suite skills (per mcp-config.yaml):")
+    for s in skills_using:
+        print(f"  /{s}")
+PYEOF
+
+  echo "─────────────────────────────────────────────────────────────────────"
+}
+
+# Write a CUSTOM MCP from a user-provided JSON file. The JSON must have the same
+# shape as one entry in mcp-catalog.json["mcps"]["<name>"].
+configure_custom_mcp() {
+  local custom_path="$1"
+  if [[ ! -f "$custom_path" ]]; then
+    echo "ERROR: --mcp-config $custom_path not found." >&2
+    return 1
+  fi
+  local target="$(resolve_mcp_target)"
+  local config_file="$(resolve_mcp_config_file "$target")"
+  if [[ -z "$config_file" ]]; then
+    echo "ERROR: no MCP config path known for target '$target'." >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$config_file")"
+  [[ -f "$config_file" ]] || echo '{"mcpServers": {}}' > "$config_file"
+
+  python3 - "$custom_path" "$config_file" <<'PYEOF'
+import json, sys, pathlib
+custom = json.load(open(sys.argv[1]))
+cfg_path = sys.argv[2]
+if "name" not in custom:
+    print("ERROR: custom MCP JSON must have top-level 'name' field.", file=sys.stderr)
+    sys.exit(1)
+name = custom["name"]
+try:
+    cfg = json.load(open(cfg_path))
+except Exception:
+    cfg = {}
+cfg.setdefault("mcpServers", {})
+
+entry = {"command": custom["command"], "args": custom["args"]}
+env_block = {v["name"]: f"${{{v['name']}}}" for v in custom.get("env_vars", [])}
+if env_block:
+    entry["env"] = env_block
+
+cfg["mcpServers"][name] = entry
+pathlib.Path(cfg_path).write_text(json.dumps(cfg, indent=2) + "\n")
+print(f"Wrote custom MCP '{name}' to {cfg_path}")
+PYEOF
+}
+
+# Print the restart instruction for the target platform.
+print_mcp_restart() {
+  local target="$1"
+  case "$target" in
+    claude-code)     echo "  → Restart Claude Code (Cmd+Q / quit + relaunch) for MCPs to take effect." ;;
+    claude-desktop)  echo "  → Quit and relaunch Claude Desktop for MCPs to take effect." ;;
+    cursor)          echo "  → Reload Cursor window (Cmd+Shift+P → 'Developer: Reload Window')." ;;
+    codex)           echo "  → Restart your Codex CLI process." ;;
+    windsurf)        echo "  → Restart Windsurf." ;;
+    cline)           echo "  → Reload VS Code window." ;;
+    goose)           echo "  → Restart Goose." ;;
+    *)               echo "  → Restart your agent surface for MCPs to take effect." ;;
+  esac
+}
+
+# Top-level dispatcher: configure all the --mcp args + --mcp-config path.
+configure_mcps() {
+  if [[ ${#MCP_NAMES[@]} -eq 0 && -z "$MCP_CONFIG_PATH" ]]; then
+    return  # no MCP flags passed; skip silently
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 required for --mcp setup (used to merge JSON config)." >&2
+    return 1
+  fi
+
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo " MCP setup"
+  echo "═══════════════════════════════════════════════════════════════════"
+  for m in "${MCP_NAMES[@]}"; do
+    configure_one_mcp "$m"
+  done
+  if [[ -n "$MCP_CONFIG_PATH" ]]; then
+    configure_custom_mcp "$MCP_CONFIG_PATH"
+  fi
+  echo ""
+  print_mcp_restart "$(resolve_mcp_target)"
+  echo "═══════════════════════════════════════════════════════════════════"
+}
+
+# Short-circuit for --list-mcps (no install, no config, just print catalog).
+if [[ $LIST_MCPS -eq 1 ]]; then
+  list_mcps
+  exit 0
+fi
+
+# (Handoff helpers were inadvertently placed below their first call site during refactor;
+# they are now defined immediately after prompt_repo() — search for "Handoff-config helpers".)
+
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[dry-run] would create: $DEST_DIR"
   for skill in "${SUITE_SKILLS[@]}"; do
@@ -792,6 +1274,12 @@ done
 if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
   install_codegraph
 fi
+
+# Optional: configure MCP servers picked by the user (--mcp / --mcp-config)
+configure_mcps
+
+# Optional: write the chain handoff config (~/.moolabs/handoff-config.yaml)
+write_handoff_config
 
 # Scaffold customer-context-template if repo given
 scaffold_customer_context

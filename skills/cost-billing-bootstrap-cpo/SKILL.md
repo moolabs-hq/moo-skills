@@ -120,17 +120,27 @@ Load `01-finance.signed.yaml`. Verify hash, signoff, R verdict. **Print a 5-line
 
 ### Phase 5 — Human reviews R findings + draft + signs off.
 
-### Phase 6 — Export + handoff:
+### Phase 6 — Export + handoff (mode-aware)
+
+Always write `.moolabs/chain/02-cpo.signed.yaml` first. Then read the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default). Dispatch on `mode`:
+
+- **`download`**: copy to `${download_to}/02-cpo.signed.yaml` + `open` it.
+- **`shared-folder`**: copy to `${shared_folder}/02-cpo.signed.yaml`.
+- **`mcp`**: upload via the named MCP server.
+- **`manual`**: print the channel-list table.
+
+In every mode, conclude with:
+
 ```
 ✓ Stage 2 (CPO) complete.
 Signed:  .moolabs/chain/02-cpo.signed.yaml
-NEXT — send to your team-product PM. They will run:
+NEXT — your team-product PM will run:
   /cost-billing-bootstrap-team-product \
       --input-from 01-finance.signed.yaml \
       --input-from 02-cpo.signed.yaml
 ```
 
-(Team-product reads BOTH finance and CPO docs — chain is cumulative, not replacement.)
+(Team-product reads BOTH finance and CPO docs — chain is cumulative.)
 
 ---
 
