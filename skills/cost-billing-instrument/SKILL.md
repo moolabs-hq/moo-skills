@@ -22,11 +22,23 @@ You are an expert codemod author who wires Moolabs SDK calls into customer code 
 ## Trigger
 
 ```
-/cost-billing-instrument /path/to/customer/repo
+/cost-billing-instrument /path/to/customer/repo --service <service-slug>   # REQUIRED for multi-service orgs
 /cost-billing-instrument /path/to/customer/repo --service services/api
-/cost-billing-instrument /path/to/customer/repo --dry-run
-/cost-billing-instrument /path/to/customer/repo --pattern usage-only
+/cost-billing-instrument /path/to/customer/repo --service moo-acute --dry-run
+/cost-billing-instrument /path/to/customer/repo --service moo-acute --pattern usage-only
 ```
+
+**`--service <slug>` is REQUIRED for multi-service customers.** Each engineer runs the codemod for THEIR service. The codemod reads `.moolabs/chain/04-final-<service-slug>.signed.yaml` for technical decisions + scopes the AST scan + PR emission to that service's subdirectories. Single-service orgs may omit `--service` and the codemod runs over the whole repo (back-compat).
+
+### Post-codemod handoff for iterative revision
+
+After this skill emits the PR(s), the cost-billing suite's responsibility ends. Hand off to your existing PR-iteration skill:
+
+  ```
+  /dev-workflow-orchestrator                  # or whatever your team uses for PR revision
+  ```
+
+Iterating on the PR based on CI failures, reviewer comments, or post-codemod adversarial-review findings is NOT the codemod's job — that's the dev-workflow-orchestrator's responsibility. The cost-billing suite documents this handoff explicitly so engineers don't expect this skill to re-emit on each iteration.
 
 Or naturally:
 

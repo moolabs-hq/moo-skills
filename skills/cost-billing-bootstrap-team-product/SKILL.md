@@ -24,11 +24,14 @@ You drill where CPO went high-level. You map per feature the unit, the inputs th
 ```
 /cost-billing-bootstrap-team-product \
     --input-from 01-finance.signed.yaml \
-    --input-from 02-cpo.signed.yaml
+    --input-from 02-cpo.signed.yaml \
+    --product <slug>                              # REQUIRED — which product YOU own
 
 /cost-billing-bootstrap-team-product --resume
-/cost-billing-bootstrap-team-product --section per-feature
+/cost-billing-bootstrap-team-product --section per-feature --product acute
 ```
+
+**`--product <slug>` is REQUIRED.** Multi-product orgs run this skill ONCE PER PRODUCT (on the relevant PM's machine). Single-product orgs still pass `--product` matching their sole product (declared by CPO in Q11). The slug MUST appear in `02-cpo.signed.yaml`'s `products[]` list — refuses to run otherwise (catches typos + unauthorized claims).
 
 ## Operating principles (HARD RULES)
 
@@ -40,7 +43,15 @@ You drill where CPO went high-level. You map per feature the unit, the inputs th
 
 `01-finance.signed.yaml` AND `02-cpo.signed.yaml`. Refuse-to-run if either is missing, has wrong stage, or has `blocked` R verdict.
 
-**Print a 10-line composite summary** of finance + CPO commitments before asking questions. The team-PM is making decisions inside the envelope finance + CPO set.
+**Validate `--product <slug>`** — the slug MUST exist in `02-cpo.signed.yaml > products[].slug`. If not: refuse with "Unknown product slug `<slug>`. CPO declared: [list of valid slugs]. Run CPO bootstrap with --section products if your product is missing."
+
+**Print a 10-line composite summary** of finance + CPO commitments — SCOPED to your product. Show:
+- Finance pricing model + units relevant to your product's likely features
+- CPO's listed top features belonging to your product (cross-reference `02-cpo > top_features` with `02-cpo > products[].services`)
+- Services this product owns (from CPO Q11)
+- Your assignment (team_pm_contact matching your machine identity if possible)
+
+The team-PM is making decisions inside the envelope finance + CPO set, scoped to ONE product.
 
 ## Questions for this stage (~8-12 total — count depends on # of top features from CPO)
 
@@ -124,7 +135,7 @@ ONLY ASK if finance's per-unit fair-usage was marked `tbd-team-product` for any 
 ### Phase 5 — Human reviews R findings + draft + signs off.
 ### Phase 6 — Export + handoff (mode-aware)
 
-Always write `.moolabs/chain/03-team-product.signed.yaml` first. Then read the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default). Dispatch on `mode`:
+Always write `.moolabs/chain/03-team-product-<product-slug>.signed.yaml` first. Then read the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default). Dispatch on `mode`:
 
 - **`download`**: copy to `${download_to}/03-team-product.signed.yaml` + `open` it.
 - **`shared-folder`**: copy to `${shared_folder}/03-team-product.signed.yaml`.
@@ -135,7 +146,7 @@ In every mode, conclude with:
 
 ```
 ✓ Stage 3 (Team Product) complete.
-Signed:  .moolabs/chain/03-team-product.signed.yaml
+Signed:  .moolabs/chain/03-team-product-<product-slug>.signed.yaml
 NEXT — the team engineer will run:
   /cost-billing-bootstrap-team-engineer \
       --input-from 01-finance.signed.yaml \

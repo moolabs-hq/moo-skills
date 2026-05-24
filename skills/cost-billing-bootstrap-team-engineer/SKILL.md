@@ -25,12 +25,18 @@ You are LAST in the chain. Your output IS the consolidated `customer-context/` t
 /cost-billing-bootstrap-team-engineer \
     --input-from 01-finance.signed.yaml \
     --input-from 02-cpo.signed.yaml \
-    --input-from 03-team-product.signed.yaml \
+    --input-from 03-team-product-<product>.signed.yaml \    # repeatable: one per product whose services you own
+    --input-from 03-team-product-<other-product>.signed.yaml \
+    --service <service-slug>                                # REQUIRED — which service YOU own
     --repo /path/to/customer/repo
 
 /cost-billing-bootstrap-team-engineer --resume
-/cost-billing-bootstrap-team-engineer --section telemetry
+/cost-billing-bootstrap-team-engineer --section telemetry --service moo-acute
 ```
+
+**`--service <slug>` is REQUIRED.** Multi-service orgs run this skill ONCE PER SERVICE (on the relevant engineer's machine). Single-service orgs still pass `--service` matching their sole service. The slug MUST appear under at least one `02-cpo.signed.yaml > products[].services` entry — refuses otherwise.
+
+**Multi-product inputs.** If your service belongs to multiple products (e.g., `services/shared-infra` shared between acute + meter), pass ALL relevant `03-team-product-<product>.signed.yaml` via repeated `--input-from`. The skill reconciles per-feature decisions across products that share your service.
 
 ## Operating principles (HARD RULES)
 
@@ -181,13 +187,13 @@ Unlike stages 1-3 which produce stage-specific docs, your output is the **consol
 
 The engineer stage is the final stage in the chain. There's no next persona to hand off to. Instead, this phase:
 
-1. Writes `.moolabs/chain/04-final.signed.yaml` (local source of truth).
+1. Writes `.moolabs/chain/04-final-<service-slug>.signed.yaml` (local source of truth).
 2. Reads the handoff config (cascade: `<repo>/.moolabs/handoff-config.yaml` > `$HOME/.moolabs/handoff-config.yaml` > `mode: manual` default) — but ONLY honors the `download` mode (copies a local archive of the final doc to `${download_to}` so the engineer has an offline copy). `shared-folder` / `mcp` / `manual` modes are no-ops at this stage (no recipient).
 3. Generates the consolidated flattened customer-context/ view below.
 
 
 
-After signoff, take `.moolabs/chain/04-final.signed.yaml` and write the flattened `customer-context/` view that downstream skills read:
+After signoff, take `.moolabs/chain/04-final-<service-slug>.signed.yaml` and write the flattened `customer-context/` view that downstream skills read:
 
 ```
 .moolabs/customer-context/

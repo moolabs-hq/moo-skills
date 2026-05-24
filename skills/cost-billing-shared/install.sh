@@ -71,7 +71,8 @@ set -euo pipefail
 
 SKILLS_FINANCE=(
   cost-billing-bootstrap-finance          # Stage 1: pricing + compliance + tenancy/region
-  cost-billing-adversarial-review         # Skill R fires inside Stage 4 of finance bootstrap
+  cost-billing-signoff                    # NEW: state-aware signoff orchestrator (CFO Stage 1 + 2b)
+  cost-billing-adversarial-review         # Skill R fires inside Stage 4 of finance bootstrap + every signoff stage
   cost-billing-shared                     # required by every skill
 )
 
@@ -80,32 +81,37 @@ SKILLS_PRODUCT=(
   cost-billing-bootstrap-cpo              # Stage 2: company + product + features + terminology
   cost-billing-adversarial-review
   cost-billing-shared
+  # NOTE: CPO does NOT install cost-billing-signoff — the per-product PM signoffs happen on the
+  # team-product PMs' machines, not on the CPO machine. CPO's role ends with their bootstrap.
 )
 
-# Team-PM (team product engineer per user's vocabulary) uses persona 'team-product'
+# Team-PM (per user's vocabulary "team product engineer") uses persona 'team-product'
 SKILLS_TEAM_PRODUCT=(
-  cost-billing-bootstrap-team-product     # Stage 3: per-feature unit + event_type + input map
+  cost-billing-bootstrap-team-product     # Stage 3: per-feature unit + event_type + input map (PER PRODUCT)
+  cost-billing-signoff                    # NEW: PM Stage 2 + Stage 3b signoffs (per product / per service)
   cost-billing-adversarial-review
   cost-billing-shared
 )
 
-# Team-engineer (IC engineer) uses persona 'engineering'
+# Team-engineer (IC engineer) uses persona 'engineering' — fan out per-service
 SKILLS_ENGINEERING=(
-  cost-billing-bootstrap-team-engineer    # Stage 4: repo + telemetry + MCP + SDK key
+  cost-billing-bootstrap-team-engineer    # Stage 4: repo + telemetry + MCP + SDK key (PER SERVICE)
+  cost-billing-signoff                    # NEW: Engineer Stage 3 signoff (per service)
   cost-billing-discovery                  # post-chain: produce inventories
   cost-billing-cloud-bill                 # post-chain: wire cloud-bill exports
-  cost-billing-instrument                 # post-chain: codemod
+  cost-billing-instrument                 # post-chain: codemod (--service per engineer)
   cost-billing-drift-lint                 # post-chain: CI drift
   cost-billing-adversarial-review
   cost-billing-shared
 )
 
-# 'all' = solo founder / integrator machine running all 4 stages locally.
+# 'all' = solo founder / integrator machine running all stages locally.
 SKILLS_ALL=(
   cost-billing-bootstrap-finance
   cost-billing-bootstrap-cpo
   cost-billing-bootstrap-team-product
   cost-billing-bootstrap-team-engineer
+  cost-billing-signoff                    # NEW
   cost-billing-discovery
   cost-billing-cloud-bill
   cost-billing-instrument
@@ -1304,6 +1310,8 @@ for skill in "${SUITE_SKILLS[@]}"; do
       echo "  /cost-billing-bootstrap-team-product   — Chain Stage 3 (team-PM): per-feature unit + input map" ;;
     cost-billing-bootstrap-team-engineer)
       echo "  /cost-billing-bootstrap-team-engineer  — Chain Stage 4 (engineer): repo + telemetry + MCP + SDK key" ;;
+    cost-billing-signoff)
+      echo "  /cost-billing-signoff                  — Three-role review orchestrator (CFO/PM/Engineer signoffs)" ;;
     cost-billing-bootstrap)
       echo "  /cost-billing-bootstrap                — DEPRECATED (prints redirect to chain stages)" ;;
     cost-billing-discovery)

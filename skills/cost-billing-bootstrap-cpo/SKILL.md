@@ -99,6 +99,31 @@ Refuse-to-run if:
 ONLY ASK if finance's `pricing_model.primary_type` was `tiered`, `credit-wallet`, or `enterprise-custom`:
 > "Finance committed to a `<type>` pricing model. From the product-strategy lens, which features are gated by which tier / which features draw from the credit pool / which features are enterprise-only? (High-level only — team-product will drill into per-feature units.)"
 
+### Q11 — Products + team-PM assignment (REQUIRED for multi-product orgs; SIMPLE for single-product)
+> "List your **products / verticals**, with explicit team-PM assignment per product. Each entry needs:
+> - **slug** — short identifier you'll use for `--product <slug>` (e.g. `acute`, `meter`). Lowercase, no spaces.
+> - **name** — display name (e.g. 'Acute Cost Intelligence').
+> - **team_pm_contact** — email or Slack handle of the team-PM who owns this product.
+> - **services** — list of service paths (in the customer's repo) that BELONG to this product. A service can appear under multiple products (shared-infra services); a product can span multiple services.
+>
+> Example for a 5-product company:
+> ```yaml
+> products:
+>   - slug: acute
+>     name: Acute Cost Intelligence
+>     team_pm_contact: alice@acme.com
+>     services: [services/moo-acute, services/moo-arc]
+>   - slug: meter
+>     name: Moo-Meter
+>     team_pm_contact: bob@acme.com
+>     services: [services/moo-meter]
+>   ...
+> ```
+>
+> **For single-product orgs**: still answer this with ONE entry. Team-PM bootstraps refuse to run with `--product <slug>` if the slug isn't in this list — catches typos + prevents unauthorized product claims downstream.
+>
+> **For shared-infra services**: list the service under EVERY product that depends on it. Engineer bootstraps will see all owning products and load the right team-product docs."
+
 ---
 
 ## Workflow — 6 phases (same shape as finance)
@@ -176,6 +201,15 @@ terminology:
   unique_concepts: []
 
 pricing_product_alignment: {}     # from conditional Q10
+
+products: []
+# From Q11. Drives multi-product fan-out for team-product + team-engineer stages.
+# Each entry:
+#   - slug: ""                          # short identifier; --product <slug> uses this
+#     name: ""                          # display name
+#     team_pm_contact: ""               # email / Slack handle of the owning team-PM
+#     services: []                      # list of service paths this product owns
+#     internal_only: false              # if true, no team-product bootstrap needed for this entry
 ```
 
 ---

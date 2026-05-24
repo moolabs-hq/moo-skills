@@ -159,9 +159,21 @@ Each silo supports:
 
 ## When a customer is one person wearing all hats
 
-For startups / solo founders where one human is finance + CPO + team-PM + team-engineer all at once: the customer runs all 4 bootstraps on the same machine. The chain still flows through 4 signed docs (forces the human to context-switch between roles and check their own work), but no transport is needed — each subsequent bootstrap reads from `.moolabs/chain/` directly.
+For startups / solo founders where one human is finance + CPO + team-PM + team-engineer all at once: the customer runs all bootstraps on the same machine. The chain still flows through signed docs (forces the human to context-switch between roles and check their own work), but no transport is needed — each subsequent bootstrap reads from `.moolabs/chain/` directly.
 
-`/cost-billing-bootstrap-all` (if installed via `--persona all`) is a thin wrapper that runs the 4 in sequence on one machine — useful for dogfood + smoke-test installs.
+`--persona all` installs every chain stage + signoff + downstream skill — useful for dogfood + smoke-test installs.
+
+## Post-bootstrap: the signoff chain + codemod
+
+After all bootstraps are complete and inventories produced (`/cost-billing-discovery`), the three-role review begins via `/cost-billing-signoff` — a state-aware orchestrator that:
+
+1. Reads `.moolabs/inventory/reviews/` to see which signoffs are missing
+2. Dispatches the right persona (auto-detect or `--persona`) through their review flow
+3. Per stage: opens the HTML view, asks one question at a time, invokes Skill R adversarially, persona accepts/risk-accepts/rejects findings, writes signed YAML
+4. Multi-product = N PM signoffs (per product). Multi-service = M engineer signoffs (per service).
+5. When ALL signoffs + holistic Skill R verdict = clean → codemod gate unlocks
+
+Then each engineer runs `/cost-billing-instrument --service <slug>` to emit their per-service PR. After the PR is emitted, **iterative code revision is the job of `/dev-workflow-orchestrator`** (or whatever your team uses for PR-iteration loops) — the cost-billing suite explicitly hands off there rather than building yet another PR-revision skill.
 
 ---
 
