@@ -85,9 +85,24 @@ properties:
   adversarial_review:
     type: object
     required: [phase, verdict, reviewer_model, ran_at]
-    description: Output of /cost-billing-adversarial-review --phase post-signoff-<stage> on the DRAFT.
+    description: |
+      Output of /cost-billing-adversarial-review --phase post-signoff-<stage> on the DRAFT.
+      Phase MUST match the adversarial-review skill's strict regex (per F5 fix in 1ddc78d):
+      cfo-stage1 is the ONLY stage that has a bare form (org-wide cardinality=1); all other
+      stages REQUIRE a slug suffix. This was previously loose and would silently accept a
+      bare suffix for fan-out stages — cross-validator drift (finding G2 in 2026-05-20
+      cross-model review).
     properties:
-      phase: { type: string, pattern: "^post-signoff-(cfo-stage1|pm-stage2|cfo-stage2b|engineer-stage3|pm-stage3b)(-[a-z0-9-]+)?$" }
+      phase:
+        type: string
+        oneOf:
+          # cfo-stage1: bare ONLY (org-wide; no per-product / per-service suffix).
+          - pattern: "^post-signoff-cfo-stage1$"
+          # Fan-out stages: slug REQUIRED.
+          - pattern: "^post-signoff-pm-stage2-[a-z0-9][a-z0-9-]*$"
+          - pattern: "^post-signoff-cfo-stage2b-[a-z0-9][a-z0-9-]*$"
+          - pattern: "^post-signoff-engineer-stage3-[a-z0-9][a-z0-9-]*$"
+          - pattern: "^post-signoff-pm-stage3b-[a-z0-9][a-z0-9-]*$"
       verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
       reviewer_model: { type: string }
       ran_at: { type: string, format: date-time }

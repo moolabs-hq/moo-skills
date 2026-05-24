@@ -224,17 +224,26 @@ The HTML previews are static (no server). All reviewers read their respective fi
 
 ## Mandatory hand-off contract — sequential CFO → PM ⇄ PM → Engineer with TWO loops
 
-See `cost-billing-shared/three-role-review.md` for the full Y-shaped workflow. The codemod (`/cost-billing-instrument`) refuses to run unless ALL of these files exist in `.moolabs/inventory/reviews/`:
+See `cost-billing-shared/three-role-review.md` for the full Y-shaped workflow + `cost-billing-shared/chain-handoff.md` for the multi-product/multi-service fan-out (Q11). The codemod (`/cost-billing-instrument --service <S>`) refuses to run unless ALL of these files exist in `.moolabs/inventory/reviews/`:
 
+**Org-wide (1 file each):**
 1. `cfo-stage1-signoff.yaml` — `status: approved` (CFO generated cfo-spec.md + filled cfo_metadata).
-2. `pm-stage2-signoff.yaml` — `status: approved` (PM generated pm-spec.md + built output-input-map.yaml).
-3. `cfo-stage2b-signoff.yaml` — `status: approved` (CFO approved PM's spec — present even if no loop iterations occurred, indicating a one-pass approval).
-4. `engineer-stage3-signoff.yaml` — `status: approved` (Engineer generated engineer-spec.md + verified file:line / adapter / idempotency).
-5. `pm-stage3b-signoff.yaml` — `status: approved` (PM approved engineer's spec — present even on one-pass).
-6. `holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks` (Skill R final gate).
+2. `holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks` (Skill R final gate).
+
+**Per-product (one set per product declared in `02-cpo.signed.yaml > products[]` whose `services[]` contains the target `--service <S>`):**
+3. `pm-stage2-signoff-<product-slug>.yaml` — `status: approved` (per product's team-PM signed off the per-product spec).
+4. `cfo-stage2b-signoff-<product-slug>.yaml` — `status: approved` (CFO re-confirmed per-product PM mapping).
+
+**Per-service (one set for the engineer's `--service <S>`):**
+5. `engineer-stage3-signoff-<service-slug>.yaml` — `status: approved` (engineer verified file:line / adapter / idempotency for THIS service).
+6. `pm-stage3b-signoff-<service-slug>.yaml` — `status: approved` (owning PM(s) re-confirmed engineer's spec; co_signed_by[] required when service has ≥2 owning products).
+
+**Cross-cutting:**
 7. No CRITICAL or HIGH severity finding remains open in any review spec.
 
-The workflow is **sequential with two PM-centered loops** (CFO ⇄ PM upstream; Engineer ⇄ PM downstream). PM is the apex; engineer never talks directly to CFO in v1.
+**Single-product / single-service back-compat:** the per-product/per-service files are STILL suffixed with the only-product / only-service slug (e.g., `pm-stage2-signoff-acme.yaml` when the company has only one product `acme`). The v0.2-style bare `pm-stage2-signoff.yaml` is REJECTED by the v0.3 codemod gate — see `cost-billing-instrument/SKILL.md` "No legacy back-compat" note.
+
+The workflow is **sequential with two PM-centered loops** (CFO ⇄ PM upstream; Engineer ⇄ PM downstream). PM is the apex; engineer never talks directly to CFO in v1. Per-product PM signoffs (3, 4) are produced by `/cost-billing-signoff --persona team-product --product <slug>`; per-service engineer signoffs (5, 6) by `/cost-billing-signoff --persona team-engineer --service <slug>`.
 
 ## Reference files (load on demand)
 

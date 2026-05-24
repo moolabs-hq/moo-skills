@@ -1,5 +1,7 @@
 # Three-role review surface — sequential generators with TWO review loops
 
+> **NAMING CONVENTION (v0.3+):** All per-stage signoff filenames below use the suffixed form `<stage>-signoff-<product-slug>.yaml` (for pm-stage2 / cfo-stage2b) or `<stage>-signoff-<service-slug>.yaml` (for engineer-stage3 / pm-stage3b). Per `cost-billing-shared/chain-handoff.md`, this is how multi-product / multi-service fan-out works. **Single-product / single-service customers still use the suffixed form** with their only-product / only-service slug (e.g., `pm-stage2-signoff-acme.yaml` when company has one product `acme`) — preserves forward-compat with future fan-out without retroactive renames. The v0.2-style bare `pm-stage2-signoff-<product>.yaml` is REJECTED by the v0.3 codemod gate. Only `cfo-stage1-signoff.yaml` and `holistic-r-review.md` remain bare (they're org-wide, cardinality=1).
+
 The customer's review process has three role-specific generators (CFO / PM / Engineer), each producing their own artifact, with **two review loops centered on the PM**: a CFO ⇄ PM loop upstream and an Engineer ⇄ PM loop downstream.
 
 Clarified by user 2026-05-19:
@@ -58,7 +60,7 @@ Each role generates one or more artifacts; the next role's review either approve
 |---|---|---|---|
 | 1 | CFO | `usage-events-inventory.yaml` (fills `cfo_metadata` per entry); writes `reviews/cfo-spec.md` (human narrative) | Skill A's initial draft of usage-events + `pricing-page` if available |
 | 2 | PM | `output-input-map.yaml` (creates from scratch); `usage-events-inventory.yaml` (edits `refund_unit.unit` per entry); writes `reviews/pm-spec.md` | CFO's cfo-spec + draft cost-events + draft usage-events |
-| 2b | CFO | `reviews/cfo-stage2b-signoff.yaml` (approves or rejects PM's spec); may revise own cfo_metadata | PM's pm-spec + updated map |
+| 2b | CFO | `reviews/cfo-stage2b-signoff-<product>.yaml` (approves or rejects PM's spec); may revise own cfo_metadata | PM's pm-spec + updated map |
 | 2b | PM | revises pm-spec + output-input-map based on CFO feedback | CFO's revised cfo-spec |
 | 3 | Engineer | `cost-events-inventory.yaml` (verifies `file:line`, `framework`, `idempotency_anchor`); writes `reviews/engineer-spec.md` | PM's approved pm-spec + the codebase |
 | 3b | PM | reviews engineer-spec; if engineer reports a code reality that breaks a unit/mapping decision, PM revises pm-spec | Engineer's eng-spec |
@@ -195,7 +197,7 @@ entries_open_to_pm_discussion: 1
 [The cfo_reopen_requests, with PM's recommendation per entry]
 ```
 
-**PM signs off:** `reviews/pm-stage2-signoff.yaml`:
+**PM signs off:** `reviews/pm-stage2-signoff-<product>.yaml`:
 
 ```yaml
 status: approved | re-open-cfo
@@ -221,7 +223,7 @@ If `cfo_reopen_requests` is non-empty → CFO ⇄ PM loop.
 1. CFO reads PM's spec + reopen requests.
 2. CFO updates `cfo-spec.md` and `cfo_metadata` in `usage-events-inventory.yaml`, or re-defends the original.
 3. PM applies CFO's response → revises pm-spec + output-input-map.
-4. Repeat until both `cfo-stage2b-signoff.yaml: approved` and `pm-stage2-signoff.yaml: approved`.
+4. Repeat until both `cfo-stage2b-signoff-<product>.yaml: approved` and `pm-stage2-signoff-<product>.yaml: approved`.
 
 **Hard cap (v1):** 3 cycles. After 3 rounds, escalate to the customer's leadership.
 
@@ -272,7 +274,7 @@ If `cfo_reopen_requests` is non-empty → CFO ⇄ PM loop.
 [The pm_reopen_requests, with engineer's recommendation per entry]
 ```
 
-**Engineer signs off:** `reviews/engineer-stage3-signoff.yaml`:
+**Engineer signs off:** `reviews/engineer-stage3-signoff-<service>.yaml`:
 
 ```yaml
 status: approved | re-open-pm
@@ -300,7 +302,7 @@ If `pm_reopen_requests` is non-empty → Engineer ⇄ PM loop.
 2. PM revises pm-spec + output-input-map based on engineer's code reality input.
 3. **Bubble-up rule:** If PM's revision changes a billable unit or fair-usage assumption, PM bumps the issue up to Stage 2b (CFO must re-approve) — Engineer waits.
 4. PM applies revisions → Engineer revises eng-spec.
-5. Repeat until both `pm-stage3b-signoff.yaml: approved` and `engineer-stage3-signoff.yaml: approved`.
+5. Repeat until both `pm-stage3b-signoff-<service>.yaml: approved` and `engineer-stage3-signoff-<service>.yaml: approved`.
 
 **No hard cap** on this loop — engineer reopens reflect code reality, and code reality wins. But each loop must converge in finite time; if it stalls, escalate.
 
@@ -339,11 +341,11 @@ Skill R's verdict is the **final** blocking authority. Even if all three roles s
       cfo-spec.md                       # CFO narrative
       cfo-stage1-signoff.yaml           # CFO approves their own initial spec
       pm-spec.md                        # PM narrative
-      pm-stage2-signoff.yaml            # PM approves their own initial spec
-      cfo-stage2b-signoff.yaml          # CFO approves PM's spec (after possible cycle)
+      pm-stage2-signoff-<product>.yaml            # PM approves their own initial spec
+      cfo-stage2b-signoff-<product>.yaml          # CFO approves PM's spec (after possible cycle)
       engineer-spec.md                  # Engineer narrative
-      engineer-stage3-signoff.yaml      # Engineer approves their own initial spec
-      pm-stage3b-signoff.yaml           # PM approves engineer's spec (after possible cycle)
+      engineer-stage3-signoff-<service>.yaml      # Engineer approves their own initial spec
+      pm-stage3b-signoff-<service>.yaml           # PM approves engineer's spec (after possible cycle)
       holistic-r-review.md              # Skill R final adversarial gate
 ```
 
@@ -372,10 +374,10 @@ Skill R's verdict is the **final** blocking authority. Even if all three roles s
 
 Each role works async. Sequence is enforced by what files exist:
 
-- Stage 2 (`pm-spec.md` + `pm-stage2-signoff.yaml`) is invalid until `cfo-stage1-signoff.yaml: approved` exists.
-- Stage 2b cannot complete until BOTH `cfo-stage2b-signoff.yaml: approved` AND `pm-stage2-signoff.yaml: approved` exist.
+- Stage 2 (`pm-spec.md` + `pm-stage2-signoff-<product>.yaml`) is invalid until `cfo-stage1-signoff.yaml: approved` exists.
+- Stage 2b cannot complete until BOTH `cfo-stage2b-signoff-<product>.yaml: approved` AND `pm-stage2-signoff-<product>.yaml: approved` exist.
 - Stage 3 cannot start until Stage 2b is complete.
-- Stage 3b cannot complete until BOTH `pm-stage3b-signoff.yaml: approved` AND `engineer-stage3-signoff.yaml: approved` exist.
+- Stage 3b cannot complete until BOTH `pm-stage3b-signoff-<service>.yaml: approved` AND `engineer-stage3-signoff-<service>.yaml: approved` exist.
 - Holistic Skill R cannot run until Stage 3b is complete.
 - `/cost-billing-instrument` cannot run until holistic-r-review has `verdict: clean` or `clean-with-accepted-risks`.
 

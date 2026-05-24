@@ -109,6 +109,21 @@ Required signoffs:
 - For multi-product `--service <S>` spanning N products, ALL N pm-stage2-signoff-<p>.yaml + ALL N cfo-stage2b-signoff-<p>.yaml must be `approved` before this service's codemod runs.
 - `engineer-stage3-signoff-<S>.yaml` is THIS engineer's; other services' engineer signoffs are NOT required for this `--service` run.
 
+**Multi-owner co-signing for `pm-stage3b-signoff-<S>.yaml`** (per signoff.schema.yaml's `co_signed_by[]` field, gate-validation rule #9 in `cost-billing-signoff/references/signoff-yaml-schema.md`):
+- If service `<S>` belongs to ONLY ONE product (`P(S)` cardinality = 1), the single PM's `signed_by` is sufficient.
+- If service `<S>` belongs to ≥2 products (`P(S)` cardinality ≥ 2), `co_signed_by[]` MUST include one entry per owning PM beyond the primary `signed_by`. Each `co_signed_by[]` entry's `on_behalf_of_product` slug MUST be in `P(S)`. Codemod REJECTS if ANY owning product's PM is missing from the `signed_by` + `co_signed_by[]` union.
+- Each co-signer's `contact` is cross-checked against `02-cpo.signed.yaml > products[on_behalf_of_product].team_pm_contact` (when set; warn if unset per F1).
+
+**Per-file validation invariants** (applied on every signoff file the gate reads):
+- `$schema` URL == `https://moolabs.com/schemas/cost-billing-signoff/0.1.0` (v0.3+; v0.2 files REJECTED).
+- `stage` matches the expected stage for the filename.
+- `product_slug` (when applicable) IS in `02-cpo.signed.yaml > products[].slug`.
+- `service_slug` (when applicable) appears under at least one `products[].services` entry.
+- Body-slug ↔ filename match: filename's slug suffix == `product_slug` / `service_slug` in the YAML body (F2 invariant).
+- `signed_at` is after `generated_at` (catches backdating).
+- For PM stages: `signed_by.contact` matches the owning product's `team_pm_contact` IFF that field is set (F1).
+- For pm-stage3b on multi-owner services: `co_signed_by[]` invariant above.
+
 **Refuse message format** when any file missing:
 ```
 REFUSED: codemod gate not satisfied for --service <S>.

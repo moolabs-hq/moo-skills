@@ -48,7 +48,11 @@ properties:
     type: object
     required: [phase, verdict]
     properties:
-      phase: { type: string, pattern: "^post-bootstrap-team-engineer(-[a-z0-9-]+)?$" }
+      phase:
+        type: string
+        # Slug REQUIRED for fan-out stage (per F5 fix in adversarial-review SKILL.md +
+        # finding G4 in 2026-05-20 cross-model review).
+        pattern: "^post-bootstrap-team-engineer-[a-z0-9][a-z0-9-]*$"
       verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
       reviewer_model: { type: string }
 
