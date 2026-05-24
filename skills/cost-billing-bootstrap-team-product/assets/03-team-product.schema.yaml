@@ -1,0 +1,117 @@
+# JSON-Schema (YAML form) for 03-team-product-<product-slug>.signed.yaml — Stage 3 handoff.
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-billing-chain/team-product/0.1.0
+title: Cost+Billing Chain Stage 3 (Team-Product PM, per product) signed handoff
+type: object
+
+required: [stage, chain_position, product_slug, generated_at, input_chain, adversarial_review, signoff, features, event_type_convention]
+properties:
+  stage: { type: string, const: team-product }
+  chain_position: { type: integer, const: 3 }
+
+  product_slug:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+    description: |
+      MUST match the --product <slug> arg the PM passed AND a products[].slug entry in
+      02-cpo.signed.yaml. Validated at run time; invalid slug causes refuse-to-run.
+
+  generated_at: { type: string, format: date-time }
+  generator: { type: string }
+  agent_surface: { type: string }
+  llm_used: { type: string }
+  team_pm_contact: { type: string }    # who actually signed; cross-check with 02-cpo > products[product_slug].team_pm_contact
+
+  input_chain:
+    type: array
+    minItems: 2
+    items:
+      type: object
+      required: [stage, file, sha256, signed_at]
+      properties:
+        stage: { type: string, enum: [finance, cpo] }
+        file: { type: string }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        signed_at: { type: string, format: date-time }
+
+  adversarial_review:
+    type: object
+    required: [phase, verdict]
+    properties:
+      phase: { type: string, pattern: "^post-bootstrap-team-product(-[a-z0-9-]+)?$" }
+      verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
+      reviewer_model: { type: string }
+
+  signoff:
+    type: object
+    required: [signed_by_role, signed_by_name, signed_at, product_slug]
+    properties:
+      signed_by_role: { type: string, const: team-product }
+      signed_by_name: { type: string }
+      signed_at: { type: string, format: date-time }
+      product_slug: { type: string }     # MUST match top-level product_slug
+      notes: { type: string }
+
+  features:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [name, finance_unit_mapping, event_type]
+      properties:
+        name: { type: string }
+        finance_unit_mapping: { type: string }   # references 01-finance > billable_units[].unit_id
+        finance_unit_modifier:
+          type: string
+          enum: ["1:1", subset, multi-unit, new-unit-needed]
+        inputs:
+          type: array
+          items:
+            type: object
+            required: [vendor_call, role]
+            properties:
+              vendor_call: { type: string }
+              role: { type: string, enum: [primary, secondary, auxiliary] }
+              conditional: { type: string }
+        event_type:
+          type: string
+          description: "Exact string the SDK emits, e.g. 'completion.delivered'."
+        refund_test_pattern:
+          type: string
+          enum: [agentic, streaming, hybrid, subscription]
+        lifecycle_states_emitting_usage:
+          type: array
+          items:
+            type: string
+            enum: [succeeded, failed, cancelled, partial-stream-collapse]
+        team_specific_synonyms:
+          type: array
+          items: { type: string }
+        fair_usage_per_feature:
+          type: object
+          additionalProperties: true
+        services_implementing_feature:
+          type: array
+          items: { type: string }
+          description: "Service paths that contain this feature's code. Used by engineer fan-out to match per-service docs."
+
+  event_type_convention:
+    type: string
+    enum: [period-separated, underscore, pascal-case, other]
+
+  cross_feature_trace_policy:
+    type: string
+    enum: [separate, aggregated]
+
+  cross_stage_drift_findings:
+    type: array
+    items: { type: object }
+
+  cfo_reopen_requests:
+    type: array
+    items:
+      type: object
+      properties:
+        workflow_id: { type: string }
+        reason: { type: string }

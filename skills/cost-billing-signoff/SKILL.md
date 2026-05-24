@@ -170,9 +170,18 @@ After all findings handled, the persona's `signoff.status` is computed:
 - If ANY R finding is `accepted` (fix required), the signoff status becomes `re-open-<stage-that-owns-the-fix>` and the chain loops back.
 - If ALL R findings are `risk-accepted` or `rejected`, signoff status becomes `approved`.
 
-### Phase 6 — Write the signed YAML + advance state machine
+### Phase 6 — Write the signed YAML + invariants check + advance state machine
 
-Promote `<stage>-signoff.draft.yaml` → `<stage>-signoff.yaml` with the final `status` block, signer identity, R verdict, and rationale notes. Print:
+Promote `<stage>-signoff.draft.yaml` → `<stage>-signoff.yaml` with the final `status` block, signer identity, R verdict, and rationale notes.
+
+**Invariants verified BEFORE writing (F2 fix):**
+- For PM/engineer stages: filename suffix slug == YAML body `product_slug` / `service_slug` (catches typo drift like file `*-moo-acute.yaml` vs body `service_slug: moo_acute`).
+- For pm-stage3b on multi-owner services: `co_signed_by[]` contains one entry per owning product's PM, each with `on_behalf_of_product` matching a `products[]` slug whose `services[]` contains this service_slug (F3 invariant).
+- For PM stages: `signed_by.contact` matches `02-cpo.signed.yaml > products[product_slug].team_pm_contact` IFF that field is set (F1 invariant; warn if unset).
+- `signed_at` is after `generated_at` (catches backdating).
+- `$schema` URL matches the v0.3 signoff schema (`https://moolabs.com/schemas/cost-billing-signoff/0.1.0`).
+
+Any invariant failure aborts the write with a precise message + leaves the draft intact for retry. Print:
 
 ```
 ✓ <Stage> signoff complete.

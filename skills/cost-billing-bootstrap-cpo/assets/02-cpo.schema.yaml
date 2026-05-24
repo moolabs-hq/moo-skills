@@ -1,0 +1,163 @@
+# JSON-Schema (YAML form) for 02-cpo.signed.yaml
+# The CPO stage's signed handoff doc. Read by team-product (per --product), team-engineer
+# (per --service), and /cost-billing-signoff (which uses products[] for fan-out).
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-billing-chain/cpo/0.1.0
+title: Cost+Billing Chain Stage 2 (CPO) signed handoff
+type: object
+
+required: [stage, chain_position, generated_at, input_chain, adversarial_review, signoff, product, terminology, products]
+properties:
+  stage:
+    type: string
+    const: cpo
+  chain_position:
+    type: integer
+    const: 2
+  generated_at: { type: string, format: date-time }
+  generator: { type: string }
+  agent_surface: { type: string }
+  llm_used: { type: string }
+
+  input_chain:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [stage, file, sha256, signed_at]
+      properties:
+        stage: { type: string, const: finance }
+        file: { type: string }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        signed_at: { type: string, format: date-time }
+        signed_by: { type: string }
+
+  adversarial_review:
+    type: object
+    required: [phase, verdict]
+    properties:
+      phase: { type: string, const: post-bootstrap-cpo }
+      verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
+      reviewer_model: { type: string }
+      findings_total: { type: integer }
+      findings_human_accepted: { type: integer }
+      findings_resolved: { type: integer }
+
+  signoff:
+    type: object
+    required: [signed_by_role, signed_by_name, signed_at]
+    properties:
+      signed_by_role: { type: string, const: cpo }
+      signed_by_name: { type: string }
+      signed_at: { type: string, format: date-time }
+      signed_method: { type: string }
+      notes: { type: string }
+
+  product:
+    type: object
+    required: [company_name, products]
+    properties:
+      company_name: { type: string }
+      products:
+        type: array
+        items: { type: string }   # display names; also see `products` block below for full schema
+      multi_product_shape: { type: string, enum: [orthogonal, layered, hybrid, single] }
+      description_one_paragraph: { type: string }
+      doc_sources:
+        type: array
+        items:
+          type: object
+          properties:
+            type: { type: string, enum: [url, folder, mcp, pdf, inline] }
+            location: { type: string }
+            access: { type: string }
+            depth: { type: string }
+            authority: { type: string, enum: [primary, secondary, aspirational] }
+            confidence: { type: string, enum: [high, medium, low] }
+      top_features:
+        type: array
+        items:
+          type: object
+          required: [name, description]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            product_slug: { type: string }   # which product (in products[] below) owns this feature
+      internal_only_features:
+        type: array
+        items: { type: string }
+
+  terminology:
+    type: object
+    properties:
+      end_user_term: { type: string }
+      billable_output_term: { type: string }
+      per_product_billable_output_terms:
+        type: object
+        additionalProperties: { type: string }    # keyed by product slug
+      synonyms:
+        type: object
+        additionalProperties:
+          type: array
+          items: { type: string }
+      unique_concepts:
+        type: array
+        items:
+          type: object
+          properties:
+            name: { type: string }
+            definition: { type: string }
+            billable: { type: boolean }
+            unit: { type: string }
+
+  pricing_product_alignment:
+    type: object
+    additionalProperties: true
+
+  # ── Q11: REQUIRED for multi-product fan-out (single-product orgs still answer with one entry) ──
+  products:
+    type: array
+    minItems: 1
+    description: |
+      The product/vertical list that drives multi-product fan-out across the chain.
+      Team-PMs run /cost-billing-bootstrap-team-product --product <slug> validated against this.
+      Team-engineers run --service <slug> for services that appear under any product's services[].
+      Signoff orchestrator iterates per-product PM signoffs + per-service engineer signoffs.
+    items:
+      type: object
+      required: [slug, name, services]
+      # Note: team_pm_contact is required UNLESS internal_only=true. The schema can't easily
+      # express conditional requirements; codemod gate enforces this at runtime (F1 fix).
+      properties:
+        slug:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]*$"
+          minLength: 1
+          maxLength: 64
+          description: "Short kebab-case identifier used in --product flags + file suffixes."
+        name:
+          type: string
+          description: "Display name (e.g., 'Acute Cost Intelligence')."
+        team_pm_contact:
+          type: string
+          description: |
+            Email or Slack handle of the team-PM owning this product. Authoritative source
+            of truth for signoff routing. REQUIRED unless internal_only=true. The codemod
+            gate validation rejects PM signoffs whose signed_by.contact doesn't match this
+            value — protects against the wrong PM claiming a product.
+        services:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "Service paths (relative to repo root) that BELONG to this product. A service can appear under multiple products (shared infra) — handled by engineer-stage3 fan-out reconciliation."
+        internal_only:
+          type: boolean
+          default: false
+          description: "If true, no team-product bootstrap needed for this entry. Skipped in signoff state machine."
+        notes:
+          type: string
+
+# Single-product back-compat: products[] still has exactly one entry; suffixed file names
+# (e.g., pm-stage2-signoff-<only-product>.yaml) are still used, preserving forward-compat
+# with future fan-out without retroactive renames.

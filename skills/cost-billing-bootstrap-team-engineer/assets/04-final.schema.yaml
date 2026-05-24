@@ -1,0 +1,133 @@
+# JSON-Schema (YAML form) for 04-final-<service-slug>.signed.yaml — Stage 4 (FINAL) handoff.
+# Also defines the consolidated customer-context shape (engineer's stage produces this AFTER
+# its own signoff is complete + signoff orchestrator's pm-stage3b approval is complete).
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-billing-chain/team-engineer/0.1.0
+title: Cost+Billing Chain Stage 4 (Team-Engineer, per service) signed handoff
+type: object
+
+required: [stage, chain_position, service_slug, generated_at, input_chain, adversarial_review, signoff, repo, telemetry, mcp, integration]
+properties:
+  stage: { type: string, const: team-engineer }
+  chain_position: { type: integer, const: 4 }
+
+  service_slug:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+    description: |
+      MUST match the --service <slug> arg AND appear under ≥1 product's services[] entry in
+      02-cpo.signed.yaml > products[].services. Validated at run time.
+
+  generated_at: { type: string, format: date-time }
+  generator: { type: string }
+  agent_surface: { type: string }
+  llm_used: { type: string }
+  engineer_contact: { type: string }
+
+  input_chain:
+    type: array
+    minItems: 3
+    description: |
+      finance + cpo + AT LEAST ONE team-product doc (for each product whose services[] includes
+      this engineer's service_slug). Multi-product shared-service engineers have MULTIPLE
+      team-product entries here.
+    items:
+      type: object
+      required: [stage, file, sha256, signed_at]
+      properties:
+        stage: { type: string, enum: [finance, cpo, team-product] }
+        file: { type: string }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        signed_at: { type: string, format: date-time }
+        product_slug:
+          type: string
+          description: For team-product entries, the product slug this engineer-spec consumes.
+
+  adversarial_review:
+    type: object
+    required: [phase, verdict]
+    properties:
+      phase: { type: string, pattern: "^post-bootstrap-team-engineer(-[a-z0-9-]+)?$" }
+      verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
+      reviewer_model: { type: string }
+
+  signoff:
+    type: object
+    required: [signed_by_role, signed_by_name, signed_at, service_slug]
+    properties:
+      signed_by_role: { type: string, const: team-engineer }
+      signed_by_name: { type: string }
+      signed_at: { type: string, format: date-time }
+      service_slug: { type: string }
+      notes: { type: string }
+
+  repo:
+    type: object
+    properties:
+      primary_path: { type: string }
+      multi_repo_shape:
+        type: string
+        enum: [single, monorepo, polyrepo, microservices]
+      service_path: { type: string }   # the directory THIS service lives in
+      languages:
+        type: array
+        items: { type: string }
+      frameworks:
+        type: array
+        items: { type: string }
+      build_command: { type: string }
+      test_command: { type: string }
+      branch_strategy: { type: string }
+
+  telemetry:
+    type: object
+    properties:
+      primary_tracer: { type: string, enum: [opentelemetry, datadog, sentry, newrelic, honeycomb, custom, none] }
+      secondary:
+        type: array
+        items: { type: string }
+      mode: { type: string, enum: [brownfield, greenfield] }
+      request_context_propagation: { type: string }
+      attribute_prefix_collisions:
+        type: array
+        items: { type: string }
+
+  mcp:
+    type: object
+    properties:
+      agent_surface: { type: string }
+      active_llm: { type: object }
+      recommended_reviewer_model: { type: object }
+      mcps_available:
+        type: array
+        items: { type: object }
+      mcp_selection: { type: object }
+      mcp_restrictions:
+        type: array
+        items: { type: string }
+
+  integration:
+    type: object
+    properties:
+      sdk_key_location: { type: object }
+      sdk_key_read_pattern: { type: string }
+      # NOTE: regions, environments, multi_tenant come from finance — engineer only references
+      # them. Codemod reads them from 01-finance via the input_chain hash check.
+
+  shared_service_reconciliation:
+    type: object
+    description: |
+      For services that belong to MULTIPLE products (e.g., shared infra), engineer documents
+      how per-feature decisions from each owning product are reconciled (which product's
+      event_type wins for shared call sites, etc.).
+    additionalProperties: true
+
+  consolidated_customer_context:
+    type: object
+    description: |
+      Flattened view that downstream skills read. Engineer's stage generates this AFTER signoff.
+      Single-service orgs: lives at .moolabs/customer-context/.
+      Multi-service orgs: lives at .moolabs/customer-context/<service-slug>/.
+      Discovery + drift-lint + codemod all read from the per-service path when --service is set.
+    additionalProperties: true

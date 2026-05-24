@@ -78,26 +78,50 @@ Specifically required:
 
 ### Sequential workflow with TWO review loops
 
-Per `cost-billing-shared/three-role-review.md`, the workflow is CFO → PM ⇄ PM → Engineer with two PM-centered loops. The codemod refuses to run unless ALL of these exist:
+Per `cost-billing-shared/three-role-review.md`, the workflow is CFO → PM ⇄ PM → Engineer with two PM-centered loops. With multi-product + multi-service fan-out (per `chain-handoff.md`), the codemod refuses to run unless ALL of these exist FOR THIS `--service <slug>` INVOCATION:
 
-**The three artifacts (each role's "doc"):**
-1. `.moolabs/inventory/cost-events-inventory.yaml` — Engineer's doc (file:line / adapter / idempotency verified).
-2. `.moolabs/inventory/usage-events-inventory.yaml` — CFO's doc (cfo_metadata filled) + PM's edits (refund_unit per entry).
-3. `.moolabs/inventory/output-input-map.yaml` — PM's doc (linkage graph + weights).
+**The three inventory artifacts (org-wide):**
+1. `.moolabs/inventory/cost-events-inventory.yaml`
+2. `.moolabs/inventory/usage-events-inventory.yaml`
+3. `.moolabs/inventory/output-input-map.yaml`
 
-**The five sequential signoffs (in order of stage completion):**
-4. `.moolabs/inventory/reviews/cfo-stage1-signoff.yaml` — `status: approved` (CFO generated cfo-spec).
-5. `.moolabs/inventory/reviews/pm-stage2-signoff.yaml` — `status: approved` (PM generated pm-spec).
-6. `.moolabs/inventory/reviews/cfo-stage2b-signoff.yaml` — `status: approved` (CFO ⇄ PM loop converged).
-7. `.moolabs/inventory/reviews/engineer-stage3-signoff.yaml` — `status: approved` (Engineer generated engineer-spec).
-8. `.moolabs/inventory/reviews/pm-stage3b-signoff.yaml` — `status: approved` (Engineer ⇄ PM loop converged).
+**The signoff cascade (fan-out aware):**
 
-**The final adversarial gate:**
-9. `.moolabs/inventory/reviews/holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks`.
+Read `02-cpo.signed.yaml > products[]` to enumerate products. Read `02-cpo.signed.yaml > products[].services` to map products ↔ services. For a `--service <S>` invocation, identify the set of products `P(S) = {p : p.services contains S}`.
 
-If any are missing, refuse with a precise message naming the missing file AND the stage that produces it. Per requirements §5.2, this gate is mandatory.
+Required signoffs:
+4. `.moolabs/inventory/reviews/cfo-stage1-signoff.yaml` — `status: approved` (1, org-wide).
+5. **For EACH product `p` ∈ P(S):**
+   - `.moolabs/inventory/reviews/pm-stage2-signoff-<p>.yaml` — `status: approved`
+   - `.moolabs/inventory/reviews/cfo-stage2b-signoff-<p>.yaml` — `status: approved`
+6. `.moolabs/inventory/reviews/engineer-stage3-signoff-<service>.yaml` — `status: approved` (1, for THIS `--service`).
+7. `.moolabs/inventory/reviews/pm-stage3b-signoff-<service>.yaml` — `status: approved` (1, for THIS `--service`).
 
-**Validation logic for the loops:** stages 2b and 3b are always required even if the loop converged in one pass (i.e., no real cycle happened). The mere existence of `cfo-stage2b-signoff.yaml: approved` is the signal that CFO has reviewed PM's spec; same for `pm-stage3b-signoff.yaml`.
+**The final adversarial gate (org-wide):**
+8. `.moolabs/inventory/reviews/holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks`.
+
+**Single-product/single-service back-compat:** when `02-cpo.signed.yaml > products[]` has exactly one entry with `slug: <only-product>` and `services: [<only-service>]`, the per-product file is still `pm-stage2-signoff-<only-product>.yaml`.
+
+**No legacy back-compat.** v0.3 schemas require fields v0.2 didn't have (`product_slug`, `service_slug`, schema-versioned `adversarial_review`). The codemod REJECTS any signoff file lacking the v0.3 `$schema` URL. v0.2 customers must restart from `/cost-billing-bootstrap-finance`. **(F6 fix — clean break.)**
+
+**Validation logic for the cascade:**
+- Stages 2b and 3b are always required (even if zero-cycle loop).
+- For multi-product `--service <S>` spanning N products, ALL N pm-stage2-signoff-<p>.yaml + ALL N cfo-stage2b-signoff-<p>.yaml must be `approved` before this service's codemod runs.
+- `engineer-stage3-signoff-<S>.yaml` is THIS engineer's; other services' engineer signoffs are NOT required for this `--service` run.
+
+**Refuse message format** when any file missing:
+```
+REFUSED: codemod gate not satisfied for --service <S>.
+
+Missing signoffs:
+  - reviews/pm-stage2-signoff-acute.yaml (run /cost-billing-signoff --persona team-product --product acute)
+  - reviews/engineer-stage3-signoff-<S>.yaml (run /cost-billing-signoff --persona team-engineer --service <S>)
+
+Products owning service <S> (from 02-cpo.signed.yaml): [acute, arc]
+All signoffs needed per product: pm-stage2-signoff-{acute,arc}.yaml + cfo-stage2b-signoff-{acute,arc}.yaml
+Plus this service's engineer signoffs: engineer-stage3-signoff-<S>.yaml + pm-stage3b-signoff-<S>.yaml
+Plus org-wide: cfo-stage1-signoff.yaml + holistic-r-review.md
+```
 
 ## Workflow — 4 phases
 

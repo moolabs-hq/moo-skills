@@ -1,0 +1,121 @@
+# JSON-Schema (YAML form) for 01-finance.signed.yaml — Chain Stage 1 (CFO) handoff doc.
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-billing-chain/finance/0.1.0
+title: Cost+Billing Chain Stage 1 (Finance/CFO) signed handoff
+type: object
+
+required: [stage, chain_position, generated_at, input_chain, adversarial_review, signoff, pricing_model, compliance, deployment]
+properties:
+  stage: { type: string, const: finance }
+  chain_position: { type: integer, const: 1 }
+  generated_at: { type: string, format: date-time }
+  generator: { type: string }
+  agent_surface: { type: string }
+  llm_used: { type: string }
+
+  input_chain:
+    type: array
+    maxItems: 0    # finance is FIRST in the chain — no upstream input
+    description: Always empty for the finance stage.
+
+  adversarial_review:
+    type: object
+    required: [phase, verdict]
+    properties:
+      phase: { type: string, const: post-bootstrap-finance }
+      verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
+      reviewer_model: { type: string }
+
+  signoff:
+    type: object
+    required: [signed_by_role, signed_by_name, signed_at]
+    properties:
+      signed_by_role: { type: string, const: finance }
+      signed_by_name: { type: string }
+      signed_at: { type: string, format: date-time }
+      notes: { type: string }
+
+  pricing_model:
+    type: object
+    required: [primary_type, billable_units]
+    properties:
+      primary_type:
+        type: string
+        enum: [hybrid, subscription, usage, tiered, credit-wallet, enterprise-custom, other]
+      sub_aspects:
+        type: array
+        items: { type: string }
+      sources_of_truth:
+        type: array
+        items:
+          type: object
+          properties:
+            type: { type: string, enum: [public_pricing_page, internal_doc, spreadsheet, config_file, sales_per_customer, code] }
+            location: { type: string }
+            authority: { type: string, enum: [primary, secondary, aspirational, contradictory] }
+            freshness: { type: string, enum: [live, first_draft_brainstorm, stale, unknown] }
+      billable_units:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [unit_id, label]
+          properties:
+            unit_id: { type: string }      # short slug, e.g., "per_token_1k"
+            label: { type: string }        # CFO's words, e.g., "completion priced per 1k tokens"
+            price_usd: { type: number, minimum: 0 }
+            per_what: { type: string }     # "1k tokens", "render", "minute", etc.
+      fair_usage_per_unit:
+        type: object
+        additionalProperties: true
+      per_customer_custom:
+        type: object
+        additionalProperties: true
+      bundles:
+        type: array
+        items: { type: object }
+
+  compliance:
+    type: object
+    properties:
+      regimes:
+        type: array
+        items: { type: string, enum: [SOC2, HIPAA, GDPR, FedRAMP-Moderate, FedRAMP-High, PCI-DSS, CCPA, none, other] }
+      pii_field_blocklist:
+        type: array
+        items: { type: string }
+      phi_field_blocklist:
+        type: array
+        items: { type: string }
+
+  deployment:
+    type: object
+    required: [regions, environments, multi_tenant]
+    properties:
+      regions:
+        type: array
+        items:
+          type: object
+          required: [id]
+          properties:
+            id: { type: string, enum: [use1, apse1, euw1, other] }
+            key_prefix: { type: string }
+            primary: { type: boolean }
+      environments:
+        type: array
+        items:
+          type: object
+          properties:
+            id: { type: string }
+            sdk_key_location: { type: object }
+            llm_provider: { type: string }
+      multi_tenant:
+        type: object
+        required: [shape]
+        properties:
+          shape:
+            type: string
+            enum: [single, shared-db, isolated-db, workspace-based, other]
+          tenant_id_field: { type: string }
+          tenant_id_source_hint: { type: string }

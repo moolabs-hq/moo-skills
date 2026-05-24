@@ -1,0 +1,145 @@
+# JSON-Schema (YAML form) for cost-billing signoff YAMLs.
+# Read by /cost-billing-signoff (writes them) AND by /cost-billing-instrument (gate check).
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://moolabs.com/schemas/cost-billing-signoff/0.1.0
+title: Cost+Billing Three-Role Review Signoff
+type: object
+
+required: [$schema, stage, status, generated_at, signed_by, adversarial_review]
+properties:
+  $schema: { type: string, const: "https://moolabs.com/schemas/cost-billing-signoff/0.1.0" }
+
+  stage:
+    type: string
+    enum:
+      - cfo-stage1
+      - pm-stage2          # always suffixed with -<product> on disk: pm-stage2-signoff-<product>.yaml
+      - cfo-stage2b        # ditto: cfo-stage2b-signoff-<product>.yaml
+      - engineer-stage3    # suffixed with -<service>: engineer-stage3-signoff-<service>.yaml
+      - pm-stage3b         # ditto: pm-stage3b-signoff-<service>.yaml
+
+  product_slug:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+    description: |
+      REQUIRED when stage is pm-stage2 or cfo-stage2b. Must match a products[].slug entry
+      in 02-cpo.signed.yaml. Codemod refuses if this slug isn't in CPO's list.
+
+  service_slug:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+    description: |
+      REQUIRED when stage is engineer-stage3 or pm-stage3b. Must appear under at least one
+      products[].services entry in 02-cpo.signed.yaml.
+
+  status:
+    type: string
+    enum:
+      - approved                # green-light; cascade advances
+      - re-open-cfo             # PM wants CFO to revise stage 1
+      - re-open-cfo-stage2b     # engineer's reality forces CFO to re-decide pricing
+      - re-open-pm              # engineer wants PM to revise per-feature mapping
+      - re-open-pm-stage3b      # late finding forces PM to re-review engineer's spec
+      - escalate                # reviewer can't decide; needs human leadership
+
+  generated_at: { type: string, format: date-time }
+
+  signed_by:
+    type: object
+    required: [role, name, signed_at]
+    properties:
+      role:
+        type: string
+        enum: [cfo, finance, team-product, team-engineer]
+      name: { type: string }
+      contact: { type: string }      # email / slack handle; cross-checked against 02-cpo.products[].team_pm_contact for PM stages
+      signed_at: { type: string, format: date-time }
+      signed_method:
+        type: string
+        enum: [interactive-cli, agent-mediated, external-form, manual-yaml-edit]
+      machine_fingerprint: { type: string, description: Optional hash for audit. }
+
+  # F3 fix: co-signers for multi-owner pm-stage3b signoffs (services shared across products).
+  co_signed_by:
+    type: array
+    description: |
+      REQUIRED for pm-stage3b stages where service_slug belongs to ≥2 products in
+      02-cpo.signed.yaml > products[].services. Each entry signs on behalf of one
+      owning product's team-PM. signed_by is the primary signer; co_signed_by[]
+      lists the others. Codemod gate rejects if any owning PM is missing.
+    items:
+      type: object
+      required: [role, name, contact, signed_at, on_behalf_of_product]
+      properties:
+        role: { type: string, const: team-product }
+        name: { type: string }
+        contact: { type: string }    # MUST match 02-cpo.products[on_behalf_of_product].team_pm_contact
+        signed_at: { type: string, format: date-time }
+        on_behalf_of_product:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]*$"
+          description: "Product slug this co-signature represents."
+        signed_method: { type: string }
+
+  adversarial_review:
+    type: object
+    required: [phase, verdict, reviewer_model, ran_at]
+    description: Output of /cost-billing-adversarial-review --phase post-signoff-<stage> on the DRAFT.
+    properties:
+      phase: { type: string, pattern: "^post-signoff-(cfo-stage1|pm-stage2|cfo-stage2b|engineer-stage3|pm-stage3b)(-[a-z0-9-]+)?$" }
+      verdict: { type: string, enum: [clean, clean-with-accepted-risks, blocked] }
+      reviewer_model: { type: string }
+      ran_at: { type: string, format: date-time }
+      findings_total: { type: integer, minimum: 0 }
+      findings_human_accepted: { type: integer, minimum: 0 }
+      findings_resolved: { type: integer, minimum: 0 }
+      findings_rejected_as_false_positive: { type: integer, minimum: 0 }
+      cross_model_violated:
+        type: boolean
+        default: false
+        description: True iff reviewer_model == codegen model (warns; doesn't block).
+
+  edits_to_inventory:
+    type: array
+    description: Per-entry overrides this persona requested while reviewing. Drives the inventory's next-revision diff.
+    items:
+      type: object
+      required: [entry_workflow_id, change, rationale]
+      properties:
+        entry_workflow_id: { type: string }
+        change: { type: string, enum: [reclassify-internal, reclassify-billable, change-unit, change-price, relocate-file-line, change-adapter, change-idempotency-anchor, reject-as-false-positive, add-input, remove-input, change-edge-weight, other] }
+        old_value: { type: string }
+        new_value: { type: string }
+        rationale: { type: string }
+
+  findings_from_persona:
+    type: array
+    description: Human-flagged concerns ABOVE/OUTSIDE what Skill R found. Captured before R runs.
+    items:
+      type: object
+      required: [severity, description]
+      properties:
+        severity: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        description: { type: string }
+        relates_to_entry: { type: string }
+
+  findings_resolution:
+    type: array
+    description: |
+      Per R-finding outcome decided by the persona during Phase 5. EVERY R finding must
+      have a resolution entry (accepted = fix it, risk-accepted = ack but skip, rejected =
+      R was wrong here).
+    items:
+      type: object
+      required: [finding_id, outcome]
+      properties:
+        finding_id: { type: string }
+        outcome: { type: string, enum: [accepted, risk-accepted, rejected] }
+        rationale: { type: string }
+
+  notes:
+    type: string
+    description: |
+      Free-form signer notes. MANDATORY if any R finding has outcome=risk-accepted (the
+      signer must explain why the risk is acceptable).

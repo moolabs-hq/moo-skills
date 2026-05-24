@@ -1,0 +1,183 @@
+# Declarative state machine for /cost-billing-signoff.
+# The skill reads .moolabs/inventory/reviews/ + 02-cpo.signed.yaml > products[] +
+# the engineer's --service to compute "where am I in the chain", then dispatches to
+# the per-stage flow.
+
+$schema: https://moolabs.com/schemas/cost-billing-signoff-state-machine/0.1.0
+version: "0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────
+# Nodes
+# ─────────────────────────────────────────────────────────────────────
+nodes:
+  - id: not-started
+    description: "No signoff files exist yet."
+    next_actions:
+      - persona: cfo
+        action: dispatch
+        stage: cfo-stage1
+        scope: org-wide
+
+  - id: cfo-stage1-done
+    description: "cfo-stage1-signoff.yaml exists with status=approved."
+    next_actions:
+      # For EACH product in 02-cpo.signed.yaml > products[]:
+      - persona: team-product
+        action: dispatch
+        stage: pm-stage2
+        scope: per-product
+        per_product: true       # iterate; one action per product
+
+  - id: pm-stage2-all-done
+    description: "All pm-stage2-signoff-<product>.yaml files exist with status=approved (one per CPO-declared product)."
+    next_actions:
+      - persona: cfo
+        action: dispatch
+        stage: cfo-stage2b
+        scope: per-product
+        per_product: true
+
+  - id: cfo-stage2b-all-done
+    description: "All cfo-stage2b-signoff-<product>.yaml files approved."
+    next_actions:
+      # For each --service in the engineer's domain:
+      - persona: team-engineer
+        action: dispatch
+        stage: engineer-stage3
+        scope: per-service
+        per_service: true
+
+  - id: engineer-stage3-done-for-service
+    description: "engineer-stage3-signoff-<service>.yaml approved for THIS service."
+    next_actions:
+      - persona: team-product
+        action: dispatch
+        stage: pm-stage3b
+        scope: per-service
+        per_service: true
+        notes: |
+          For multi-product services (service in >1 products[].services), pm-stage3b runs for
+          EACH owning product's PM. Codemod gate requires pm-stage3b-signoff-<service>.yaml
+          per-service (not per-product-per-service) — the owning PMs negotiate; one signed file
+          per service.
+
+  - id: pm-stage3b-all-done
+    description: "All pm-stage3b-signoff-<service>.yaml files approved (for services to be codemod-instrumented)."
+    next_actions:
+      - persona: any
+        action: invoke
+        skill: /cost-billing-adversarial-review
+        args: ["--phase", "holistic-pre-codemod"]
+        scope: org-wide
+        notes: "Final holistic R gate."
+
+  - id: holistic-clean
+    description: "holistic-r-review.md verdict ∈ {clean, clean-with-accepted-risks}."
+    next_actions:
+      - persona: team-engineer
+        action: invoke
+        skill: /cost-billing-instrument
+        scope: per-service
+        per_service: true
+        notes: "Codemod gate unblocked for each engineer to run their --service."
+
+  - id: holistic-blocked
+    description: "holistic R returned blocked."
+    next_actions:
+      - persona: any
+        action: halt
+        notes: "Routed back to whichever stage owns the bug. State machine resets to that stage."
+
+# ─────────────────────────────────────────────────────────────────────
+# Transitions
+# ─────────────────────────────────────────────────────────────────────
+# Triggered by file appearance + status field. The skill watches for new signoff
+# files and re-computes the current node.
+
+transitions:
+  - from: not-started
+    to: cfo-stage1-done
+    trigger: "cfo-stage1-signoff.yaml exists AND status == approved"
+
+  - from: cfo-stage1-done
+    to: pm-stage2-all-done
+    trigger: |
+      For every product P in 02-cpo > products[].slug:
+        pm-stage2-signoff-<P>.yaml exists AND status == approved
+
+  - from: pm-stage2-all-done
+    to: cfo-stage2b-all-done
+    trigger: |
+      For every product P:
+        cfo-stage2b-signoff-<P>.yaml exists AND status == approved
+
+  - from: cfo-stage2b-all-done
+    to: engineer-stage3-done-for-service
+    trigger: "engineer-stage3-signoff-<S>.yaml exists AND status == approved (PER --service S; engineer runs independently)"
+
+  - from: engineer-stage3-done-for-service
+    to: pm-stage3b-all-done
+    trigger: "pm-stage3b-signoff-<S>.yaml exists AND status == approved (PER --service S)"
+
+  - from: pm-stage3b-all-done
+    to: holistic-clean
+    trigger: "holistic-r-review.md exists AND verdict ∈ {clean, clean-with-accepted-risks}"
+
+  - from: pm-stage3b-all-done
+    to: holistic-blocked
+    trigger: "holistic-r-review.md exists AND verdict == blocked"
+
+# ─────────────────────────────────────────────────────────────────────
+# Re-open semantics (loop-back)
+# ─────────────────────────────────────────────────────────────────────
+# When a signoff has status != approved, the state machine LOOPS BACK to the stage that
+# owns the re-open. The dependent downstream signoffs become invalid and must be re-done.
+
+reopen_rules:
+  - from_status: re-open-cfo
+    routes_to: cfo-stage1
+    invalidates: [pm-stage2-*, cfo-stage2b-*, engineer-stage3-*, pm-stage3b-*]
+    notes: "CFO re-decides pricing — every downstream signoff becomes stale."
+
+  - from_status: re-open-cfo-stage2b
+    routes_to: cfo-stage2b
+    invalidates: [engineer-stage3-*, pm-stage3b-*]
+    notes: "PM bubbled up an engineer-discovered code reality that changes CFO pricing — only engineer stages get invalidated."
+
+  - from_status: re-open-pm
+    routes_to: pm-stage2
+    invalidates: [cfo-stage2b-*, engineer-stage3-*, pm-stage3b-*]
+    notes: "Engineer flagged PM's mapping doesn't fit code reality — PM revises, CFO re-confirms, engineer re-signs."
+
+  - from_status: re-open-pm-stage3b
+    routes_to: pm-stage3b
+    invalidates: []
+    notes: "Late finding in PM's final-stage review — just re-do that one signoff."
+
+  - from_status: escalate
+    routes_to: human-leadership
+    invalidates: []
+    notes: "State machine halts; no further dispatches until human resolves."
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-persona dispatch table
+# ─────────────────────────────────────────────────────────────────────
+# Which stages a persona can act on. Used to filter --persona flag.
+
+persona_stage_table:
+  cfo:
+    stages: [cfo-stage1, cfo-stage2b]
+    notes: "CFO acts on stage 1 (initial pricing review) and stage 2b (re-confirm per product after PM mapping)."
+  finance:
+    alias_for: cfo
+  team-product:
+    stages: [pm-stage2, pm-stage3b]
+    arg_required: --product
+    notes: "Team-PM acts per-product on stage 2 + per-service on stage 3b. --product slug determines scope on stage 2; pm-stage3b inherits service slug from the engineer-stage3 file being re-confirmed."
+  team-engineer:
+    stages: [engineer-stage3]
+    arg_required: --service
+    notes: "Engineer acts only on stage 3 (code-reality verification)."
+  any:
+    stages: [holistic-pre-codemod]
+    notes: "Holistic R gate is invoked by any persona; typically the team-engineer about to run the codemod."

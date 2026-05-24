@@ -57,11 +57,42 @@ Seven valid `--phase` values, mapped to the workflow stages in `cost-billing-sha
 | `post-pm-stage2` | PM generated `pm-spec.md` + built `output-input-map.yaml` | `reviews/pm-spec.md` + `output-input-map.yaml` + PM's edits to `refund_unit` | Orphan outputs (no inputs mapped), double-counted inputs (one input feeding two outputs at weight 1.0 each), refund-unit drift between PM's unit and CFO's price model, weight sums outside [0.95, 1.05], missing inputs vs code-graph evidence. |
 | `post-engineer-stage3` | Engineer generated `engineer-spec.md` + verified file:line / adapter / idempotency | `reviews/engineer-spec.md` + `cost-events-inventory.yaml` (engineer's edits) | Wrong `file:line` (function moved), wrong framework adapter (e.g., picked fastapi but actually Litestar), idempotency-anchor that won't work at this call site, missed false-positive (retry loops, health checks left in), stale relocations. |
 | `holistic-pre-codemod` | All three role-stage Skill R invocations clean + signoffs present | All three artifacts as one cross-cutting whole | Cross-stage drift — refund-unit at output level doesn't match unit at input level; trace-context conflicts across handlers; orphan features only visible cross-stage; cells ③/④ that need re-classification; idempotency-key collisions across outputs. |
-| `post-codemod` | `/cost-billing-instrument` Phase 3 | The PR(s) emitted by the codemod | Compilation breaks, wrong adapter chosen, idempotency-key sloppiness, error paths un-instrumented, PII / security footguns, brownfield/greenfield mismatch. |
+| `post-codemod` | `/cost-billing-instrument` Phase 3 (per `--service`) | The PR(s) emitted by the codemod for one service | Compilation breaks, wrong adapter chosen, idempotency-key sloppiness, error paths un-instrumented, PII / security footguns, brownfield/greenfield mismatch. |
 
-Plus an optional Skill B invocation (per `gaps-tracker.md` §6.5 #27):
+**Plus post-SIGNOFF phases (NEW in v0.3+ — invoked by `/cost-billing-signoff` per-stage):**
+
+| `--phase` | Invoked by | Target | Adversarial risks |
+|---|---|---|---|
+| `post-signoff-cfo-stage1` | `/cost-billing-signoff --persona cfo` Phase 4 | `reviews/cfo-stage1-signoff.draft.yaml` | CFO accepted entries with bad pricing arithmetic, missing fair-usage on entries that need it, internal-marked entries that look billable, projected revenue inconsistent with proposed unit × volume estimate. |
+| `post-signoff-pm-stage2-<product>` | `/cost-billing-signoff --persona team-product --product <slug>` Phase 4 | `reviews/pm-stage2-signoff-<product>.draft.yaml` (per-product) | PM accepted billable-unit choice that conflicts with finance pricing model for THIS product, orphan outputs within product scope, missing inputs vs code-graph for product's services, double-counted inputs across product's outputs. |
+| `post-signoff-cfo-stage2b-<product>` | `/cost-billing-signoff --persona cfo --product <slug>` Phase 4 | `reviews/cfo-stage2b-signoff-<product>.draft.yaml` | CFO's re-confirmation of PM's per-product spec accepts pricing changes that contradict CFO stage 1 commitments, missing fair-usage CFO previously specified, projected revenue arithmetic stale after PM's edits. |
+| `post-signoff-engineer-stage3-<service>` | `/cost-billing-signoff --persona team-engineer --service <slug>` Phase 4 | `reviews/engineer-stage3-signoff-<service>.draft.yaml` (per-service) | Wrong `file:line` for entries in service's path, wrong framework adapter vs detected stack, idempotency anchor that won't work at this call site, missed false-positive (retry loops, health checks), shared-lib entries claimed by wrong service. |
+| `post-signoff-pm-stage3b-<service>` | `/cost-billing-signoff --persona team-product` (any owning PM; multi-owner needs co_signed_by per F3) Phase 4 | `reviews/pm-stage3b-signoff-<service>.draft.yaml` | Engineer's code reality breaks PM unit/mapping decision for any product whose `services[]` includes this service; bubble-up to Stage 2b cfo loop needed; cross-product unit drift if service is shared; missing co_signed_by entry for any owning PM. |
+
+**F5 fix — phase regex tightened (suffix REQUIRED when stage has fan-out):**
+
+The legacy permissive regex `(-[a-z0-9-]+)?` would silently accept a missing slug, losing per-product/per-service context. v0.3 enforces:
+
+| Phase | Required form |
+|---|---|
+| `post-bootstrap-team-product-<product>` | `^post-bootstrap-team-product-[a-z0-9][a-z0-9-]*$` |
+| `post-bootstrap-team-engineer-<service>` | `^post-bootstrap-team-engineer-[a-z0-9][a-z0-9-]*$` |
+| `post-signoff-pm-stage2-<product>` | `^post-signoff-pm-stage2-[a-z0-9][a-z0-9-]*$` |
+| `post-signoff-cfo-stage2b-<product>` | `^post-signoff-cfo-stage2b-[a-z0-9][a-z0-9-]*$` |
+| `post-signoff-engineer-stage3-<service>` | `^post-signoff-engineer-stage3-[a-z0-9][a-z0-9-]*$` |
+| `post-signoff-pm-stage3b-<service>` | `^post-signoff-pm-stage3b-[a-z0-9][a-z0-9-]*$` |
+| `post-discovery`, `post-codemod`, `post-cfo-stage1`, `post-signoff-cfo-stage1`, `holistic-pre-codemod`, `post-skill-b` | exact match (no suffix) |
+
+Invocations missing a required suffix are REJECTED with: "Phase `<X>` requires a `<product>` or `<service>` slug; got bare. Use --phase `<X>-<slug>` instead."
+
+**Plus the optional Skill B invocation (per `gaps-tracker.md` §6.5 #27):**
 
 | `--phase post-skill-b` | After Skill B's first-export scan | `.moolabs/cloud-bill/cell-3-findings.yaml` | Misclassified untagged spend, missing Bedrock IAM-principal gate, Azure resource-group-only blind spots. |
+
+**Phase-name resolution rules:**
+- `<product>` is the slug from `02-cpo.signed.yaml > products[].slug`. Skill refuses to run on a product slug not in the CPO list.
+- `<service>` is the slug from `02-cpo.signed.yaml > products[].services` (which lists service paths). Skill refuses to run on a service slug not declared by at least one product.
+- For multi-product `--service <S>` runs (where S belongs to ≥2 products), `post-signoff-pm-stage3b-<S>` invokes for ALL owning products' PMs in sequence.
 
 Naturally:
 

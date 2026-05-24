@@ -187,13 +187,19 @@ edges:
         rationale: "co-located in handler; OTel trace co-occurrence 0.97"
 ```
 
-Then run `scripts/three_role_views.py` to project the three role views:
+Then run `scripts/three_role_views.py` to project the role views. Per `customer-context > products[]` + fan-out architecture, views split per product (PM) and per service (engineer):
 
-- `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue
-- `reviews/pm-view.html` — output→inputs graph (editable YAML form)
-- `reviews/engineer-view.html` — file-grouped inventory with file:line, framework adapter, confidence
+- `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue (1, ORG-WIDE — CFO sees everything).
+- `reviews/pm-view-<product>.html` — output→inputs graph filtered to entries whose service path is in `products[<product>].services` (N, ONE PER PRODUCT — PM Alice for `acute` sees only acute features; PM Bob for `meter` sees only meter features).
+- `reviews/engineer-view-<service>.html` — file-grouped inventory with file:line / framework / confidence, filtered to entries under that service's path (M, ONE PER SERVICE — engineer Dan for `moo-acute` sees only moo-acute entries).
 
-The HTML previews are static (no server). CFO and PM can read them; engineer reviews the YAML directly.
+**Cross-service entries** (shared library code that both `moo-acute` and `moo-meter` call): appear in BOTH services' engineer views with a `shared: true` tag — both engineers must confirm. Per-product PM views include entries from ALL services in `products[<p>].services`, so a product spanning multiple services sees the full feature set.
+
+**Filtering logic**: an entry's "owning service" is determined by which service path in `customer-context > repo-info.yaml > services[].path` contains its `file` field. If multiple match (e.g., shared lib at `packages/shared` that both services depend on), use the explicit `service` field on the entry (engineer-spec stage decides which service "owns" it for codemod purposes).
+
+**Single-product/single-service back-compat**: still uses suffixed file names (`pm-view-<only-product>.html`, `engineer-view-<only-service>.html`) — preserves forward-compat with no retroactive renames when the customer adds a 2nd product.
+
+The HTML previews are static (no server). All reviewers read their respective filtered HTML; engineer also reviews their service's YAML directly. `/cost-billing-signoff` opens the right HTML per persona/scope when it runs.
 
 ## Degraded modes (recover gracefully)
 
