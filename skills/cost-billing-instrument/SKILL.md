@@ -225,7 +225,7 @@ Run `scripts/pr_writer.py`. Output per chunk:
 - A PR description with:
   - Summary: N inserts, M files, K cost-only TODOs, latency profile per insert (cite `sdk-surface-reference.md` ~35ms).
   - **Pre-merge checklist:**
-    - `pip install -U moolabs` (or `npm install moolabs@latest`, or `go get moolabs.com/sdk`) — codemod does NOT run this (per `v1-decisions-log.md`).
+    - SDK install commands — codemod reads `04-final.signed.yaml > integration.sdk_package_install` for the EXACT commands per language (default: latest GitHub release tag dynamically resolved via `git ls-remote --tags`). Codemod does NOT run these (per `v1-decisions-log.md`). **SDKs are NOT on public registries — never emit `pip install moolabs` / `npm install moolabs` / `go get moolabs.com/sdk` (all 404 as of 2026-05-25).** See `cost-billing-shared/sdk-surface-reference.md` §"Install" for the canonical commands. Codemod falls back to the canonical commands if customer-context lacks `sdk_package_install` (warns prominently in the PR description that the customer should run team-engineer bootstrap Q16 to lock the install path).
     - Run `pytest` (or equivalent) — codemod does NOT run this.
     - Verify three-role signoff files still present + unchanged since codemod ran.
   - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod chose Option B (blocking + documented) per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."

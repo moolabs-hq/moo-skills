@@ -119,6 +119,48 @@ properties:
       # NOTE: regions, environments, multi_tenant come from finance — engineer only references
       # them. Codemod reads them from 01-finance via the input_chain hash check.
 
+      sdk_package_install:
+        type: object
+        description: |
+          Per-language SDK install commands. Codemod reads this and emits the exact
+          command in its PR pre-merge note. SDKs are NOT on public registries today
+          (PyPI / npm / Go module proxy all return 404); default install is
+          git-URL-based with latest-tag resolution. Customer can override for
+          private mirrors or pinned versions.
+        properties:
+          python:
+            type: object
+            properties:
+              strategy:
+                type: string
+                enum: [latest-tag, pinned, private-mirror, custom, skip]
+                description: |
+                  latest-tag: resolve latest GitHub release tag dynamically (default).
+                  pinned: use the exact tag in `version`.
+                  private-mirror: install from `mirror_url`.
+                  custom: use the verbatim string in `command`.
+                  skip: this customer doesn't use Python.
+              version: { type: string, description: "Tag like v1.2.3 — required when strategy=pinned." }
+              mirror_url: { type: string }
+              auth_env_var: { type: string, description: "e.g., GH_TOKEN — required when fetching from private repo." }
+              command: { type: string, description: "Verbatim install command — used when strategy=custom." }
+          typescript:
+            type: object
+            properties:
+              strategy: { type: string, enum: [latest-tag, pinned, private-mirror, custom, skip] }
+              version: { type: string }
+              mirror_url: { type: string }
+              auth_env_var: { type: string }
+              command: { type: string }
+          go:
+            type: object
+            properties:
+              strategy: { type: string, enum: [latest-tag, pinned, private-mirror, custom, skip] }
+              version: { type: string }
+              mirror_url: { type: string }
+              auth_env_var: { type: string }
+              command: { type: string }
+
   shared_service_reconciliation:
     type: object
     description: |

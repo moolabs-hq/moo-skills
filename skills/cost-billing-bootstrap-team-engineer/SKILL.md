@@ -150,6 +150,25 @@ You are LAST in the chain. Your output IS the consolidated `customer-context/` t
 >
 > I need the resolution PATH, not the key value."
 
+### Q16 — Moolabs SDK install source (per language)
+
+> "The codemod will tell your CI to install the Moolabs SDK before merge. Where does YOUR environment install the SDK from?
+>
+> Per language you use (skip languages you don't):
+>
+> **Default for all 3 (recommended):** install latest GitHub release tag directly:
+> - **Python:** `pip install -U "git+https://github.com/moolabs-hq/moolabs-py.git@$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-py.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)"`
+> - **TypeScript:** `LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-ts.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1) && npm install -E "moolabs-hq/moolabs-ts#$LATEST"`
+> - **Go:** `go get -u github.com/moolabs-hq/moolabs-go@latest` (Go's `@latest` natively resolves to highest semver tag)
+>
+> **Overrides** if you have:
+> - **Pinned version:** give me `v1.2.3` per language and I'll pin it
+> - **Private mirror:** your internal git URL or registry (`https://git.acme-internal.com/moolabs-py`, `https://npm.acme-internal.com/moolabs`)
+> - **GitHub auth required** (private fork): the env var name your CI uses (`GH_TOKEN`, `GITHUB_TOKEN`) — I'll add the auth setup to the pre-merge note
+> - **Custom — give me the exact command** (some teams have build wrappers, lockfile-only installs, or pre-vendored copies)
+>
+> Note: SDKs are NOT currently published to PyPI / npm / public Go module proxy (Moolabs platform roadmap). Customer engineers should know this — the codemod's pre-merge note will NOT try `pip install moolabs` because that 404s today. We always install from GitHub directly."
+
 ### Q15 — SDK key read pattern (exact code)
 > "Show me the **exact code** to read the key from your chosen secret store, in your service's language. Examples:
 > - Python: `os.environ['MOOLABS_API_KEY']`

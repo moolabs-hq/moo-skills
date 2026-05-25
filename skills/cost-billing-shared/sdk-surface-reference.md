@@ -2,7 +2,71 @@
 
 This is the **single source of truth** for what the customer-facing Moolabs SDK looks like — i.e., what calls the codemod (`/cost-billing-instrument`) is allowed to emit into the customer's code. Every other skill in the suite reads from this file rather than re-deriving it.
 
-> Verified against the published SDKs (`moolabs-hq/moolabs-py`, `moolabs-go`, `moolabs-ts`) as of 2026-05-18. **Customer engineers do not need to know about Moolabs's internal services** — this reference focuses on the public install + import + call shape the customer will see in their own code.
+> Verified against the published SDKs (`moolabs-hq/moolabs-py`, `moolabs-go`, `moolabs-ts`) as of 2026-05-18 (call shape) and 2026-05-25 (install paths). **Customer engineers do not need to know about Moolabs's internal services** — this reference focuses on the public install + import + call shape the customer will see in their own code.
+
+## Install — IMPORTANT
+
+**SDKs are NOT currently on public package registries.** As of 2026-05-25:
+
+| Registry | `moolabs-py` | `moolabs-ts` | `moolabs-go` |
+|---|---|---|---|
+| PyPI (`pip install moolabs`) | ❌ 404 | n/a | n/a |
+| npm (`npm install moolabs` or `@moolabs/sdk`) | n/a | ❌ 404 | n/a |
+| Go module proxy (`go get moolabs.com/sdk`) | n/a | n/a | ❌ wrong path |
+
+**Install via GitHub directly.** The default install — what the codemod's pre-merge note recommends and what `cost-billing-bootstrap-team-engineer` Q16 defaults to — resolves the latest GitHub release tag dynamically:
+
+### Python
+
+```bash
+LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-py.git \
+  | grep -v '\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)
+pip install -U "git+https://github.com/moolabs-hq/moolabs-py.git@$LATEST"
+```
+
+Import: `from moolabs import Moolabs` (verified against local moolabs-py).
+
+### TypeScript
+
+```bash
+LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-ts.git \
+  | grep -v '\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)
+npm install -E "moolabs-hq/moolabs-ts#$LATEST"
+```
+
+Import: `import { Moolabs } from 'moolabs';` (the npm `github:org/repo#tag` syntax installs the package under whatever name its `package.json > name` declares — typically `moolabs`).
+
+### Go
+
+```bash
+go get -u github.com/moolabs-hq/moolabs-go@latest
+```
+
+Go's `@latest` natively resolves to the highest semver tag.
+
+**⚠️ Known upstream issue (2026-05-25):** the `moolabs-go` repo's `go.mod` currently declares module path `github.com/moolabs/moolabs-go`, but the repo lives at `github.com/moolabs-hq/moolabs-go`. `go get` against the actual repo URL may fail until upstream fixes go.mod. Workaround: customers can add a `replace` directive in their go.mod:
+
+```go
+// go.mod
+replace github.com/moolabs/moolabs-go => github.com/moolabs-hq/moolabs-go latest
+```
+
+Track upstream fix at: https://github.com/moolabs-hq/moolabs-go/blob/main/go.mod
+
+### Overrides
+
+`cost-billing-bootstrap-team-engineer` Q16 captures per-language overrides for customers who need:
+
+- **Pinned version** (instead of latest tag) — for reproducibility / compliance
+- **Private mirror** — for air-gapped or VPN-only customers
+- **GitHub auth env var** — for private forks (`GH_TOKEN`, `GITHUB_TOKEN`)
+- **Custom command** — for teams with internal build wrappers / pre-vendored copies
+
+These flow into `04-final.signed.yaml > integration.sdk_package_install` and the codemod reads them when emitting the PR's pre-merge note.
+
+### Roadmap note
+
+Moolabs platform team plans to publish to public registries (PyPI / npm / Go vanity URL) post-GA. This reference will be updated when that happens; codemod will switch to standard `pip install moolabs` / `npm install moolabs` paths transparently — customer-context's `sdk_package_install` block remains the override surface.
 
 ---
 
