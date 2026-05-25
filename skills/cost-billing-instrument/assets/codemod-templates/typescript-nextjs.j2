@@ -1,93 +1,80 @@
 {# TypeScript + Next.js (App Router) codemod template for /cost-billing-instrument.
 
-   Next.js-specific attribution-key sources (App Router conventions):
+   Attribution sources come from attribution-bindings.yaml (Phase 1.6).
+   For Server Actions / Server Components, the developer may have a different
+   source (e.g. `headers().get('x-request-id')` from `next/headers`) — Phase 1.6
+   captures that per-file via overrides[].
 
-     In route handlers (`app/api/.../route.ts`) and middleware:
-       requestId → request.headers.get('x-request-id')
-       tenantId  → request.headers.get('x-tenant-id')   (when set by middleware)
-                   OR derive via @vercel/otel context
+   PREREQ: callsite is in a route handler with `request: NextRequest` in scope
+   OR the binding's source expression resolves cleanly in the file's context.
 
-     In Server Actions / Server Components, request isn't directly available.
-     The customer must thread a context object through OR use `headers()` from
-     `next/headers`. Skill A flags this when needed in
-     `repo-profile.yaml > nextjs.server_components_needing_context`.
-
-   This template assumes the callsite is in a route handler (`route.ts`)
-   where `request: NextRequest` is the function arg. For other contexts the
-   codemod surfaces a TODO comment.
-
-   Variables expected: identical shape to python-fastapi.j2.
+   Variables: same shape as python-fastapi.j2.
 #}
 {% if entry.pattern == "sibling-pair" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs SDK inserts (sibling-pair pattern)
-// usage event → emitUsageEventSafe() → client.usage.ingestEvents()
-// cost events → emitCostEventSafe() — helper picks transport per Phase 1.5
-//               snapshot. NEVER instantiate Moolabs() inline.
-// PREREQ: callsite is in a route handler with `request: NextRequest` in scope.
+// moolabs SDK inserts (sibling-pair pattern). Helper-routed.
+// Attribution sources confirmed in Phase 1.6.
+// PREREQ: source expressions resolve in scope at this insert site.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitUsageEventSafe, emitCostEventSafe } from '@/services/moolabs-client';
 
-// Cost-event side of the sibling pair.
 emitCostEventSafe({
   kind: '{{ entry.cost_kind | default("unknown") }}',
-  {% if "tenant_id" in attribution_keys %}tenantId: request.headers.get('x-tenant-id') ?? undefined,
-  {% endif %}{% if "consumer_agent" in attribution_keys %}consumerAgent: {{ entry.consumer_agent_source | default("undefined") }},
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}{% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
   {% endif %}attributes: {
     'workflow_id': '{{ entry.workflow_id }}',
     'event_type': '{{ entry.event_type }}',
     {% for cost_wf in entry.cost_workflow_ids %}'upstream.{{ loop.index }}.workflow_id': '{{ cost_wf }}',
-    {% endfor %}{% if "request_id" in attribution_keys %}'request.id': request.headers.get('x-request-id') ?? '',
-    {% endif %}{% if "customer_id" in attribution_keys %}'customer.id': request.headers.get('x-customer-id') ?? '',
-    {% endif %}{% if "feature_id" in attribution_keys %}'feature.id': '{{ entry.workflow_id.split(".")[1] }}',
+    {% endfor %}{% if attribution_sources.request_id %}'request.id': String({{ attribution_sources.request_id }} ?? ''),
+    {% endif %}{% if attribution_sources.customer_id %}'customer.id': String({{ attribution_sources.customer_id }} ?? ''),
     {% endif %}
   },
 });
 
-// Usage event — sibling-pair primary emission.
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
   eventType: '{{ entry.event_type }}',
-  subject: String({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "request.headers.get('x-request-id') ?? ''" }}),
+  subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   data: {
     quantity: {{ entry.refund_unit.derivation }},
     unit: '{{ entry.refund_unit.unit }}',
   },
-  {% if "request_id" in attribution_keys %}correlationId: request.headers.get('x-request-id') ?? undefined,{% endif %}
+  {% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),{% endif %}
 });
 {% elif entry.pattern == "usage-only" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs SDK insert (usage-only pattern). Routes through the helper.
-// PREREQ: callsite is in a route handler with `request: NextRequest` in scope.
+// moolabs SDK insert (usage-only pattern). Helper-routed.
+// PREREQ: source expressions resolve in scope at this insert site.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitUsageEventSafe } from '@/services/moolabs-client';
 
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
   eventType: '{{ entry.event_type }}',
-  subject: String({{ entry.idempotency_anchor.path_param }}),
+  subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   data: {
     quantity: {{ entry.refund_unit.derivation }},
     unit: '{{ entry.refund_unit.unit }}',
   },
-  {% if "request_id" in attribution_keys %}correlationId: request.headers.get('x-request-id') ?? undefined,{% endif %}
+  {% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),{% endif %}
 });
 {% elif entry.pattern == "cost-only" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs cost-only emission via emitCostEventSafe (helper-routed).
+// moolabs cost-only emission (helper-routed). Attribution sources from Phase 1.6.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitCostEventSafe } from '@/services/moolabs-client';
 
 emitCostEventSafe({
   kind: '{{ entry.cost_kind | default(entry.workflow_id.split(".")[-1]) }}',
-  {% if "tenant_id" in attribution_keys %}tenantId: request.headers.get('x-tenant-id') ?? undefined,
-  {% endif %}{% if "consumer_agent" in attribution_keys %}consumerAgent: {{ entry.consumer_agent_source | default("undefined") }},
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}{% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
   {% endif %}attributes: {
     'workflow_id': '{{ entry.workflow_id }}',
-    {% if "request_id" in attribution_keys %}'request.id': request.headers.get('x-request-id') ?? '',
-    {% endif %}{% if "customer_id" in attribution_keys %}'customer.id': request.headers.get('x-customer-id') ?? '',
+    {% if attribution_sources.request_id %}'request.id': String({{ attribution_sources.request_id }} ?? ''),
+    {% endif %}{% if attribution_sources.customer_id %}'customer.id': String({{ attribution_sources.customer_id }} ?? ''),
     {% endif %}
   },
 });

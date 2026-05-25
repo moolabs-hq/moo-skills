@@ -61,6 +61,9 @@ class Insert:
     pattern: str  # sibling-pair | usage-only | cost-only
     entry: dict[str, Any]
     attribution_keys: list[str]
+    # Per-file attribution sources from Phase 1.6 (with overrides applied).
+    # None for a key means "skip" — template omits the corresponding attribute.
+    attribution_sources: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -198,7 +201,10 @@ def _build_output_input_index(om: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _attribution_keys_for(framework: str) -> list[str]:
-    """Default attribution-key allowlist per framework."""
+    """Default attribution-key allowlist per framework (legacy — kept for
+    back-compat). Real source of truth is `.moolabs/customer-context/
+    attribution-bindings.yaml` from Phase 1.6.
+    """
     if framework == "fastapi":
         return ["tenant_id", "request_id", "customer_id", "consumer_agent"]
     if framework in ("express", "nestjs", "nextjs"):
@@ -206,6 +212,39 @@ def _attribution_keys_for(framework: str) -> list[str]:
     if framework == "django":
         return ["tenant_id", "request_id", "customer_id"]
     return ["tenant_id", "request_id"]
+
+
+def _load_attribution_bindings(path: Path) -> tuple[dict[str, str | None], list[dict[str, Any]]]:
+    """Read attribution-bindings.yaml. Returns (default_bindings, overrides[])."""
+    if not path.exists():
+        return {}, []
+    data = _read_yaml(path) or {}
+    defaults: dict[str, str | None] = {}
+    for key, val in (data.get("bindings") or {}).items():
+        if isinstance(val, dict):
+            defaults[key] = val.get("source")
+        else:
+            defaults[key] = None
+    overrides = data.get("overrides") or []
+    if not isinstance(overrides, list):
+        overrides = []
+    return defaults, overrides
+
+
+def _resolve_sources_for_file(
+    file_path: str,
+    defaults: dict[str, str | None],
+    overrides: list[dict[str, Any]],
+) -> dict[str, str | None]:
+    """Apply per-file override on top of service-level defaults."""
+    resolved = dict(defaults)
+    for ov in overrides:
+        if ov.get("file") != file_path:
+            continue
+        for key, val in (ov.get("bindings") or {}).items():
+            if isinstance(val, dict):
+                resolved[key] = val.get("source")
+    return resolved
 
 
 def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]) -> str:
@@ -230,6 +269,8 @@ def build_tasks(
     snapshot: dict[str, Any],
     signed: dict[str, Any],
     repo_profile: dict[str, Any],
+    attribution_defaults: dict[str, str | None] | None = None,
+    attribution_overrides: list[dict[str, Any]] | None = None,
 ) -> list[Task]:
     """Group inventory entries by file, emit one task per file."""
     output_input_index = _build_output_input_index(output_input_map)
@@ -266,6 +307,9 @@ def build_tasks(
                 f"WARN: no template for ({primary_lang}, {primary_fw}); skipping {file_path}\n"
             )
             continue
+        sources_for_file = _resolve_sources_for_file(
+            file_path, attribution_defaults or {}, attribution_overrides or []
+        )
         inserts: list[Insert] = []
         for entry in entries:
             pattern = _pattern_for(entry, output_input_index)
@@ -278,6 +322,7 @@ def build_tasks(
                     pattern=pattern,
                     entry=enriched_entry,
                     attribution_keys=_attribution_keys_for(primary_fw),
+                    attribution_sources=sources_for_file,
                 )
             )
         # stable task id
@@ -334,6 +379,12 @@ def emit_tasks_yaml(tasks: list[Task], dest: Path) -> None:
             lines.append(f"      - line: {ins.line}")
             lines.append(f"        pattern: {ins.pattern}")
             lines.append(f"        attribution_keys: [{', '.join(ins.attribution_keys)}]")
+            lines.append("        attribution_sources:")
+            for k, v in ins.attribution_sources.items():
+                if v is None:
+                    lines.append(f"          {k}: null")
+                else:
+                    lines.append(f'          {k}: "{v}"')
             lines.append("        entry:")
             for k, v in ins.entry.items():
                 if isinstance(v, dict):
@@ -370,7 +421,30 @@ def main(argv: list[str] | None = None) -> int:
     signed = _read_yaml(Path(args.signed_yaml)) or {}
     repo_profile = _read_yaml(Path(args.customer_context_dir) / "repo-info.yaml") or {}
 
-    tasks = build_tasks(cost_inv, usage_inv, omap, snapshot, signed, repo_profile)
+    bindings_path = Path(args.customer_context_dir) / "attribution-bindings.yaml"
+    attribution_defaults, attribution_overrides = _load_attribution_bindings(bindings_path)
+    if not attribution_defaults:
+        sys.stderr.write(
+            f"REFUSING TO RUN: attribution bindings not found at {bindings_path}\n"
+            f"  Run Phase 1.6 first:\n"
+            f"    python scripts/attribution_discovery.py --service-root <path> --framework <name>\n"
+            f"  Templates cannot emit without confirmed attribution sources.\n"
+        )
+        return 2
+    required = ["tenant_id", "request_id", "customer_id", "consumer_agent"]
+    missing = [k for k in required if k not in attribution_defaults]
+    if missing:
+        sys.stderr.write(
+            f"REFUSING TO RUN: attribution-bindings.yaml is missing required keys: {missing}\n"
+            f"  Run Phase 1.6 again to confirm them (use --reconfirm if needed).\n"
+        )
+        return 2
+
+    tasks = build_tasks(
+        cost_inv, usage_inv, omap, snapshot, signed, repo_profile,
+        attribution_defaults=attribution_defaults,
+        attribution_overrides=attribution_overrides,
+    )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
         return 1

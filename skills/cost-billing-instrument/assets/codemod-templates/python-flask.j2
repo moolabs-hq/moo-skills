@@ -1,90 +1,76 @@
 {# Python + Flask codemod template for /cost-billing-instrument.
 
-   Flask-specific attribution-key sources:
-     request_id → flask.g.request_id  (set by request_id middleware extension)
-     tenant_id  → flask.g.tenant_id
-     customer_id → flask.g.customer_id
+   Attribution sources come from attribution-bindings.yaml (Phase 1.6).
+   Templates substitute the bound expressions verbatim — they do NOT hardcode
+   `flask.g.request_id` etc. The developer might keep these in a custom
+   `flask.current_app.config['REQUEST_CONTEXT']` or elsewhere.
 
-   Convention: customers using flask have a `request_id` middleware OR an
-   `X-Request-ID` header that gets parsed into `flask.g`. If neither pattern
-   is detected by Skill A, set attribution_keys=[] in the task and only
-   workflow_id is recorded.
+   Variables: same as python-fastapi.j2.
 #}
 {% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
-# moolabs SDK inserts (sibling-pair pattern)
-# usage event → emit_usage_event_safe() → client.usage.ingest_events()
-# cost events → emit_cost_event_safe() — SDK if Phase 1.5 snapshot says capable,
-#               structured-log recovery rail otherwise.
-#
-# Both call paths go through the per-service helper (moolabs_client.py).
-# NEVER instantiate Moolabs() inline; helper owns fail-open + never-drop.
+# moolabs SDK inserts (sibling-pair pattern). Helper-routed.
+# Attribution sources confirmed in Phase 1.6.
 # ─────────────────────────────────────────────────────────────────────────────
-from flask import g as _moolabs_g
 from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe
 
-# Cost-event side of the sibling pair.
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default('unknown') }}",
-    {% if "tenant_id" in attribution_keys %}tenant_id=getattr(_moolabs_g, "tenant_id", None),
-    {% endif %}{% if "consumer_agent" in attribution_keys %}consumer_agent={{ entry.consumer_agent_source | default("None") }},
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
         "event_type": "{{ entry.event_type }}",
         {% for cost_wf in entry.cost_workflow_ids %}"upstream.{{ loop.index }}.workflow_id": "{{ cost_wf }}",
-        {% endfor %}{% if "request_id" in attribution_keys %}"request.id": getattr(_moolabs_g, "request_id", None),
-        {% endif %}{% if "customer_id" in attribution_keys %}"customer.id": str(getattr(_moolabs_g, "customer_id", "") or ""),
-        {% endif %}{% if "feature_id" in attribution_keys %}"feature.id": "{{ entry.workflow_id.split('.')[1] }}",
+        {% endfor %}{% if attribution_sources.request_id %}"request.id": {{ attribution_sources.request_id }},
+        {% endif %}{% if attribution_sources.customer_id %}"customer.id": str({{ attribution_sources.customer_id }}),
         {% endif %}
     },
 )
 
-# Usage event — sibling-pair primary emission.
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
     event_type="{{ entry.event_type }}",
-    subject=str({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "getattr(_moolabs_g, 'request_id', '')" }}),
+    subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     data={
         "quantity": {{ entry.refund_unit.derivation }},
         "unit": "{{ entry.refund_unit.unit }}",
     },
-    {% if "request_id" in attribution_keys %}correlation_id=getattr(_moolabs_g, "request_id", None),{% endif %}
+    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
 )
 {% elif entry.pattern == "usage-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
-# moolabs SDK insert (usage-only pattern) — single usage event; no cost-bearing
-# call at this site. Routes through the per-service helper.
+# moolabs SDK insert (usage-only pattern). Helper-routed.
+# Attribution sources confirmed in Phase 1.6.
 # ─────────────────────────────────────────────────────────────────────────────
-from flask import g as _moolabs_g
 from app.services.moolabs_client import emit_usage_event_safe
 
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
     event_type="{{ entry.event_type }}",
-    subject=str({{ entry.idempotency_anchor.path_param }}),
+    subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     data={
         "quantity": {{ entry.refund_unit.derivation }},
         "unit": "{{ entry.refund_unit.unit }}",
     },
-    {% if "request_id" in attribution_keys %}correlation_id=getattr(_moolabs_g, "request_id", None),{% endif %}
+    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
 )
 {% elif entry.pattern == "cost-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
-# moolabs cost-only emission via emit_cost_event_safe (helper-routed).
+# moolabs cost-only emission (helper-routed). Attribution sources from Phase 1.6.
 # ─────────────────────────────────────────────────────────────────────────────
-from flask import g as _moolabs_g
 from app.services.moolabs_client import emit_cost_event_safe
 
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default(entry.workflow_id.split('.')[-1]) }}",
-    {% if "tenant_id" in attribution_keys %}tenant_id=getattr(_moolabs_g, "tenant_id", None),
-    {% endif %}{% if "consumer_agent" in attribution_keys %}consumer_agent={{ entry.consumer_agent_source | default("None") }},
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
-        {% if "request_id" in attribution_keys %}"request.id": getattr(_moolabs_g, "request_id", None),
-        {% endif %}{% if "customer_id" in attribution_keys %}"customer.id": str(getattr(_moolabs_g, "customer_id", "") or ""),
+        {% if attribution_sources.request_id %}"request.id": {{ attribution_sources.request_id }},
+        {% endif %}{% if attribution_sources.customer_id %}"customer.id": str({{ attribution_sources.customer_id }}),
         {% endif %}
     },
 )

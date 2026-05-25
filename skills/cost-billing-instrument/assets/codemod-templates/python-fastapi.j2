@@ -16,7 +16,14 @@
      entry.cost_micros_source   — e.g. "response.cost_micros" (when SDK returned)
      entry.cost_workflow_ids    — list of cost-event workflow_ids that feed this usage event
      entry.consumer_agent_source — Python expression evaluating to the agent name
-     attribution_keys           — list of attribution keys available at this site
+
+     attribution_sources         — dict of CONFIRMED Python expressions per key,
+                                    sourced from .moolabs/customer-context/attribution-bindings.yaml
+                                    (developer-confirmed in Phase 1.6).
+                                    Keys: tenant_id, request_id, customer_id, consumer_agent.
+                                    A value of None means "skip this attribute" — the
+                                    branch silently omits it. Templates NEVER hardcode
+                                    framework conventions (the previous v0.1 mistake).
 #}
 {% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -26,83 +33,70 @@
 #               structured-log recovery rail otherwise.
 #
 # Both call paths go through the per-service helper (moolabs_client.py).
-# NEVER instantiate Moolabs() inline — see Phase 2 of cost-billing-instrument SKILL.md.
-# Helper handles fail-open + never-drop contract; this insert NEVER wraps the
-# helper calls in try/except (would double-swallow; see Codex F1 finding).
+# Attribution sources confirmed in Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe
 
-# Cost-event side of the sibling pair.
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default('unknown') }}",
-    {% if "tenant_id" in attribution_keys %}tenant_id=request.state.tenant_id,
-    {% endif %}{% if "consumer_agent" in attribution_keys %}consumer_agent={{ entry.consumer_agent_source | default("None") }},
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
         "event_type": "{{ entry.event_type }}",
         {% for cost_wf in entry.cost_workflow_ids %}"upstream.{{ loop.index }}.workflow_id": "{{ cost_wf }}",
-        {% endfor %}{% if "request_id" in attribution_keys %}"request.id": request.state.request_id,
-        {% endif %}{% if "customer_id" in attribution_keys %}"customer.id": str(customer_id),
-        {% endif %}{% if "feature_id" in attribution_keys %}"feature.id": "{{ entry.workflow_id.split('.')[1] }}",
+        {% endfor %}{% if attribution_sources.request_id %}"request.id": {{ attribution_sources.request_id }},
+        {% endif %}{% if attribution_sources.customer_id %}"customer.id": str({{ attribution_sources.customer_id }}),
         {% endif %}
     },
 )
 
-# Usage event — sibling-pair primary emission.
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
     event_type="{{ entry.event_type }}",
-    subject=str({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "request.state.request_id" }}),
+    subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     data={
         "quantity": {{ entry.refund_unit.derivation }},
         "unit": "{{ entry.refund_unit.unit }}",
     },
-    {% if "request_id" in attribution_keys %}correlation_id=request.state.request_id,{% endif %}
+    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
 )
 {% elif entry.pattern == "usage-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
-# moolabs SDK insert (usage-only pattern)
-# Single usage event; no cost-bearing call at this site.
-# Routes through the per-service helper (same as sibling-pair) — never
-# instantiates Moolabs() inline.
+# moolabs SDK insert (usage-only pattern) — single usage event; no cost-bearing
+# call at this site. Routes through the per-service helper.
+# Attribution sources confirmed in Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_usage_event_safe
 
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
     event_type="{{ entry.event_type }}",
-    subject=str({{ entry.idempotency_anchor.path_param }}),
+    subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     data={
         "quantity": {{ entry.refund_unit.derivation }},
         "unit": "{{ entry.refund_unit.unit }}",
     },
-    {% if "request_id" in attribution_keys %}correlation_id=request.state.request_id,{% endif %}
+    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
 )
 {% elif entry.pattern == "cost-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs cost-only emission via emit_cost_event_safe (helper-routed).
-#
-# Helper picks the primary transport based on the Phase 1.5 SDK snapshot:
-#   - capabilities.cost_event_direct_emit=true  → unified SDK cost endpoint
-#     (e.g. client.cost.ingest_events_batch) — verified at codemod time.
-#   - cost_event_direct_emit=false              → OTel span attributes when
-#     a recording span exists; structured-log recovery rail otherwise.
-#
-# Either way, this call site stays unchanged when transport switches.
-# Reference: cost-billing-shared/sdk-surface-reference.md §"Direct cost-event emission"
+# Helper picks the primary transport based on the Phase 1.5 SDK snapshot.
+# Attribution sources confirmed in Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_cost_event_safe
 
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default(entry.workflow_id.split('.')[-1]) }}",
-    {% if "tenant_id" in attribution_keys %}tenant_id=request.state.tenant_id,
-    {% endif %}{% if "consumer_agent" in attribution_keys %}consumer_agent={{ entry.consumer_agent_source | default("None") }},
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
-        {% if "request_id" in attribution_keys %}"request.id": request.state.request_id,
-        {% endif %}{% if "customer_id" in attribution_keys %}"customer.id": str(customer_id),
+        {% if attribution_sources.request_id %}"request.id": {{ attribution_sources.request_id }},
+        {% endif %}{% if attribution_sources.customer_id %}"customer.id": str({{ attribution_sources.customer_id }}),
         {% endif %}
     },
 )

@@ -227,6 +227,72 @@ warnings:
 
 The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-site inserts). Neither phase reads `sdk-surface-reference.md` directly anymore; that doc is now a fallback hint for human reviewers, not a runtime input.
 
+### Phase 1.6: Discover + confirm attribution sources (MANDATORY, interactive, ONCE per service)
+
+**The templates do NOT know where the customer's code keeps `tenant_id`, `request_id`, `customer_id`.** The v0.1 templates hardcoded framework conventions (`request.state.tenant_id` for FastAPI, `flask.g.request_id` for Flask, etc.) — but every customer's middleware pattern differs, webhook routes bypass middleware, custom auth code puts the tenant in non-standard places. Emitting code that references `request.state.tenant_id` when the customer's actual code reads it from `request.scope['org_id']` will compile but break at runtime with `AttributeError`.
+
+**Why this exists** (added 2026-05-25 after the user observed: "skill and tasks defined should determine where to source the variables needed by usage and cost events, confirm with developer during instrumentation"):
+
+1. **No two customers' middleware look the same.** Conventions get us 60% of the way; the remaining 40% is custom.
+2. **Webhooks + health checks + cron entry points BYPASS middleware.** Even if 90% of routes follow the convention, the 10% that don't will silently emit broken code.
+3. **The developer is the only authoritative source.** Static analysis can propose; only the developer can confirm.
+4. **Bindings persist** as customer-context, signed by the engineer, auditable across re-runs.
+
+**Steps:**
+
+1. Run `scripts/attribution_discovery.py --service <slug> --customer-context-dir .moolabs/customer-context`. The script:
+   - Scans the service for middleware files (FastAPI `@app.middleware`, Django `MIDDLEWARE` config, NestJS `@Injectable()` middleware classes, Express `app.use`).
+   - Greps for assignments like `request.state.X = ...`, `request.scope[...] = ...`, `flask.g.X = ...`, `request.user = ...`, `setattr(request, ...)`.
+   - For each attribution key the templates need (`tenant_id`, `request_id`, `customer_id`, `consumer_agent`), proposes 1–3 candidate sources with confidence + evidence (`file:line`).
+2. **Interactively** present each proposal to the developer one key at a time (per `cost-billing-shared/operating-principles.md`: ONE question at a time, NEVER assume). Developer choices:
+   - Confirm the highest-confidence proposal
+   - Pick an alternative from the list
+   - Provide a custom expression (e.g., `request.headers.get('x-org-id')`)
+   - Mark "not available" → the codemod will skip that attribution key for the whole service
+3. Detect per-file overrides: routes flagged in `repo-profile.yaml > middleware_bypass[]` (webhooks, healthchecks) get their own override prompt.
+4. Persist confirmations to `.moolabs/customer-context/attribution-bindings.yaml`:
+
+   ```yaml
+   service_slug: moo-arc
+   framework: fastapi
+   generated_at: 2026-05-25T16:45:00Z
+   bindings:
+     tenant_id:
+       source: "request.state.tenant_id"
+       confidence: high
+       evidence: ["services/moo-arc/app/middleware/tenant.py:34 — TenantMiddleware"]
+       confirmed_by: kritivas.shukla@moolabs.com
+       confirmed_at: 2026-05-25T16:45:00Z
+     request_id:
+       source: "request.state.request_id"
+       confidence: high
+       evidence: ["services/moo-arc/app/middleware/request_id.py:18"]
+       confirmed_by: kritivas.shukla@moolabs.com
+       confirmed_at: 2026-05-25T16:45:00Z
+     customer_id:
+       source: "request.state.customer_id"
+       confidence: medium
+       fallback_when_absent: skip   # codemod omits customer.id attribute if expression is unavailable at insert site
+       confirmed_by: kritivas.shukla@moolabs.com
+       confirmed_at: 2026-05-25T16:45:00Z
+     consumer_agent:
+       source: null                  # explicit null → codemod skips this attribute everywhere
+       confidence: n_a
+       confirmed_by: kritivas.shukla@moolabs.com
+   overrides:
+     - file: services/moo-arc/app/api/v1/webhooks/router.py
+       reason: "webhook handler — bypasses TenantMiddleware; signature-verified path"
+       bindings:
+         tenant_id:
+           source: 'request.headers.get("x-moolabs-tenant", "")'
+           confidence: confirmed
+           confirmed_by: kritivas.shukla@moolabs.com
+   ```
+
+5. **Refuse to proceed if confirmations are missing.** Phase 2c reads `attribution-bindings.yaml` and aborts if any key the templates need is neither confirmed nor explicitly marked `source: null`. Fail loud — never silently substitute.
+
+**Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
+
 ### Phase 2: Generate the per-service `moolabs_client.py` helper (MANDATORY, ONCE per service)
 
 **This MUST run before any call-site insert.** The codemod generates exactly ONE helper file per service that owns all SDK and OTel-span emission. Every call-site insert in Phase 2b imports from this helper — never instantiates `Moolabs(api_key=...)` inline.
