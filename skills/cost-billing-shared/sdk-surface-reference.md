@@ -136,29 +136,32 @@ Routing is internal (`api.moolabs.com`, `meter.moolabs.com`, `acute.moolabs.com`
 
 ---
 
-## Direct cost-event emission — not yet exposed in the unified SDK
+## Direct cost-event emission — already exposed on the unified SDK
 
-**The Moolabs SDK is unified — one client, multiple namespaces.** Today the client exposes `client.cls.*` (billing/wallets) and `client.meter.*` (usage events). A customer-facing cost-event endpoint does NOT yet exist on the same client (final method path TBD — likely something like `client.meter.cost.ingest_events()` or a new sibling namespace on the same client; the platform team owns the decision). **There is no separate "acute SDK"** — when the cost-event endpoint ships, it lands on the existing unified `Moolabs` client.
+**The Moolabs SDK is unified — one client, multiple namespaces.** Verified against `moolabs-py@v0.2.0-rc9` (Phase 1.5 snapshot, 2026-05-25): the unified client exposes 11 flat capability namespaces, including BOTH `client.usage` (capability "usage" → EventsApi + MetersApi) AND `client.cost` (capability "cost" → CostEventsApi + SdkIngestApi on the acute backend). There is no separate "acute SDK" and there is no nested `client.cls.*` / `client.meter.events.*` shape — those were drafts from an earlier curation of this doc that did NOT match the shipped SDK.
 
-This is a **Moolabs platform roadmap item, not a customer-visible blocker**. Until that endpoint ships, the codemod (`/cost-billing-instrument`) emits cost via OTel span attributes (preferred) + a structured-log recovery rail (when no recording span exists) per the dual-transport contract in `cost-billing-instrument/SKILL.md` Phase 2. The customer never sees the workaround as anything other than a `# TODO` annotation in their PR.
+| Event | Namespace | Method | Verified at v0.2.0-rc9 |
+|---|---|---|---|
+| Usage | `client.usage` | `ingest_events([...])` | ✓ |
+| Cost  | `client.cost`  | `ingest_events_batch([...])`, `ingest_event(...)`, `ingest_sdk_spans(...)`, `submit_adjustment(...)` | ✓ |
 
-### v1 implications
+### v1 codemod patterns
 
-Three patterns the codemod (Skill 2) must choose between:
+Three patterns the codemod (Skill 2) chooses between. ALL three route through the per-service helper (`moolabs_client.py`) — call sites never instantiate `Moolabs()` inline or touch SDK namespaces directly. The helper's primary transport per event is gated on the Phase 1.5 snapshot.
 
-| Pattern | Today (v1, 2026-05-19) | After unified SDK's cost-event endpoint ships |
+| Pattern | Helper call | Helper transport (based on snapshot) |
 |---|---|---|
-| **Sibling-pair** (one site, both events) | Usage via `client.meter.events.ingest_events()`; cost via dual transport — OTel span attributes preferred, structured log fallback (per `emit_cost_event_safe()` helper). | Same usage call; cost-event helper swaps primary transport from OTel-span to direct SDK call on the SAME `Moolabs` client. Log recovery rail stays. |
-| **Usage-only** | `client.meter.events.ingest_events()` only. No cost emission. | Same — no change. |
-| **Cost-only** (subscription customers, infra hot paths) | **BLOCKED for v1.** Codemod inserts `# TODO: cost-event endpoint not yet exposed on unified SDK; emitting via OTel span + log fallback until it ships` and surfaces in PR. | Direct call on the unified client (exact method TBD by platform team). |
+| **Sibling-pair** (one site, both events) | `emit_usage_event_safe(...)` + `emit_cost_event_safe(...)` | Usage: SDK call → log recovery rail. Cost: SDK call when `capabilities.cost_event_direct_emit=true` (today, v0.2.0-rc9: TRUE); OTel-span preferred + log recovery rail otherwise. |
+| **Usage-only** (terminal-only event) | `emit_usage_event_safe(...)` | Same usage transport as above. |
+| **Cost-only** (subscription customers, infra hot paths) | `emit_cost_event_safe(...)` | Same cost transport as above — the snapshot decides at codemod time whether the SDK branch fires. |
 
-The codemod annotates every cost-only block with `# v1: emitting via OTel + log fallback until unified SDK's cost-event endpoint ships` so the customer's PR review can find them later.
+Cost-only inserts are NOT blocked in v1 — they go through the same helper as sibling-pair's cost branch.
 
 ---
 
 ## Future SDK surface (not in scope for the codemod today)
 
-When the unified SDK adds its cost-event endpoint, the `/cost-billing-instrument` helper templates change in ONE place — `emit_cost_event_safe()`'s primary-transport branch swaps from OTel-span-write to the new SDK method on the same `Moolabs` client. Call sites do not change. The log recovery rail stays as defense in depth (and matches the recovery rail for usage events).
+When the unified SDK adds new capability namespaces (e.g. a future `client.span_ingest.*` for OTLP-format spans), the Phase 1.5 snapshot picks them up automatically. The helper template's `capabilities.cost_event_method_path` resolves at codemod time — no skill update is needed when the SDK adds same-shape endpoints. Call sites stay unchanged.
 
 ---
 
@@ -170,7 +173,8 @@ Both moolabs-py and moolabs-ts use synchronous transports (`urllib3.PoolManager`
 
 ```python
 # moolabs SDK blocks (~35ms typical); see PR for latency profile
-client.meter.events.ingest_events([...])
+# Helper routes to client.usage.ingest_events() — verified per Phase 1.5 snapshot
+emit_usage_event_safe(...)
 ```
 
 The decision to swap to background-wrap is per-customer, not per-codemod. See `requirements §10 #4`.
@@ -187,8 +191,9 @@ The decision to swap to background-wrap is per-customer, not per-codemod. See `r
 
 ## What the codemod must never assume
 
-- **Do NOT assume `client.usage.*` exists.** Some older internal references mention this namespace — it is **stale**. The active customer-facing namespace is `client.meter.events`, per the live SDK README.
-- **Do NOT call the underlying `EventsApi`, `MetersApi` directly.** Always go through `client.meter.events.*`. The `*_api.py` modules are internal generated classes; calling them bypasses the namespace routing and breaks when the namespace shape changes.
+- **Do NOT trust this doc at codemod runtime.** This section is a human-readable summary. The Phase 1.5 snapshot (`scripts/sdk_snapshot.py` → `.moolabs/customer-context/sdk-surface-snapshot.yaml`) is the runtime source of truth, verified against the SDK source at the customer-pinned version. If this doc and the snapshot disagree, the snapshot wins.
+- **Do NOT instantiate `Moolabs()` inline at call sites.** Every emission goes through the per-service helper (`moolabs_client.py`) which owns the singleton, secret resolution, and fail-open + never-drop recovery rails. Helper API: `emit_usage_event_safe(...)`, `emit_cost_event_safe(...)`.
+- **Do NOT call the underlying `*_Api` classes directly.** They're internal generated classes — call through the unified namespace path (`client.usage.ingest_events`, `client.cost.ingest_events_batch`). Direct `EventsApi.*` / `CostEventsApi.*` calls bypass the namespace router and break on SDK shape changes.
 - **Do NOT assume an async variant.** There is none in v1. Background-wrapping is the caller's responsibility.
 
 ---
@@ -205,10 +210,10 @@ All three SDKs (`moolabs-py`, `moolabs-go`, `moolabs-ts`) are auto-generated fro
 
 | Skill | What this reference gives it |
 |---|---|
-| `/cost-billing-discovery` | Knows what surface to wire (`client.meter.events.ingest_events`) and what NOT to wire (direct cost-event call absent — emit OTel for cost). |
-| `/cost-billing-instrument` | Template selector reads `{language, framework} → template file`; templates reference verified call shapes here. |
-| `/cost-billing-drift-lint` | When scanning customer code, looks for `client.meter.events.*` calls (positive match) and flags any direct `EventsApi`/`MetersApi` calls (anti-pattern). |
-| `/cost-billing-adversarial-review` | Risk class "wrong namespace" — must flag any insert that uses `client.usage.*` or calls `EventsApi` directly. |
+| `/cost-billing-discovery` | Knows what surface to wire — for the FLAT capabilities verified by the Phase 1.5 snapshot (`client.usage.ingest_events` for usage; `client.cost.ingest_events_batch` for cost). |
+| `/cost-billing-instrument` | Template selector reads `{language, framework} → template file`; templates render helper calls only. The Phase 1.5 snapshot is the runtime source of truth. |
+| `/cost-billing-drift-lint` | Scans customer code for helper-routed calls (`emit_usage_event_safe`, `emit_cost_event_safe`) — positive match. Flags direct `Moolabs(...)` instantiation OR direct `*_Api` calls as anti-patterns. |
+| `/cost-billing-adversarial-review` | Risk class "wrong namespace" — must flag any insert that bypasses the helper, instantiates `Moolabs()` inline, or calls `*_Api` classes directly. Namespace shape itself is verified by the Phase 1.5 snapshot, not by this doc. |
 | `/cost-billing-cloud-bill` | No direct dependency — cloud-bill ingestion is configured server-side, not via SDK. |
 
 ---

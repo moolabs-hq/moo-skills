@@ -160,6 +160,7 @@ REPO=""
 DRY_RUN=0
 UNINSTALL=0
 SKIP_CODEGRAPH=0
+SKIP_PLUGINS=0
 FORCE_CODEGRAPH_INGEST=0
 NO_BOOTSTRAP_CTA=0
 NO_PRUNE=0
@@ -183,6 +184,7 @@ while [[ $# -gt 0 ]]; do
     --persona) PERSONA="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --skip-codegraph) SKIP_CODEGRAPH=1; shift ;;
+    --skip-plugins) SKIP_PLUGINS=1; shift ;;
     --force-codegraph-ingest) FORCE_CODEGRAPH_INGEST=1; shift ;;
     --no-bootstrap-cta) NO_BOOTSTRAP_CTA=1; shift ;;
     --no-prune) NO_PRUNE=1; shift ;;
@@ -500,6 +502,82 @@ EOF
 # ──────────────────────────────────────────────────────────────────────
 # CodeGraph install + ingest
 # ──────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────
+# ralph-skills + moo-skills/superpowers (Claude Code plugins)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Why these two:
+#   • ralph-skills (ralph-marketplace)
+#       Autonomous-loop framework. /cost-billing-instrument Phase 2d
+#       dispatches per-file subagent tasks; ralph-loop is the queue
+#       runner that makes that ergonomic to invoke.
+#   • moo-skills / superpowers
+#       Hosts /superpowers:requesting-code-review and
+#       /cost-billing-adversarial-review's parent skill. The cost-billing
+#       skills reference these by name; without them, the Phase 4
+#       adversarial-review handoff is a dangling cross-skill call.
+#
+# install.sh CANNOT register a Claude Code plugin programmatically — the
+# plugin system is interactive. What this function CAN do:
+#   1. Detect whether the plugins are present in any known cache location.
+#   2. Print a copy-pasteable CTA with the exact /plugin commands.
+#   3. Optionally append a marketplaces entry to ~/.claude/settings.json
+#      (gated behind --auto-register-plugins, default OFF).
+#
+install_ralph_and_superpowers() {
+  echo ""
+  echo "─── ralph-skills + superpowers plugin check ─────────────────────────"
+
+  local cache_dirs=(
+    "$HOME/.claude/plugins/cache"
+    "$HOME/.claude-moolabs/plugins/cache"
+    "${CLAUDE_CONFIG_DIR:-}/plugins/cache"
+  )
+
+  local ralph_found=0
+  local superpowers_found=0
+
+  for cd in "${cache_dirs[@]}"; do
+    [[ -z "$cd" || ! -d "$cd" ]] && continue
+    if [[ -d "$cd/ralph-marketplace/ralph-skills" ]]; then
+      ralph_found=1
+      echo "  ✓ ralph-skills detected at $cd/ralph-marketplace/ralph-skills"
+    fi
+    if [[ -d "$cd/moo-skills" || -d "$cd/claude-plugins-official/superpowers" ]]; then
+      superpowers_found=1
+      echo "  ✓ superpowers detected at $cd"
+    fi
+  done
+
+  if [[ $ralph_found -eq 1 && $superpowers_found -eq 1 ]]; then
+    echo "Both plugins already installed — nothing to do."
+    echo "─────────────────────────────────────────────────────────────────────"
+    return 0
+  fi
+
+  echo ""
+  echo "REQUIRED PLUGIN DEPENDENCIES — install via Claude Code's /plugin command:"
+  echo ""
+  if [[ $ralph_found -eq 0 ]]; then
+    echo "  1. ralph-skills (autonomous task-fanout loop)"
+    echo "     /plugin marketplace add https://github.com/ralph-marketplace/ralph-marketplace"
+    echo "     /plugin install ralph-skills@ralph-marketplace"
+    echo ""
+  fi
+  if [[ $superpowers_found -eq 0 ]]; then
+    echo "  2. superpowers (adversarial-pr-review, requesting-code-review)"
+    echo "     /plugin marketplace add https://github.com/moolabs-hq/moo-skills"
+    echo "     /plugin install superpowers@moo-skills"
+    echo ""
+  fi
+  echo "  Paste the commands above into Claude Code. Without these, the"
+  echo "  Phase 2d task-dispatch and Phase 4 adversarial-review handoff will"
+  echo "  fail silently when cost-billing skills cross-call them."
+  echo ""
+  echo "  Skip this check next time with --skip-plugins."
+  echo "─────────────────────────────────────────────────────────────────────"
+}
 
 install_codegraph() {
   echo ""
@@ -1279,6 +1357,15 @@ done
 # Engineering persona: CodeGraph
 if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
   install_codegraph
+fi
+
+# All personas that touch code: ralph-skills (autonomous loop) +
+# moo-skills/superpowers (adversarial-pr-review, requesting-code-review,
+# using-superpowers). The cost-billing skills REFERENCE these — without them
+# every "/superpowers:* " or "/cost-billing-adversarial-review" cross-skill
+# call fails silently.
+if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" || "$PERSONA" == "product" ]] && [[ $SKIP_PLUGINS -eq 0 ]]; then
+  install_ralph_and_superpowers
 fi
 
 # Optional: configure MCP servers picked by the user (--mcp / --mcp-config)

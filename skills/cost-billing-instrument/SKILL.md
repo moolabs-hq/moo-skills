@@ -260,17 +260,90 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 **Codemod commit:** First commit on the branch is `feat(moolabs): generate per-service emission helper`. Reviewable in isolation before any business-logic file changes.
 
-### Phase 2b: Per-pattern insert (the actual codemod)
+### Phase 2c: Build the task ledger (NEW — fan-out planning)
 
-For each insert, pick the right adapter and pattern. Every emission MUST go through the Phase 2 helper — `from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe`. No `Moolabs(api_key=...)` lines outside the helper file.
+**Why this exists** (added 2026-05-25 after Codex review caught the per-pattern template bugs): the v0.1 codemod tried to render and apply ALL inserts inside one LLM context. That accumulated bugs (orphan `except` in sibling-pair, stale inline `_moolabs_client` in usage-only) because no single render was isolated enough to be parse-tested. Phase 2c breaks the work into independent units; Phase 2d dispatches each unit to its own focused subagent context.
+
+Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. Output: `.moolabs/codemod/tasks.yaml` with one task per `(file, [callsites in this file])` tuple. Each task is **self-contained** — it carries the inventory slice, the matching output-input-map edges, the helper template path, the adapter binding, and the SDK snapshot capability flags relevant to its callsites. No task ever needs the full inventory.
+
+```yaml
+# Example tasks.yaml entry
+- task_id: tsk_001
+  file: services/moo-arc/app/agents/communications.py
+  service_slug: moo-arc
+  framework: fastapi
+  language: python
+  template: assets/codemod-templates/python-fastapi.j2
+  helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+  snapshot_capabilities:
+    cost_event_direct_emit: true
+    cost_event_method_path: "client.cost.ingest_events_batch"
+  inserts:
+    - line: 729
+      pattern: sibling-pair
+      entry:                       # the inventory entry — JUST this one
+        workflow_id: arc.dunning.email-composed
+        event_type: completion.delivered
+        idempotency_anchor: { handler: compose_email, path_param: customer_id, confidence: 0.95 }
+        refund_unit: { unit: email, derivation: "1" }
+        cost_kind: llm-tokens
+        cost_workflow_ids: [arc.shared.llmport-call]
+        cost_micros_source: "response.cost_micros"
+        consumer_agent_source: 'log_context["agent"]'
+      attribution_keys: [tenant_id, request_id, customer_id, consumer_agent]
+  audit:
+    cost_events_inventory_sha: <sha of slice>
+    output_input_map_sha: <sha of slice>
+```
+
+**Task granularity = per file.** Atomic commit boundary, single rendering pass per file (so `python -m py_compile` can verify the file before the task completes), parallelizable across files. Per-callsite would over-fragment; per-service would re-introduce the big-context problem the Codex review caught.
+
+### Phase 2d: Dispatch tasks to focused subagent contexts
+
+For each task in `tasks.yaml`, fire a subagent via the `Agent` tool with `subagent_type=general-purpose` and a focused prompt:
+
+```
+You are instrumenting ONE file. Your job:
+
+1. Read the file at <task.file>.
+2. For each insert in <task.inserts>, render the helper call by substituting
+   the inventory entry into <task.template>.
+3. Apply each insert immediately AFTER the source line specified in the
+   inventory entry's idempotency_anchor.handler return path. Preserve all
+   existing imports + business logic.
+4. Add the helper import at the top of the file if not already present:
+   <task.helper_import>
+5. Run `python -m py_compile <file>` (or the language equivalent). If it
+   fails, FIX the rendered output — do NOT proceed with broken Python.
+6. Stage + commit the file with message: `feat(moolabs): instrument
+   <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
+
+You may NOT:
+- Read other files in this service (your context is THIS file only).
+- Load the full cost-events-inventory.yaml or usage-events-inventory.yaml
+  (you have the slices you need).
+- Instantiate Moolabs() inline at any call site.
+- Call client.usage.* or client.cost.* directly (always through the helper).
+- Skip the py_compile / typecheck step.
+
+Report back ONE summary line per insert, plus the final commit SHA.
+```
+
+The dispatcher waits for each task to complete, collects the summary, and writes results to `.moolabs/codemod/execution-log.yaml`. Failed tasks (compile error, missing source line, sibling find of an existing helper import that conflicts) are recorded with `status: failed`, full diagnostic, and stay in the ledger — Phase 2e (NEW) is a retry pass that the human triggers explicitly.
+
+**Why subagent isolation matters here**: per-template bugs caught by Codex (orphan `except`, stale `client.meter.events` inline) were rendering-time accidents in one giant context. With one file = one rendering pass = one syntax check, every defect surfaces immediately as a failed `py_compile` instead of polluting downstream tasks.
+
+### Phase 2b (LEGACY name — superseded by Phase 2c/2d above)
+
+For each insert, pick the right adapter and pattern. Every emission MUST go through the Phase 2 helper — `from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe`. No `Moolabs(api_key=...)` lines outside the helper file. (This section is retained as the per-pattern selection reference that the task planner uses.)
 
 **Pattern selection (deterministic, from `output-input-map.yaml`):**
 
-| Condition | Pattern | What gets emitted |
+| Condition | Pattern | Helper calls emitted |
 |---|---|---|
-| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | One `client.meter.events.ingest_events([...])` call; cost is emitted as OTel span attributes on the existing or new span (e.g. `moolabs.cost.kind=openai-tokens`) |
-| Usage event has no inputs in this handler (terminal-only) | usage-only | Just `client.meter.events.ingest_events([...])` |
-| Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only **BLOCKED v1** | Dual-transport emission via `emit_cost_event_safe()` (OTel span preferred, structured log fallback) + `# TODO: cost-event endpoint not yet exposed on unified SDK (§10 #3)`; Skill R surfaces |
+| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_cost_event_safe(...)` + `emit_usage_event_safe(...)` |
+| Usage event has no inputs in this handler (terminal-only) | usage-only | `emit_usage_event_safe(...)` only |
+| Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only | `emit_cost_event_safe(...)` only — helper picks SDK or OTel-span transport per Phase 1.5 snapshot |
 
 **Adapter selection (from `repo-profile.yaml`):**
 
