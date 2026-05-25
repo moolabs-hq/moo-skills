@@ -145,7 +145,7 @@ $defs:
           description: Vendor name from billable_units[].vendor_when_cogs.
         reason:
           type: string
-          description: CFO's vendor_when_cogs text — e.g. "Twilio passthrough; customer pays per dunning case auto-managed."
+          description: CFO's vendor_when_cogs text — e.g. "AWS SES; these are internal operational alerts, not customer-facing."
         cfo_signoff:
           type: string
           enum: [pending, accepted, rejected]
@@ -182,11 +182,11 @@ example:
         cfo: pending
         engineer: pending
   suppressions:
-    - file: "services/moo-arc/app/agents/communications.py"
-      line: 729
-      handler: compose_sms
-      suppressed_event_type: "arc.dunning.sms-composed"
-      unit_id: per_sms
-      vendor: Twilio
-      reason: "Twilio passthrough; customer pays per dunning case auto-managed (not per SMS)."
+    - file: "services/moolabs-app/bff/app/services/notifications.py"
+      line: 140
+      handler: send_email
+      suppressed_event_type: "bff.ops.aws-ses-alert"
+      unit_id: per_email_internal_alert
+      vendor: AWS SES
+      reason: "Internal operational alerts (oncall pages, deploy notifications) — not customer-facing email."
       cfo_signoff: pending

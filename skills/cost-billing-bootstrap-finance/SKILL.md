@@ -85,20 +85,23 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 
 > "For each unit you listed in Q3, classify ONE AT A TIME — this controls whether downstream discovery emits a usage event, a cost event, or both. Pick (a), (b), or (c):
 >
->   (a) **customer_facing_billable** — customer pays us per X; vendor cost (if any) is implementation detail you absorb. Discovery emits USAGE events for handlers that produce X.
->   (b) **vendor_cogs_only** — vendor charges us per X but customer does NOT pay us per X (e.g. Twilio passthrough where your contract bills per dunning case, not per SMS). Discovery emits COST events only; NO usage event for the X-producing handler.
->   (c) **sibling_pair** — customer pays us per X AND vendor charges us per X (one-to-one mapping). Discovery emits BOTH.
+>   (a) **customer_facing_billable** — customer pays us per X; vendor cost (if any) is implementation detail you absorb (with margin). Discovery emits USAGE events for handlers that produce X.
+>   (b) **vendor_cogs_only** — vendor charges us per X but customer does NOT pay us per X. Discovery emits COST events only; NO usage event for the X-producing handler.
+>   (c) **sibling_pair** — customer pays us per X AND we also track vendor cost per X for margin analytics. Discovery emits BOTH a usage event and a paired cost event.
 >
-> Examples to ground this:
->   - 'per_token_1k' for an LLM completion: usually (a) — customer pays per token, OpenAI cost is your COGS. Unless your contract literally invoices customers per OpenAI token, then it's (c).
->   - 'per_sms' for dunning communications: usually (b) — Twilio charges per SMS but the customer's contract is 'dunning case auto-managed' (per-case, not per-SMS). Discovery should NOT emit usage events for `sms_composed` handlers.
->   - 'per_image_rendered' for an image-gen API: depends on contract — usually (a)."
+> The same vendor surface can map to any of the three — the contract decides, not the vendor:
 >
-> If the CFO picks (a) for a unit whose `unit_id` names a known vendor surface (`per_sms`, `per_email`, `per_token`, `per_api_call`, `per_minute`), follow up:
-> "You picked customer_facing_billable for `<unit_id>` — that unit name looks like a direct vendor passthrough. State why this is NOT vendor_cogs_only — typical reasons: 'we set margin on top of vendor passthrough', 'customer's contract explicitly bills per-unit', 'this is repackaged as a Moolabs-branded SKU'. If you can't articulate why, the right classification is probably (b)."
+>   - `per_sms`: (a) if you charge customers per SMS sent with margin on top of Twilio's per-message price. (b) if your contract bills per outcome (per dunning case, per appointment confirmed) and SMS is just one of several delivery mechanisms whose cost you absorb. (c) if both your invoice AND your internal COGS dashboard track per-SMS.
+>   - `per_token_1k`: (a) if you charge customers a per-token rate with margin. (b) if your contract bills per chat session or per resolved query and tokens are internal COGS. (c) if you bill per-token AND want to track OpenAI's per-token cost as the paired input.
+>   - `per_email_sent`: (a) for transactional email APIs your customers consume. (b) for internal operational alerts (e.g. AWS SES sending ops notifications — not customer-facing). (c) for marketing-platform customers where both sides track per-email.
+>
+> ALL THREE classifications are valid for ANY vendor unit — the right answer depends on YOUR contract with the customer, not the vendor's billing model.
+>
+> If the CFO picks (a) for a unit whose `unit_id` names a known vendor surface (`per_sms`, `per_email`, `per_token`, `per_api_call`, `per_minute`), follow up — this is a soft nudge, not a block:
+> "You picked customer_facing_billable for `<unit_id>`. Just to capture context for downstream review, one line on why this is (a) and not (b) — e.g. 'we add margin on top of vendor passthrough', 'customer's contract explicitly bills per-unit', 'repackaged as a Moolabs-branded SKU'. If (a) is genuinely the answer, any of these is fine."
 >
 > If the CFO picks (b), record the vendor + the customer-facing unit instead:
-> "Vendor name + what does the customer's contract bill per, instead? Example: 'Twilio; customer pays per dunning case auto-managed.'"
+> "Vendor name + what does the customer's contract bill per, instead? Example: 'AWS SES; these are internal operational alerts, not customer-facing.'"
 
 ### Q4 — Fair-usage thresholds + overages + bundling
 > "For each billable unit you listed in Q3, does it have:
