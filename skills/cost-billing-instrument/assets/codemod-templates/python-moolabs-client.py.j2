@@ -4,16 +4,20 @@
    Every instrument-templates emission MUST go through emit_usage_event_safe() or
    emit_cost_event_safe() — NEVER instantiate Moolabs() inline at the call site.
 
-   Variables expected (from 04-final.signed.yaml):
+   Variables expected:
      service_slug                — e.g. "moo-arc"
      signoff_chain_hashes        — list of {stage, file, sha256} entries
      sdk_key_location.strategy   — aws_secrets_manager | gcp_secret_manager | vault | onepassword | env_var | custom
      sdk_key_location.region     — for AWS (e.g. "us-east-1")
      sdk_key_location.secret_id_template — e.g. "{env}/moolabs/sdk-api-key"
      sdk_key_read_pattern        — verbatim code snippet (when strategy=custom)
-     sdk_pinned_version          — from Q16; rendered in docstring header
-     telemetry.mode              — brownfield | greenfield (brownfield = NEVER re-register TracerProvider)
+     sdk_pinned_version          — from Phase 1.5 snapshot (resolved tag)
+     telemetry.mode              — brownfield | greenfield
      telemetry.primary_tracer    — opentelemetry | datadog | sentry | ...
+
+   From .moolabs/customer-context/sdk-surface-snapshot.yaml (Phase 1.5):
+     capabilities.cost_event_direct_emit — bool; when true, primary cost transport is SDK
+     capabilities.cost_event_method_path — e.g. "client.cost.ingest_events_batch" when capable
 #}
 """Moolabs SDK client — module-level singleton for {{ service_slug }} billing emissions.
 
@@ -127,9 +131,9 @@ def emit_usage_event_safe(
     Dual transport (matches emit_cost_event_safe — both events follow the same
     never-drop contract):
 
-      1. **Preferred — Moolabs SDK HTTP** (``client.meter.events.ingest_events``):
-         the normal path. Successful → done. Idempotency key in the payload
-         makes any re-ingestion safe.
+      1. **Preferred — Moolabs SDK HTTP** (``client.usage.ingest_events``):
+         the normal path, verified against the Phase 1.5 snapshot. Idempotency
+         key in the payload makes any re-ingestion safe.
 
       2. **Recovery rail — structured log** (``moolabs.usage.event`` log line):
          when the SDK call raises (network out, 5xx, secret-manager outage,
@@ -157,7 +161,7 @@ def emit_usage_event_safe(
     if correlation_id is not None:
         payload["data"]["moolabs.correlation.id"] = correlation_id
     try:
-        get_client().meter.events.ingest_events([payload])
+        get_client().usage.ingest_events([payload])
         return
     except Exception as exc:
         # Recovery rail: log the full event so it is auditable + replayable.
@@ -200,13 +204,13 @@ def emit_cost_event_safe(
     available, structured log as fallback.
 
     Sibling-pair counterpart to emit_usage_event_safe(). Both events ship
-    through the SAME unified Moolabs SDK eventually — there is no separate
-    "acute SDK". Today the SDK exposes ``client.meter.events.ingest_events()``
-    for usage events but does NOT yet expose a customer-facing cost-event
-    endpoint (final method path TBD by the platform team — likely
-    ``client.meter.cost.ingest_events()`` or similar on the same client).
-    Until that endpoint ships, cost events are persisted via TWO paths in
-    priority order:
+    through the SAME unified Moolabs SDK — there is no separate "acute SDK".
+    Verified against moolabs-py@v0.2.0-rc9: the SDK exposes 11 flat capability
+    namespaces on the client. Usage events go through ``client.usage.ingest_events``;
+    cost events go through ``client.cost.ingest_events_batch`` (capability "cost"
+    routes to CostEventsApi + SdkIngestApi on the acute backend).
+
+    Two paths in priority order:
 
       1. **Preferred — OTel span attribute** (when an active, recording span exists):
          attributes are set on the current span and ride the existing OTLP exporter
@@ -251,10 +255,40 @@ def emit_cost_event_safe(
           continues.
     """
     try:
+{% if capabilities.cost_event_direct_emit %}
+        # Primary transport: unified SDK cost-event endpoint
+        # ({{ capabilities.cost_event_method_path }}) — verified present in the
+        # Phase 1.5 snapshot at SDK version {{ sdk_pinned_version }}.
+        payload = {
+            "kind": kind,
+            "source": "{{ service_slug }}",
+        }
+        if tenant_id is not None:
+            payload["tenant_id"] = str(tenant_id)
+        if consumer_agent is not None:
+            payload["consumer_agent"] = consumer_agent
+        if cost_micros is not None:
+            payload["cost_micros"] = int(cost_micros)
+        if attributes:
+            payload["attributes"] = dict(attributes)
+        try:
+            # Attribute path resolved at codemod time from snapshot:
+            # {{ capabilities.cost_event_method_path }}
+            {{ capabilities.cost_event_method_path | replace("client.", "get_client().") }}([payload])
+            return
+        except Exception as exc:
+            # Fall through to log recovery rail below.
+            _sdk_error = exc
+{% else %}
+        # Primary transport: OTel span attributes (until the unified SDK adds a
+        # cost-event endpoint — Phase 1.5 snapshot shows capabilities.cost_event_direct_emit=false).
+        _sdk_error = None
+{% endif %}
         from opentelemetry import trace as _trace
 
         span = _trace.get_current_span()
-        # An active, recording span: write attributes (preferred path).
+{% if not capabilities.cost_event_direct_emit %}
+        # An active, recording span: write attributes (preferred for span-transport path).
         if span is not None and span.is_recording():
             span.set_attribute("moolabs.cost.kind", kind)
             if tenant_id is not None:
@@ -266,10 +300,11 @@ def emit_cost_event_safe(
             for k, v in (attributes or {}).items():
                 span.set_attribute(f"moolabs.cost.{k}", v)
             return
+{% endif %}
 
-        # No recording span (sampler dropped / no tracer / background task /
-        # pre-init code path). Fall back to structured log — acute ingests
-        # these via the customer's log pipeline. Salvage trace_id when the
+        # Recovery rail (fires on: SDK exception above when capable,
+        # OR no recording span when not capable — sampler dropped / no tracer
+        # / background task / pre-init code path). Salvage trace_id when the
         # span context is valid-but-not-recording (still useful for correlation).
         trace_id: str | None = None
         span_id: str | None = None
@@ -284,6 +319,8 @@ def emit_cost_event_safe(
             "transport": "log_fallback",
             "policy": "never_drop_cost_event",
         }
+        if _sdk_error is not None:
+            log_kwargs["sdk_error"] = str(_sdk_error)
         if tenant_id is not None:
             log_kwargs["tenant_id"] = str(tenant_id)
         if consumer_agent is not None:

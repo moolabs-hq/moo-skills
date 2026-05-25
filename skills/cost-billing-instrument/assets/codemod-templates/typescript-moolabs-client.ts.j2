@@ -87,7 +87,7 @@ export interface EmitUsageEventOptions {
  * Persist a usage event. Never drops — uses SDK when reachable, structured
  * log as recovery rail when not. Matches emit_cost_event_safe's contract.
  *
- * Path 1 (preferred): SDK HTTP → client.meter.events.ingestEvents.
+ * Path 1 (preferred): SDK HTTP → client.usage.ingestEvents (verified by Phase 1.5 snapshot).
  * Path 2 (recovery rail): SDK error → log line `moolabs.usage.event` with
  *   the full payload flattened. Customer's log pipeline retains it; whether
  *   platform auto-ingests is a separate concern. The point is the event is
@@ -102,7 +102,7 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
   };
   try {
     const client = await getClient();
-    await client.meter.events.ingestEvents([payload]);
+    await client.usage.ingestEvents([payload]);
     return;
   } catch (exc) {
     const logPayload: Record<string, unknown> = {

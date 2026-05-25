@@ -13,8 +13,12 @@
 {% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK inserts (sibling-pair pattern)
-# usage event → client.meter.events.ingest_events
-# cost events → emitted as OTel span attributes (read by moo-acute Tier 2/4)
+# usage event → emit_usage_event_safe() → client.usage.ingest_events()
+# cost events → emit_cost_event_safe() — SDK if capable (client.cost.ingest_events_batch),
+#               OTel-span fallback if not. Verified per Phase 1.5 snapshot.
+#
+# Both call paths go through the per-service helper (moolabs_client.py).
+# NEVER instantiate Moolabs() inline — see Phase 2 of cost-billing-instrument SKILL.md.
 #
 # SDK is blocking by design (~35ms typical round-trip). See PR description for
 # latency profile. v1 default is Option B (blocking + documented).

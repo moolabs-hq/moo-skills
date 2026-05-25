@@ -167,7 +167,65 @@ warnings:
   - "2 entries have framework=litestar (no v1 adapter); inserting TODO comments"
 ```
 
-**Always show the plan to the user before proceeding.** If they say "go", continue to Phase 2.
+**Always show the plan to the user before proceeding.** If they say "go", continue to Phase 1.5.
+
+### Phase 1.5: Snapshot the unified Moolabs SDK at the pinned version (MANDATORY, ONCE per codemod run)
+
+**The codemod MUST NOT trust the static `cost-billing-shared/sdk-surface-reference.md` at emission time.** That doc is a curated hint from 2026-05-18 (and earlier dates); the SDK has likely moved since. The truth lives in the SDK repo at the version the customer locked into `04-final.signed.yaml > integration.sdk_package_install` — fetch and introspect it before generating helpers or call-site inserts.
+
+**Why this exists (added 2026-05-25 after moo-arc dogfood + framing correction):**
+
+1. **The SDK evolves between curation and customer runs.** Method names, namespace structure, even the import name can change. A static reference rots silently.
+2. **New capabilities should not require a new codemod release.** When the unified SDK adds `client.meter.cost.ingest_events()` (final path TBD), customers re-running the codemod should automatically get direct SDK emission for cost events — no skill update needed. The snapshot is how the helper finds out.
+3. **The snapshot is auditable customer-context.** Lives at `.moolabs/customer-context/sdk-surface-snapshot.yaml` alongside the other signed Phase 4 artifacts; travels with the PR; future codemod re-runs can diff against it.
+4. **Refuse-to-emit on contract break.** If `client.meter.events.ingest_events` no longer exists in the snapshot (renamed, removed), the codemod stops before writing — surfaced as a CRITICAL finding for Skill R rather than producing a PR that silently fails at customer runtime.
+
+**Steps:**
+
+1. Read `04-final.signed.yaml > integration.sdk_package_install` per language. For each language with `strategy != "skip"`:
+   - `latest-tag` → resolve current latest stable tag from `git ls-remote --tags <repo> | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1`
+   - `pinned` → use `version`
+   - `private-mirror` → fetch from `mirror_url`
+   - `custom` → SKIP introspection (the customer's mirror may not be inspectable); emit a warning and fall back to the static reference doc
+2. Shallow-clone the SDK repo at the resolved tag: `git clone --depth=1 --branch <tag> <repo> /tmp/moolabs-sdk-<lang>-<tag>`.
+3. Run `scripts/sdk_snapshot.py --lang <python|typescript|go> --src /tmp/moolabs-sdk-<lang>-<tag>`. Per language:
+   - **Python:** AST-parse `__init__.py` and recurse — extract `Moolabs` class attributes and each namespace's public methods. NO IMPORT — static parse only (avoids running customer-package side effects).
+   - **TypeScript:** Read `package.json > exports` and parse the matching `.d.ts` files. Extract top-level exports + method signatures of the `Moolabs` class.
+   - **Go:** Run `go doc -all ./...` against the local clone; parse the package surface.
+4. Write `.moolabs/customer-context/sdk-surface-snapshot.yaml`:
+
+   ```yaml
+   # Real output, verified against moolabs-py@v0.2.0-rc9 (2026-05-25).
+   # The actual SDK exposes 11 FLAT capability namespaces — NO client.cls / client.meter
+   # split (that was the curated reference doc's mistake; the snapshot is ground truth).
+   generated_at: 2026-05-25T12:30:00Z
+   sdk_versions:
+     python:     { repo_url: "...moolabs-py", resolved_tag: v0.2.0-rc9, commit_sha: 7d5b07d771b2, is_prerelease: true }
+   namespaces:
+     python:
+       - path: "client.usage"
+         methods: [ingest_events, list_events, query_meter, create_meter, ...]
+       - path: "client.cost"
+         methods: [ingest_event, ingest_events_batch, ingest_sdk_spans, submit_adjustment]
+       - path: "client.wallets"
+         methods: [allocate_credits, create_wallet, ...]
+       # ... 8 more flat capabilities
+   capabilities:
+     usage_event_emit:        true                              # verified client.usage.ingest_events present
+     cost_event_direct_emit:  true                              # verified client.cost.ingest_events_batch present
+     cost_event_method_path:  "client.cost.ingest_events_batch" # what the helper template renders
+   contract_drift:
+     # populated when expected methods are MISSING — codemod aborts; surfaced to Skill R
+     missing_expected_methods: []
+     renamed_methods: []
+   ```
+
+5. **Contract check (gates Phase 2):**
+   - `capabilities.usage_event_emit` MUST be true. If not, abort with a clear error: the SDK is missing a method the helper depends on. User can either pin to an older version where it existed, or fix the SDK and re-run.
+   - `contract_drift.missing_expected_methods` MUST be empty. Any entry → abort + surface to Skill R.
+   - `contract_drift.renamed_methods` MAY have entries → warn but proceed; emit notes into the PR description so the customer reviews them.
+
+The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-site inserts). Neither phase reads `sdk-surface-reference.md` directly anymore; that doc is now a fallback hint for human reviewers, not a runtime input.
 
 ### Phase 2: Generate the per-service `moolabs_client.py` helper (MANDATORY, ONCE per service)
 

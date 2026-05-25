@@ -101,29 +101,38 @@ Moolabs platform team plans to publish to public registries (PyPI / npm / Go van
 
 ---
 
-## Customer-facing namespaces (the only two)
+## Customer-facing namespaces — 11 flat capabilities (verified)
 
-The `Moolabs` client exposes exactly **two** top-level namespaces. The requirements doc's Doc 3 §11 ("`client.meter.events.*` = billing events. `client.cls.*` = account/wallet/lifecycle. No third namespace today") is **confirmed** by the live README.
+**This section was wrong in the 2026-05-19 draft of this doc.** The earlier claim was a `client.cls.*` + `client.meter.*` split; the actual SDK ships **11 flat capability namespaces** directly on the `Moolabs` client. Each capability dispatches dynamically via `_Namespace.__getattr__` to one or more backing API classes routed by `_dx_routing.CAPABILITY_MAP`.
+
+The codemod must NOT read this section as authoritative at runtime — Phase 1.5 (`scripts/sdk_snapshot.py`) introspects the actual SDK at the pinned version and writes `.moolabs/customer-context/sdk-surface-snapshot.yaml`. This section exists as a human-readable summary verified against `moolabs-py@v0.2.0-rc9` (2026-05-25).
 
 ```python
 from moolabs import Moolabs
 client = Moolabs(api_key="moo_live_...")
 
-# CLS / billing-side                      Meter / usage-side
-client.cls.wallets.create_wallet(...)     client.meter.events.ingest_events([...])
-client.cls.grants.list_grants(...)        client.meter.meters.list_meters()
-client.cls.ledger.*                       client.meter.entitlements.check_entitlement(...)
-client.cls.alerts.*                       client.meter.customers.*
-client.cls.auto_topup.*                   client.meter.subscriptions.*
-client.cls.rate_cards.*                   client.meter.billing.*
-client.cls.rating.*                       client.meter.notifications.*
-client.cls.fx_rates.*                     client.meter.apps.*
-client.cls.portal.*                       client.meter.portal.*
-client.cls.subscriptions.*                client.meter.product_catalog.*
-                                          client.meter.subjects.*
+# The 11 capability namespaces (flat on `client`):
+client.usage          # event ingest + meter querying       → EventsApi, MetersApi (meter backend)
+client.cost           # cost-event ingest                   → CostEventsApi, SdkIngestApi (acute backend)
+client.customers      # customers + subjects                → CustomersApi, SubjectsApi (meter)
+client.catalog        # plans, features, addons, rate cards → ProductCatalogApi (meter) + RateCardsApi (bff)
+client.subscriptions  # subscriptions + addons              → MeterSubscriptionsApi (meter)
+client.entitlements   # access checks + grants              → EntitlementsApi (meter)
+client.wallets        # prepaid-credit wallets              → WalletsApi (bff)
+client.credits        # grants, ledger, auto-topup          → GrantsApi, LedgerApi, AutoTopupApi (bff)
+client.billing        # invoicing + rating + FX             → MeterBillingApi (meter) + RatingApi, FxRatesApi (bff)
+client.collections    # AR / dunning / arc resources        → 17 Arc API classes
+client.notifications  # channels + rules + alerts           → NotificationsApi (meter) + AlertsApi (bff)
 ```
 
-Routing is internal (`api.moolabs.com` for `cls`, `meter.moolabs.com` for `meter`). The SDK handles it; the codemod does NOT need to wire base URLs per call.
+**The two emission entry points** the codemod cares about:
+
+| Event | Capability | Method | Verified at v0.2.0-rc9 |
+|---|---|---|---|
+| Usage | `client.usage` | `ingest_events([...])` | ✓ |
+| Cost  | `client.cost`  | `ingest_events_batch([...])`, `ingest_event(...)`, `ingest_sdk_spans(...)`, `submit_adjustment(...)` | ✓ |
+
+Routing is internal (`api.moolabs.com`, `meter.moolabs.com`, `acute.moolabs.com` per capability). The SDK derives subdomains from `base_url`; the codemod does NOT wire base URLs per call.
 
 ---
 
