@@ -60,12 +60,44 @@ properties:
         minItems: 1
         items:
           type: object
-          required: [unit_id, label]
+          # classification REQUIRED as of 2026-05-25 (added after the SMS misclassification
+          # case — see cost-billing-shared/v1-decisions-log.md). Without explicit
+          # classification, downstream discovery cannot distinguish a vendor passthrough
+          # (cost-only) from a customer-facing billable surface (usage or sibling-pair).
+          required: [unit_id, label, classification]
           properties:
             unit_id: { type: string }      # short slug, e.g., "per_token_1k"
             label: { type: string }        # CFO's words, e.g., "completion priced per 1k tokens"
             price_usd: { type: number, minimum: 0 }
             per_what: { type: string }     # "1k tokens", "render", "minute", etc.
+            classification:
+              type: string
+              enum: [customer_facing_billable, vendor_cogs_only, sibling_pair]
+              description: |
+                customer_facing_billable: customer pays us per X; vendor cost (if any)
+                  is implementation detail. Discovery emits usage events for handlers
+                  that produce X.
+                vendor_cogs_only: vendor charges us per X but customer does NOT pay
+                  us per X (e.g. Twilio passthrough where customer pays per-case
+                  not per-SMS). Discovery emits cost-only events; does NOT emit a
+                  usage event for the X-producing handler.
+                sibling_pair: customer pays us per X AND vendor charges us per X
+                  (one-to-one). Discovery emits BOTH a usage event and a paired
+                  cost event.
+            vendor_when_cogs:
+              type: string
+              description: |
+                Required when classification=vendor_cogs_only. The vendor name +
+                what the customer-facing unit IS instead.
+                Example: "Twilio passthrough; customer pays per dunning case auto-managed."
+            classification_justification:
+              type: string
+              description: |
+                Required when classification=customer_facing_billable AND the unit_id
+                names a known vendor surface (e.g. "per_sms", "per_email", "per_token").
+                CFO must justify why this is NOT vendor_cogs_only — typically: "we set
+                margin on top of vendor pass-through and the customer's contract is
+                priced per unit, not per case."
       fair_usage_per_unit:
         type: object
         additionalProperties: true

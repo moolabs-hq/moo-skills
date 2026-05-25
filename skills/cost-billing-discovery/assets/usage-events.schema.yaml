@@ -120,6 +120,39 @@ $defs:
       _verification_command:
         type: string
 
+  # Top-level audit array — terminal-event candidates the CFO's
+  # billable_units[].classification=vendor_cogs_only blocked from being
+  # emitted as usage events. Added 2026-05-25 (Phase 4 vendor-COGS
+  # suppression in cost-billing-discovery/SKILL.md). Surfaced in
+  # reviews/cfo-view.html so the CFO can verify the suppression was correct.
+  suppressions:
+    type: array
+    items:
+      type: object
+      required: [file, line, suppressed_event_type, unit_id, vendor, reason]
+      properties:
+        file: { type: string }
+        line: { type: integer }
+        handler: { type: string }
+        suppressed_event_type:
+          type: string
+          description: The event_type that WOULD have been emitted as a usage event.
+        unit_id:
+          type: string
+          description: The billable_units[].unit_id from finance YAML that triggered suppression.
+        vendor:
+          type: string
+          description: Vendor name from billable_units[].vendor_when_cogs.
+        reason:
+          type: string
+          description: CFO's vendor_when_cogs text — e.g. "Twilio passthrough; customer pays per dunning case auto-managed."
+        cfo_signoff:
+          type: string
+          enum: [pending, accepted, rejected]
+          description: |
+            accepted = CFO confirms suppression is correct.
+            rejected = CFO wants this emitted as usage; chain must cycle back to Stage 1 to reclassify the unit.
+
 example:
   version: "0.1.0"
   last_synced: "2026-05-19T07:42:00Z"
@@ -148,3 +181,12 @@ example:
       review_signoff:
         cfo: pending
         engineer: pending
+  suppressions:
+    - file: "services/moo-arc/app/agents/communications.py"
+      line: 729
+      handler: compose_sms
+      suppressed_event_type: "arc.dunning.sms-composed"
+      unit_id: per_sms
+      vendor: Twilio
+      reason: "Twilio passthrough; customer pays per dunning case auto-managed (not per SMS)."
+      cfo_signoff: pending

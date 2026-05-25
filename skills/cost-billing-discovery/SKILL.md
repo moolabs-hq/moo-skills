@@ -164,6 +164,7 @@ Run `scripts/refund_test.py` which applies auxiliary signals from `assets/termin
 - **Pricing-page intersection** — if `--pricing-page` was provided and the handler name appears (substring match) in the pricing copy, +0.20 confidence
 - **Response-shape heuristic** — handlers returning user-addressable artifacts (URLs, IDs, content blocks) more likely terminal than internal handlers
 - **Subscription edge case** — handlers under recognized "subscription"/"plan" URL patterns may emit ZERO usage events (cost-only customers); flag, don't drop
+- **Vendor-COGS suppression (added 2026-05-25)** — read `01-finance.signed.yaml > pricing_model.billable_units[]`. For each unit with `classification: vendor_cogs_only`, look up the named vendor (via `vendor_when_cogs` text + the `assets/vendor-host-catalog.yaml`). If a terminal-event candidate's handler invokes that vendor (cost-events-inventory has an entry on the same handler subtree), **REFUSE to emit a usage-event entry for that handler**. Instead, force the matching cost-events entry to `pattern: cost-only`. Log the suppression with the unit_id + vendor + reason — surfaced at three-role review as "CFO-classified vendor passthrough; usage-emission suppressed". The CFO's `vendor_cogs_only` decision OVERRIDES the refund-test verb pattern — even if the handler is named `sms_composed` (looks terminal), CFO's classification wins.
 
 Each candidate gets a confidence ∈ [0, 1] and a `refund_unit` (per-token, per-render, per-minute, per-seat, per-completion).
 
@@ -198,7 +199,7 @@ edges:
 
 Then run `scripts/three_role_views.py` to project the role views. Per `customer-context > products[]` + fan-out architecture, views split per product (PM) and per service (engineer):
 
-- `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue (1, ORG-WIDE — CFO sees everything).
+- `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue (1, ORG-WIDE — CFO sees everything). **Also includes a "Vendor-COGS suppressions" section listing every terminal-event candidate the CFO's `vendor_cogs_only` classification blocked** (unit_id, vendor, handler `file:line`, the would-be usage event). Lets the CFO verify the suppression was correct — if a handler shows up here that should have been billable, the CFO either reclassifies the unit in finance.signed.yaml (cycle the chain) or accepts the suppression.
 - `reviews/pm-view-<product>.html` — output→inputs graph filtered to entries whose service path is in `products[<product>].services` (N, ONE PER PRODUCT — PM Alice for `acute` sees only acute features; PM Bob for `meter` sees only meter features).
 - `reviews/engineer-view-<service>.html` — file-grouped inventory with file:line / framework / confidence, filtered to entries under that service's path (M, ONE PER SERVICE — engineer Dan for `moo-acute` sees only moo-acute entries).
 
