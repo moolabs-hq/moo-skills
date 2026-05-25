@@ -154,15 +154,38 @@ def emit_cost_event_safe(
     cost_micros: int | None = None,
     attributes: dict[str, str | int | float | bool] | None = None,
 ) -> None:
-    """Enrich the current OTel span with ``moolabs.cost.*`` attributes.
+    """Persist a cost event. Never drops the event — uses OTel span when
+    available, structured log as fallback.
 
     Sibling-pair counterpart to emit_usage_event_safe(). Cost events do NOT
-    travel through the Moolabs SDK — they ride the existing OpenTelemetry
-    TracerProvider and flow downstream to the acute cost-enricher via OTLP.
+    travel through the Moolabs SDK in v1 (the customer-facing ``client.acute.*``
+    namespace doesn't exist yet — see ``cost-billing-shared/sdk-surface-reference.md``).
+    Until it ships, cost events are persisted via TWO paths in priority order:
+
+      1. **Preferred — OTel span attribute** (when an active, recording span exists):
+         attributes are set on the current span and ride the existing OTLP exporter
+         to the acute cost-enricher. Co-located with the trace → trivial correlation
+         via ``trace_id`` / ``span_id``.
+
+      2. **Fallback — structured log** (when no recording span is available):
+         a single ``moolabs.cost.event`` log line is emitted with all attributes
+         flattened. The customer's existing log pipeline (CloudWatch / Datadog / Loki)
+         ships these to the same acute cost-enricher, which already ingests
+         structured logs as a secondary input.
+
+    Both paths target the same ClickHouse ``acute_analytics`` table downstream.
+    **Cost data is never silently dropped** — that would corrupt the attribution
+    engine for any code path the tracer doesn't sample (sampler-dropped traces,
+    background workers without context propagation, dev/CI without OTel, code
+    paths running before the TracerProvider is wired).
+
+    When ``client.acute.events.ingest_events()`` lands in the SDK, this helper's
+    fallback path swaps to direct SDK emission — call sites don't change.
 
     Args:
         kind: Cost-event category. Example: ``"llm-tokens"``, ``"s3-put"``,
-            ``"netsuite-api-call"``. Written as ``moolabs.cost.kind``.
+            ``"netsuite-api-call"``. Written as ``moolabs.cost.kind`` on span,
+            ``kind`` in log fallback.
         tenant_id: Tenant UUID for cross-cutting attribution. Written as
             ``moolabs.tenant.id`` (global, NOT under ``cost.*``).
         consumer_agent: Agent that incurred the cost. Written as
@@ -173,26 +196,60 @@ def emit_cost_event_safe(
         attributes: Free-form additional attributes. Each key namespaced
             under ``moolabs.cost.``.
 
-    Fail-open contract (mirrors emit_usage_event_safe):
-        - No recording span → no-op (sampler dropped / tracing disabled).
-        - Any exception during attribute write → log warning, return None.
+    Fail-open contract:
+        - Any exception during emission (span write OR log fallback) → log
+          warning under ``moolabs.cost_emission.failed`` and return None.
+          Event MAY be lost in this case (exception path), but the workflow
+          continues.
     """
     try:
         from opentelemetry import trace as _trace
 
         span = _trace.get_current_span()
-        if span is None or not span.is_recording():
+        # An active, recording span: write attributes (preferred path).
+        if span is not None and span.is_recording():
+            span.set_attribute("moolabs.cost.kind", kind)
+            if tenant_id is not None:
+                span.set_attribute("moolabs.tenant.id", str(tenant_id))
+            if consumer_agent is not None:
+                span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
+            if cost_micros is not None:
+                span.set_attribute("moolabs.cost.micros", int(cost_micros))
+            for k, v in (attributes or {}).items():
+                span.set_attribute(f"moolabs.cost.{k}", v)
             return
 
-        span.set_attribute("moolabs.cost.kind", kind)
+        # No recording span (sampler dropped / no tracer / background task /
+        # pre-init code path). Fall back to structured log — acute ingests
+        # these via the customer's log pipeline. Salvage trace_id when the
+        # span context is valid-but-not-recording (still useful for correlation).
+        trace_id: str | None = None
+        span_id: str | None = None
+        if span is not None:
+            ctx = span.get_span_context()
+            if ctx is not None and ctx.is_valid:
+                trace_id = format(ctx.trace_id, "032x")
+                span_id = format(ctx.span_id, "016x")
+
+        log_kwargs: dict[str, object] = {
+            "kind": kind,
+            "transport": "log_fallback",
+            "policy": "never_drop_cost_event",
+        }
         if tenant_id is not None:
-            span.set_attribute("moolabs.tenant.id", str(tenant_id))
+            log_kwargs["tenant_id"] = str(tenant_id)
         if consumer_agent is not None:
-            span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
+            log_kwargs["consumer_agent"] = consumer_agent
         if cost_micros is not None:
-            span.set_attribute("moolabs.cost.micros", int(cost_micros))
+            log_kwargs["cost_micros"] = int(cost_micros)
+        if trace_id is not None:
+            log_kwargs["trace_id"] = trace_id
+        if span_id is not None:
+            log_kwargs["span_id"] = span_id
         for k, v in (attributes or {}).items():
-            span.set_attribute(f"moolabs.cost.{k}", v)
+            log_kwargs[f"cost.{k}"] = v
+
+        logger.info("moolabs.cost.event", **log_kwargs)
     except Exception as exc:
         logger.warning(
             "moolabs.cost_emission.failed",

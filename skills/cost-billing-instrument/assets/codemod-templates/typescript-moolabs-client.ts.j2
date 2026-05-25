@@ -107,18 +107,49 @@ export interface EmitCostEventOptions {
   attributes?: Record<string, AttributeValue>;
 }
 
+/**
+ * Persist a cost event. Never drops — uses OTel span when available,
+ * structured log as fallback. See the Python sibling
+ * `python-moolabs-client.py.j2` for the full rationale.
+ *
+ * Path 1 (preferred): active recording span → set attributes.
+ * Path 2 (fallback): no recording span → structured log line that the
+ *   customer's log pipeline ships to the acute cost-enricher.
+ */
 export function emitCostEventSafe(opts: EmitCostEventOptions): void {
   try {
     const span = trace.getActiveSpan();
-    if (!span || !span.isRecording()) return;
 
-    span.setAttribute('moolabs.cost.kind', opts.kind);
-    if (opts.tenantId !== undefined) span.setAttribute('moolabs.tenant.id', String(opts.tenantId));
-    if (opts.consumerAgent !== undefined) span.setAttribute('moolabs.cost.consumer_agent', opts.consumerAgent);
-    if (opts.costMicros !== undefined) span.setAttribute('moolabs.cost.micros', Math.trunc(opts.costMicros));
-    for (const [k, v] of Object.entries(opts.attributes ?? {})) {
-      span.setAttribute(`moolabs.cost.${k}`, v);
+    if (span && span.isRecording()) {
+      span.setAttribute('moolabs.cost.kind', opts.kind);
+      if (opts.tenantId !== undefined) span.setAttribute('moolabs.tenant.id', String(opts.tenantId));
+      if (opts.consumerAgent !== undefined) span.setAttribute('moolabs.cost.consumer_agent', opts.consumerAgent);
+      if (opts.costMicros !== undefined) span.setAttribute('moolabs.cost.micros', Math.trunc(opts.costMicros));
+      for (const [k, v] of Object.entries(opts.attributes ?? {})) {
+        span.setAttribute(`moolabs.cost.${k}`, v);
+      }
+      return;
     }
+
+    // Fallback — no recording span. Salvage trace_id when context is valid-but-not-recording.
+    const ctx = span?.spanContext();
+    const traceId = ctx && ctx.traceId !== '00000000000000000000000000000000' ? ctx.traceId : undefined;
+    const spanId  = ctx && ctx.spanId  !== '0000000000000000'                  ? ctx.spanId  : undefined;
+
+    const logPayload: Record<string, unknown> = {
+      kind: opts.kind,
+      transport: 'log_fallback',
+      policy: 'never_drop_cost_event',
+    };
+    if (opts.tenantId !== undefined)      logPayload.tenant_id      = String(opts.tenantId);
+    if (opts.consumerAgent !== undefined) logPayload.consumer_agent = opts.consumerAgent;
+    if (opts.costMicros !== undefined)    logPayload.cost_micros    = Math.trunc(opts.costMicros);
+    if (traceId)                          logPayload.trace_id       = traceId;
+    if (spanId)                           logPayload.span_id        = spanId;
+    for (const [k, v] of Object.entries(opts.attributes ?? {})) {
+      logPayload[`cost.${k}`] = v;
+    }
+    logger.info(logPayload, 'moolabs.cost.event');
   } catch (exc) {
     logger.warn({ kind: opts.kind, error: String(exc), policy: 'fail_open_silent_swallow' },
                 'moolabs.cost_emission.failed');
