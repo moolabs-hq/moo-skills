@@ -91,9 +91,13 @@ except Exception as _moolabs_err:
 {% elif entry.pattern == "cost-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs cost-only emission via OTel
-# TODO: blocked on acute SDK (§10 #3); replace with client.acute.events.ingest_events
-#       when the acute namespace ships in moolabs-py / -ts / -go.
-# Reference: cost-billing-shared/sdk-surface-reference.md §"acute SDK gap"
+# TODO (§10 #3): the unified Moolabs SDK does not yet expose a cost-event endpoint.
+#                Cost flows via the dual-transport helper today (OTel span attributes
+#                preferred, structured log fallback). When the SDK adds its cost-event
+#                method (same `Moolabs` client, exact path TBD by platform team),
+#                emit_cost_event_safe() swaps its primary branch to that SDK call —
+#                no changes needed at this call site.
+# Reference: cost-billing-shared/sdk-surface-reference.md §"Direct cost-event emission"
 # ─────────────────────────────────────────────────────────────────────────────
 
 from opentelemetry import trace as _moolabs_trace

@@ -94,7 +94,7 @@ The codemod (Skill 2) reads all three; the drift-lint (Skill 3) checks all three
 
 - **Sibling-pair** — one SDK call at one site emits both events (usage + cost). Default for AI/SaaS code paths.
 - **Usage-only** — terminal event with no upstream cost-bearing call (e.g., billing on `seat.assigned`). Single emission.
-- **Cost-only** — cost-bearing call with no usage event (subscription customers; non-AI infra hot paths). **Blocked on acute SDK v1.**
+- **Cost-only** — cost-bearing call with no usage event (subscription customers; non-AI infra hot paths). **v1 uses dual-transport `emit_cost_event_safe()` helper (OTel span + structured log fallback, never-drop).** Swaps to direct SDK emission when the unified `Moolabs` client gains a cost-event endpoint.
 
 ---
 

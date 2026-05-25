@@ -83,6 +83,16 @@ export interface EmitUsageEventOptions {
   correlationId?: string;
 }
 
+/**
+ * Persist a usage event. Never drops — uses SDK when reachable, structured
+ * log as recovery rail when not. Matches emit_cost_event_safe's contract.
+ *
+ * Path 1 (preferred): SDK HTTP → client.meter.events.ingestEvents.
+ * Path 2 (recovery rail): SDK error → log line `moolabs.usage.event` with
+ *   the full payload flattened. Customer's log pipeline retains it; whether
+ *   platform auto-ingests is a separate concern. The point is the event is
+ *   preserved, not lost.
+ */
 export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<void> {
   const payload = {
     type: opts.eventType,
@@ -93,9 +103,28 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
   try {
     const client = await getClient();
     await client.meter.events.ingestEvents([payload]);
+    return;
   } catch (exc) {
-    logger.warn({ eventType: opts.eventType, subject: opts.subject, error: String(exc),
-                  policy: 'fail_open_silent_swallow' }, 'moolabs.emission.failed');
+    const logPayload: Record<string, unknown> = {
+      transport: 'log_recovery_rail',
+      policy: 'never_drop_usage_event',
+      event_type: opts.eventType,
+      subject: opts.subject,
+      source: payload.source,
+      sdk_error: String(exc),
+    };
+    if (opts.correlationId) logPayload.correlation_id = opts.correlationId;
+    for (const [k, v] of Object.entries(payload.data)) logPayload[`data.${k}`] = v;
+    // Salvage trace context for cross-rail correlation
+    try {
+      const span = trace.getActiveSpan();
+      const ctx = span?.spanContext();
+      if (ctx && ctx.traceId !== '00000000000000000000000000000000') {
+        logPayload.trace_id = ctx.traceId;
+        logPayload.span_id  = ctx.spanId;
+      }
+    } catch { /* ignore */ }
+    logger.warn(logPayload, 'moolabs.usage.event');
   }
 }
 

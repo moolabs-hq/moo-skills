@@ -127,29 +127,29 @@ Routing is internal (`api.moolabs.com` for `cls`, `meter.moolabs.com` for `meter
 
 ---
 
-## Direct cost-event emission — not yet exposed in the customer SDK
+## Direct cost-event emission — not yet exposed in the unified SDK
 
-**There is no `client.acute.*` namespace today.** Subscription customers (zero usage events) and any customer needing direct cost-event emission for non-AI infra spend cannot call the cost-event ingest path via the unified SDK.
+**The Moolabs SDK is unified — one client, multiple namespaces.** Today the client exposes `client.cls.*` (billing/wallets) and `client.meter.*` (usage events). A customer-facing cost-event endpoint does NOT yet exist on the same client (final method path TBD — likely something like `client.meter.cost.ingest_events()` or a new sibling namespace on the same client; the platform team owns the decision). **There is no separate "acute SDK"** — when the cost-event endpoint ships, it lands on the existing unified `Moolabs` client.
 
-This is a **Moolabs platform roadmap item, not a customer-visible blocker**. The codemod (`/cost-billing-instrument`) handles it via the OTel-span path described below — the customer never sees the workaround as anything other than a `# TODO` annotation in their PR.
+This is a **Moolabs platform roadmap item, not a customer-visible blocker**. Until that endpoint ships, the codemod (`/cost-billing-instrument`) emits cost via OTel span attributes (preferred) + a structured-log recovery rail (when no recording span exists) per the dual-transport contract in `cost-billing-instrument/SKILL.md` Phase 2. The customer never sees the workaround as anything other than a `# TODO` annotation in their PR.
 
 ### v1 implications
 
 Three patterns the codemod (Skill 2) must choose between:
 
-| Pattern | Today (v1, 2026-05-19) | After direct cost-event SDK lands |
+| Pattern | Today (v1, 2026-05-19) | After unified SDK's cost-event endpoint ships |
 |---|---|---|
-| **Sibling-pair** (one site, both events) | Wire `client.meter.events.ingest_events()` for usage; emit cost as OTel span attributes (`moolabs.request.id`, `moolabs.cost.kind=<vendor>`). The Moolabs platform reads the spans on the backend. | Same usage call; replace OTel-only cost with `client.acute.events.ingest_events()` for explicit cost emission. |
+| **Sibling-pair** (one site, both events) | Usage via `client.meter.events.ingest_events()`; cost via dual transport — OTel span attributes preferred, structured log fallback (per `emit_cost_event_safe()` helper). | Same usage call; cost-event helper swaps primary transport from OTel-span to direct SDK call on the SAME `Moolabs` client. Log recovery rail stays. |
 | **Usage-only** | `client.meter.events.ingest_events()` only. No cost emission. | Same — no change. |
-| **Cost-only** (subscription customers, infra hot paths) | **BLOCKED for v1.** Codemod inserts `# TODO: direct cost-event SDK not yet exposed; emit OTel span with attribute moolabs.cost.kind=<vendor>` and surfaces in PR. | `client.acute.events.ingest_events()` directly. |
+| **Cost-only** (subscription customers, infra hot paths) | **BLOCKED for v1.** Codemod inserts `# TODO: cost-event endpoint not yet exposed on unified SDK; emitting via OTel span + log fallback until it ships` and surfaces in PR. | Direct call on the unified client (exact method TBD by platform team). |
 
-The codemod annotates every cost-only block with `# v1: emitting via OTel until direct cost-event namespace ships` so the customer's PR review can find them later.
+The codemod annotates every cost-only block with `# v1: emitting via OTel + log fallback until unified SDK's cost-event endpoint ships` so the customer's PR review can find them later.
 
 ---
 
 ## Future SDK surface (not in scope for the codemod today)
 
-If Moolabs adds a `client.acute.*` namespace, the codemod templates are structured so swapping pattern 1's OTel emission for the direct call is a one-template change — no per-customer rework needed. Until then, the OTel-span path is the supported v1 mechanism.
+When the unified SDK adds its cost-event endpoint, the `/cost-billing-instrument` helper templates change in ONE place — `emit_cost_event_safe()`'s primary-transport branch swaps from OTel-span-write to the new SDK method on the same `Moolabs` client. Call sites do not change. The log recovery rail stays as defense in depth (and matches the recovery rail for usage events).
 
 ---
 
@@ -206,7 +206,7 @@ All three SDKs (`moolabs-py`, `moolabs-go`, `moolabs-ts`) are auto-generated fro
 
 ## When to refresh this file
 
-- Moolabs adds `client.acute.*` namespace → update §"direct cost-event emission" + §"future SDK surface"
+- Unified Moolabs SDK adds a cost-event endpoint (e.g. `client.meter.cost.*`) → update §"direct cost-event emission" + §"future SDK surface"
 - SDK README at `github.com/moolabs-hq/moolabs-py` changes the namespace shape → update §"namespaces"
 
 For suite maintainers, the underlying SDK can be inspected via:

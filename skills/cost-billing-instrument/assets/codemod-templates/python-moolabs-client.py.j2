@@ -121,7 +121,29 @@ def emit_usage_event_safe(
     source: str = "{{ service_slug }}",
     correlation_id: str | None = None,
 ) -> None:
-    """Emit a single usage event with fail_open_silent_swallow semantics.
+    """Persist a usage event. Never drops the event — uses SDK when reachable,
+    structured log as recovery rail when not.
+
+    Dual transport (matches emit_cost_event_safe — both events follow the same
+    never-drop contract):
+
+      1. **Preferred — Moolabs SDK HTTP** (``client.meter.events.ingest_events``):
+         the normal path. Successful → done. Idempotency key in the payload
+         makes any re-ingestion safe.
+
+      2. **Recovery rail — structured log** (``moolabs.usage.event`` log line):
+         when the SDK call raises (network out, 5xx, secret-manager outage,
+         rate-limit, connection-pool exhaustion), the full event payload is
+         logged with all fields flattened. The customer's log pipeline
+         (CloudWatch / Datadog / Loki) retains it; recovery — auto-ingest by
+         meter, or manual replay — depends on platform support that is
+         tracked separately from this helper. The point is the data is
+         **preserved**, not lost.
+
+    The SDK-error-then-log path means usage events are auditable even when the
+    billing-side is unreachable. "No DLQ in v1" (PM Stage 3b) remains true —
+    this is not a DLQ; there's no retry queue, no delivery guarantee. It's an
+    auditable record that the event was generated.
 
     SDK errors MUST NOT propagate. Log + continue. The workflow continues
     regardless of billing-side reachability.
@@ -136,14 +158,34 @@ def emit_usage_event_safe(
         payload["data"]["moolabs.correlation.id"] = correlation_id
     try:
         get_client().meter.events.ingest_events([payload])
+        return
     except Exception as exc:
-        logger.warning(
-            "moolabs.emission.failed",
-            event_type=event_type,
-            subject=subject,
-            error=str(exc),
-            policy="fail_open_silent_swallow",
-        )
+        # Recovery rail: log the full event so it is auditable + replayable.
+        log_kwargs: dict[str, object] = {
+            "transport": "log_recovery_rail",
+            "policy": "never_drop_usage_event",
+            "event_type": event_type,
+            "subject": subject,
+            "source": source,
+            "sdk_error": str(exc),
+        }
+        if correlation_id is not None:
+            log_kwargs["correlation_id"] = correlation_id
+        for k, v in payload["data"].items():
+            log_kwargs[f"data.{k}"] = v
+        # Salvage trace context if there is one (correlation across the rails).
+        try:
+            from opentelemetry import trace as _trace
+
+            span = _trace.get_current_span()
+            if span is not None:
+                ctx = span.get_span_context()
+                if ctx is not None and ctx.is_valid:
+                    log_kwargs["trace_id"] = format(ctx.trace_id, "032x")
+                    log_kwargs["span_id"] = format(ctx.span_id, "016x")
+        except Exception:
+            pass
+        logger.warning("moolabs.usage.event", **log_kwargs)
 
 
 def emit_cost_event_safe(
@@ -157,10 +199,14 @@ def emit_cost_event_safe(
     """Persist a cost event. Never drops the event — uses OTel span when
     available, structured log as fallback.
 
-    Sibling-pair counterpart to emit_usage_event_safe(). Cost events do NOT
-    travel through the Moolabs SDK in v1 (the customer-facing ``client.acute.*``
-    namespace doesn't exist yet — see ``cost-billing-shared/sdk-surface-reference.md``).
-    Until it ships, cost events are persisted via TWO paths in priority order:
+    Sibling-pair counterpart to emit_usage_event_safe(). Both events ship
+    through the SAME unified Moolabs SDK eventually — there is no separate
+    "acute SDK". Today the SDK exposes ``client.meter.events.ingest_events()``
+    for usage events but does NOT yet expose a customer-facing cost-event
+    endpoint (final method path TBD by the platform team — likely
+    ``client.meter.cost.ingest_events()`` or similar on the same client).
+    Until that endpoint ships, cost events are persisted via TWO paths in
+    priority order:
 
       1. **Preferred — OTel span attribute** (when an active, recording span exists):
          attributes are set on the current span and ride the existing OTLP exporter
@@ -179,8 +225,10 @@ def emit_cost_event_safe(
     background workers without context propagation, dev/CI without OTel, code
     paths running before the TracerProvider is wired).
 
-    When ``client.acute.events.ingest_events()`` lands in the SDK, this helper's
-    fallback path swaps to direct SDK emission — call sites don't change.
+    When the unified SDK's cost-event endpoint ships, this helper's primary
+    transport swaps to that endpoint (same client instance, same
+    ``get_client()`` singleton); the structured-log path stays as the
+    recovery rail. Call sites do not change.
 
     Args:
         kind: Cost-event category. Example: ``"llm-tokens"``, ``"s3-put"``,
