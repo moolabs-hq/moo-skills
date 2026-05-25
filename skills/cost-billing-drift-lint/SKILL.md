@@ -157,7 +157,16 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - run: pip install moolabs-drift-lint
+      # ⚠️ moolabs-drift-lint is NOT on PyPI as of 2026-05-25 (returns 404).
+      # The tool is bundled with the cost-billing skill suite — customer installs it
+      # by cloning moo-skills and pointing at the local script. The package name
+      # `moolabs-drift-lint` is a placeholder for the post-GA published name.
+      # See cost-billing-shared/sdk-surface-reference.md §"Install" for the git-URL
+      # pattern customers use for similar Moolabs tools until publishing lands.
+      - run: |
+          # TODO(post-GA): replace with `pip install moolabs-drift-lint` once published.
+          git clone --depth 1 https://github.com/moolabs-hq/moo-skills.git /tmp/moo-skills
+          pip install /tmp/moo-skills/skills/cost-billing-drift-lint/scripts
       - run: moolabs-drift-lint --pr ${{ github.event.pull_request.number }} --format github-action
 ```
 

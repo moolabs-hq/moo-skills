@@ -20,44 +20,39 @@
 # latency profile. v1 default is Option B (blocking + documented).
 # ─────────────────────────────────────────────────────────────────────────────
 
-from opentelemetry import trace as _moolabs_trace
-{% if not is_brownfield %}from moolabs import Moolabs as _MoolabsClient
-_moolabs_client = _MoolabsClient(api_key=os.environ["MOOLABS_API_KEY"]){% endif %}
+# All SDK + OTel-span emission goes through the per-service helper.
+# NEVER instantiate Moolabs() inline here — see Phase 2 of cost-billing-instrument SKILL.md.
+from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe
 
-# Annotate the current span with moolabs.* cost attributes
-_moolabs_span = _moolabs_trace.get_current_span()
-if _moolabs_span and _moolabs_span.is_recording():
-    _moolabs_span.set_attribute("moolabs.workflow_id", "{{ entry.workflow_id }}")
-    _moolabs_span.set_attribute("moolabs.event_type", "{{ entry.event_type }}")
-    {% for cost_wf in entry.cost_workflow_ids %}
-    _moolabs_span.set_attribute("moolabs.cost.{{ loop.index }}.workflow_id", "{{ cost_wf }}")
-    {% endfor %}
-    {% if "request_id" in attribution_keys %}
-    _moolabs_span.set_attribute("moolabs.request.id", request.state.request_id)
-    {% endif %}
-    {% if "customer_id" in attribution_keys %}
-    _moolabs_span.set_attribute("moolabs.customer.id", str(customer_id))
-    {% endif %}
-    {% if "feature_id" in attribution_keys %}
-    _moolabs_span.set_attribute("moolabs.feature.id", "{{ entry.workflow_id.split('.')[1] }}")
-    {% endif %}
+# Cost-event side of the sibling pair: enrich the active OTel span.
+# emit_cost_event_safe handles fail-open + no-recording-span no-op internally.
+emit_cost_event_safe(
+    kind="{{ entry.cost_kind | default('unknown') }}",
+    {% if "tenant_id" in attribution_keys %}tenant_id=request.state.tenant_id,
+    {% endif %}{% if "consumer_agent" in attribution_keys %}consumer_agent={{ entry.consumer_agent_source | default("None") }},
+    {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
+    {% endif %}attributes={
+        "workflow_id": "{{ entry.workflow_id }}",
+        "event_type": "{{ entry.event_type }}",
+        {% for cost_wf in entry.cost_workflow_ids %}"upstream.{{ loop.index }}.workflow_id": "{{ cost_wf }}",
+        {% endfor %}{% if "request_id" in attribution_keys %}"request.id": request.state.request_id,
+        {% endif %}{% if "customer_id" in attribution_keys %}"customer.id": str(customer_id),
+        {% endif %}{% if "feature_id" in attribution_keys %}"feature.id": "{{ entry.workflow_id.split('.')[1] }}",
+        {% endif %}
+    },
+)
 
-# Idempotency key — derived per v1 heuristic
+# Usage event — sibling-pair primary emission.
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
-_moolabs_idempotency_key = f"{{ entry.idempotency_anchor.handler }}.{{ '{' }}{{ entry.idempotency_anchor.path_param }}{{ '}' }}.{int(time.time())}"
-
-# Emit the usage event — failure paths don't emit (see PR description)
-try:
-    _moolabs_client.meter.events.ingest_events([{
-        "id": _moolabs_idempotency_key,
-        "type": "{{ entry.event_type }}",
-        "subject": str({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "request.state.request_id" }}),
-        "time": datetime.utcnow().isoformat() + "Z",
-        "data": {
-            "quantity": {{ entry.refund_unit.derivation }},
-            "unit": "{{ entry.refund_unit.unit }}",
-        },
-    }])
+emit_usage_event_safe(
+    event_type="{{ entry.event_type }}",
+    subject=str({{ entry.idempotency_anchor.path_param if "customer_id" in attribution_keys else "request.state.request_id" }}),
+    data={
+        "quantity": {{ entry.refund_unit.derivation }},
+        "unit": "{{ entry.refund_unit.unit }}",
+    },
+    {% if "request_id" in attribution_keys %}correlation_id=request.state.request_id,{% endif %}
+)
 except Exception as _moolabs_err:
     # Log + continue — don't fail the user-facing handler on telemetry failure
     import logging as _moolabs_log

@@ -1,0 +1,126 @@
+{# TypeScript moolabs-client.ts — per-service helper, generated ONCE per service by /cost-billing-instrument.
+
+   Sibling of python-moolabs-client.py.j2. Same contract — one helper module owns
+   all SDK + OTel-span emission. Call-site templates import emit* — they never
+   instantiate Moolabs() inline.
+
+   Variables expected (from 04-final.signed.yaml):
+     service_slug, signoff_chain_hashes, sdk_key_location.*, sdk_key_read_pattern,
+     sdk_pinned_version, telemetry.mode
+#}
+/**
+ * Moolabs SDK client — module-level singleton for {{ service_slug }} billing emissions.
+ *
+ * Wired by /cost-billing-instrument codemod on {{ generated_at }} per the signed gates:
+{% for h in signoff_chain_hashes %} *   - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
+{% endfor %} *
+ * SDK version: {{ sdk_pinned_version | default("latest stable tag at codemod time") }}
+ *
+ * THIS IS THE ONLY MODULE THAT INSTANTIATES THE MOOLABS CLIENT.
+ * All emission call sites import emitUsageEventSafe / emitCostEventSafe from
+ * this module. Do NOT call `new Moolabs(...)` directly anywhere else.
+ */
+
+import { Moolabs } from 'moolabs';
+import { trace, type Attributes, type AttributeValue } from '@opentelemetry/api';
+{% if sdk_key_location.strategy == "aws_secrets_manager" %}import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+{% elif sdk_key_location.strategy == "gcp_secret_manager" %}import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+{% elif sdk_key_location.strategy == "vault" %}import vault from 'node-vault';
+{% endif %}
+import { logger } from './logger'; // adapt to {{ service_slug }}'s existing logger import
+
+{% if telemetry.mode == "brownfield" %}
+// Brownfield directive: {{ service_slug }} already has a live TracerProvider.
+// Do NOT register a second provider — use `trace.getActiveSpan()` from
+// @opentelemetry/api directly.
+{% endif %}
+
+let _cachedApiKey: string | null = null;
+let _cachedClient: Moolabs | null = null;
+
+async function resolveApiKey(): Promise<string> {
+  if (_cachedApiKey !== null) return _cachedApiKey;
+  const env = process.env.APP_ENV ?? 'prod';
+{% if sdk_key_location.strategy == "aws_secrets_manager" %}
+  const secretId = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
+  try {
+    const sm = new SecretsManagerClient({ region: '{{ sdk_key_location.region | default("us-east-1") }}' });
+    const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
+    _cachedApiKey = resp.SecretString ?? '';
+    return _cachedApiKey;
+  } catch (exc) {
+    logger.error({ secretId, error: String(exc), policy: 'fail_open_silent_swallow' },
+                 'moolabs.sdk_key.resolution_failed');
+    _cachedApiKey = '';
+    return '';
+  }
+{% elif sdk_key_location.strategy == "env_var" %}
+  _cachedApiKey = process.env.MOOLABS_API_KEY ?? '';
+  return _cachedApiKey;
+{% elif sdk_key_location.strategy == "custom" %}
+  try {
+    {{ sdk_key_read_pattern | indent(4) }}
+  } catch (exc) {
+    logger.error({ error: String(exc), policy: 'fail_open_silent_swallow' },
+                 'moolabs.sdk_key.resolution_failed');
+    _cachedApiKey = '';
+    return '';
+  }
+{% endif %}
+}
+
+async function getClient(): Promise<Moolabs> {
+  if (_cachedClient !== null) return _cachedClient;
+  _cachedClient = new Moolabs({ apiKey: await resolveApiKey() });
+  return _cachedClient;
+}
+
+export interface EmitUsageEventOptions {
+  eventType: string;
+  subject: string;
+  data: Record<string, unknown>;
+  source?: string;
+  correlationId?: string;
+}
+
+export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<void> {
+  const payload = {
+    type: opts.eventType,
+    subject: opts.subject,
+    source: opts.source ?? '{{ service_slug }}',
+    data: { ...opts.data, ...(opts.correlationId ? { 'moolabs.correlation.id': opts.correlationId } : {}) },
+  };
+  try {
+    const client = await getClient();
+    await client.meter.events.ingestEvents([payload]);
+  } catch (exc) {
+    logger.warn({ eventType: opts.eventType, subject: opts.subject, error: String(exc),
+                  policy: 'fail_open_silent_swallow' }, 'moolabs.emission.failed');
+  }
+}
+
+export interface EmitCostEventOptions {
+  kind: string;
+  tenantId?: string;
+  consumerAgent?: string;
+  costMicros?: number;
+  attributes?: Record<string, AttributeValue>;
+}
+
+export function emitCostEventSafe(opts: EmitCostEventOptions): void {
+  try {
+    const span = trace.getActiveSpan();
+    if (!span || !span.isRecording()) return;
+
+    span.setAttribute('moolabs.cost.kind', opts.kind);
+    if (opts.tenantId !== undefined) span.setAttribute('moolabs.tenant.id', String(opts.tenantId));
+    if (opts.consumerAgent !== undefined) span.setAttribute('moolabs.cost.consumer_agent', opts.consumerAgent);
+    if (opts.costMicros !== undefined) span.setAttribute('moolabs.cost.micros', Math.trunc(opts.costMicros));
+    for (const [k, v] of Object.entries(opts.attributes ?? {})) {
+      span.setAttribute(`moolabs.cost.${k}`, v);
+    }
+  } catch (exc) {
+    logger.warn({ kind: opts.kind, error: String(exc), policy: 'fail_open_silent_swallow' },
+                'moolabs.cost_emission.failed');
+  }
+}

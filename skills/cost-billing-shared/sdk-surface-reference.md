@@ -16,11 +16,19 @@ This is the **single source of truth** for what the customer-facing Moolabs SDK 
 
 **Install via GitHub directly.** The default install — what the codemod's pre-merge note recommends and what `cost-billing-bootstrap-team-engineer` Q16 defaults to — resolves the latest GitHub release tag dynamically:
 
+### Tag-selection contract (CRITICAL)
+
+The default "latest tag" pipeline MUST filter to **stable releases only**. `sort -V | tail -1` alone is buggy — `sort -V` places `v1.0.0-rc1` AFTER `v1.0.0`, so the naïve pipeline would pick the release candidate over the stable release. Every install command below uses a strict `vX.Y.Z` regex (anchored with `$`) to reject any prerelease suffix (`-rc1`, `-beta`, `-alpha`, etc.). Customers wanting prereleases use Q16 strategy `pinned` instead.
+
 ### Python
 
 ```bash
 LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-py.git \
-  | grep -v '\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)
+  | grep -v '\^{}' \
+  | awk -F'refs/tags/' '{print $2}' \
+  | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+  | sort -V | tail -1)
+[ -n "$LATEST" ] || { echo "no stable tag found"; exit 1; }
 pip install -U "git+https://github.com/moolabs-hq/moolabs-py.git@$LATEST"
 ```
 
@@ -30,28 +38,51 @@ Import: `from moolabs import Moolabs` (verified against local moolabs-py).
 
 ```bash
 LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-ts.git \
-  | grep -v '\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)
+  | grep -v '\^{}' \
+  | awk -F'refs/tags/' '{print $2}' \
+  | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+  | sort -V | tail -1)
+[ -n "$LATEST" ] || { echo "no stable tag found"; exit 1; }
 npm install -E "moolabs-hq/moolabs-ts#$LATEST"
 ```
 
 Import: `import { Moolabs } from 'moolabs';` (the npm `github:org/repo#tag` syntax installs the package under whatever name its `package.json > name` declares — typically `moolabs`).
 
-### Go
+### Go (⚠️ requires workaround until upstream go.mod is fixed)
 
-```bash
-go get -u github.com/moolabs-hq/moolabs-go@latest
+The `moolabs-go` repo's `go.mod` currently declares module path `github.com/moolabs/moolabs-go` but the repo lives at `github.com/moolabs-hq/moolabs-go`. A bare `go get github.com/moolabs-hq/moolabs-go@latest` **fails today** with:
+
+```
+go: github.com/moolabs-hq/moolabs-go@vX.Y.Z: parsing go.mod:
+        module declares its path as: github.com/moolabs/moolabs-go
+                but was required as: github.com/moolabs-hq/moolabs-go
 ```
 
-Go's `@latest` natively resolves to the highest semver tag.
-
-**⚠️ Known upstream issue (2026-05-25):** the `moolabs-go` repo's `go.mod` currently declares module path `github.com/moolabs/moolabs-go`, but the repo lives at `github.com/moolabs-hq/moolabs-go`. `go get` against the actual repo URL may fail until upstream fixes go.mod. Workaround: customers can add a `replace` directive in their go.mod:
+**Canonical workaround** (the codemod emits this verbatim in its PR pre-merge note when Go is in the touched languages):
 
 ```go
 // go.mod
-replace github.com/moolabs/moolabs-go => github.com/moolabs-hq/moolabs-go latest
+require github.com/moolabs/moolabs-go vX.Y.Z   // use the latest stable tag
+
+replace github.com/moolabs/moolabs-go => github.com/moolabs-hq/moolabs-go vX.Y.Z
 ```
 
-Track upstream fix at: https://github.com/moolabs-hq/moolabs-go/blob/main/go.mod
+```bash
+# 1. Resolve latest stable tag (same filter discipline as Python/TS)
+LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-go.git \
+  | grep -v '\^{}' \
+  | awk -F'refs/tags/' '{print $2}' \
+  | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+  | sort -V | tail -1)
+[ -n "$LATEST" ] || { echo "no stable tag found"; exit 1; }
+
+# 2. Add the require + replace lines to go.mod, then:
+go mod tidy
+```
+
+Import (after replace directive): `import "github.com/moolabs/moolabs-go"` — note the customer's import path matches the (wrong) module path, not the repo URL.
+
+Track upstream fix at: https://github.com/moolabs-hq/moolabs-go/blob/main/go.mod — once the module path matches the repo path, the codemod will switch back to the simple `go get github.com/moolabs-hq/moolabs-go@latest` form transparently.
 
 ### Overrides
 

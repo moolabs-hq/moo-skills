@@ -1,0 +1,202 @@
+{# Python moolabs_client.py — per-service helper, generated ONCE per service by /cost-billing-instrument.
+
+   This is the abstraction layer between the customer's code and the Moolabs SDK.
+   Every instrument-templates emission MUST go through emit_usage_event_safe() or
+   emit_cost_event_safe() — NEVER instantiate Moolabs() inline at the call site.
+
+   Variables expected (from 04-final.signed.yaml):
+     service_slug                — e.g. "moo-arc"
+     signoff_chain_hashes        — list of {stage, file, sha256} entries
+     sdk_key_location.strategy   — aws_secrets_manager | gcp_secret_manager | vault | onepassword | env_var | custom
+     sdk_key_location.region     — for AWS (e.g. "us-east-1")
+     sdk_key_location.secret_id_template — e.g. "{env}/moolabs/sdk-api-key"
+     sdk_key_read_pattern        — verbatim code snippet (when strategy=custom)
+     sdk_pinned_version          — from Q16; rendered in docstring header
+     telemetry.mode              — brownfield | greenfield (brownfield = NEVER re-register TracerProvider)
+     telemetry.primary_tracer    — opentelemetry | datadog | sentry | ...
+#}
+"""Moolabs SDK client — module-level singleton for {{ service_slug }} billing emissions.
+
+Wired by /cost-billing-instrument codemod on {{ generated_at }} per the signed gates:
+{% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
+{% endfor %}
+SDK version: {{ sdk_pinned_version | default("latest stable tag at codemod time") }}
+
+THIS IS THE ONLY PLACE THAT INSTANTIATES THE MOOLABS CLIENT.
+All emission call sites import emit_usage_event_safe / emit_cost_event_safe from
+this module. Do NOT call ``Moolabs(api_key=...)`` directly anywhere else.
+"""
+
+import os
+from functools import lru_cache
+
+{% if sdk_key_location.strategy == "aws_secrets_manager" %}import boto3
+{% elif sdk_key_location.strategy == "gcp_secret_manager" %}from google.cloud import secretmanager
+{% elif sdk_key_location.strategy == "vault" %}import hvac
+{% elif sdk_key_location.strategy == "onepassword" %}import subprocess
+{% endif %}import structlog
+from moolabs import Moolabs
+
+logger = structlog.get_logger(__name__)
+
+{% if telemetry.mode == "brownfield" %}
+# Brownfield directive: {{ service_slug }} already has a live TracerProvider.
+# Do NOT register a second provider — get spans via
+# ``opentelemetry.trace.get_tracer(__name__)`` where needed.
+{% endif %}
+
+
+@lru_cache(maxsize=1)
+def _resolve_api_key() -> str:
+    """Resolve MOOLABS_API_KEY from {{ sdk_key_location.strategy }}.
+
+    Cached via lru_cache (singleton). If resolution fails, returns empty
+    string — emit_*_safe() catches the resulting SDK error and logs a
+    warning under ``moolabs.sdk_key.resolution_failed``. The workflow
+    continues per the fail_open_silent_swallow contract.
+    """
+    env = os.environ.get("APP_ENV", "prod")
+{% if sdk_key_location.strategy == "aws_secrets_manager" %}
+    secret_id = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
+    try:
+        client = boto3.client("secretsmanager", region_name="{{ sdk_key_location.region | default('us-east-1') }}")
+        response = client.get_secret_value(SecretId=secret_id)
+        return response["SecretString"]
+    except Exception as exc:
+        logger.error(
+            "moolabs.sdk_key.resolution_failed",
+            secret_id=secret_id,
+            error=str(exc),
+            policy="fail_open_silent_swallow",
+        )
+        return ""
+{% elif sdk_key_location.strategy == "gcp_secret_manager" %}
+    secret_id = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        response = client.access_secret_version(name=secret_id)
+        return response.payload.data.decode("utf-8")
+    except Exception as exc:
+        logger.error("moolabs.sdk_key.resolution_failed", secret_id=secret_id, error=str(exc),
+                     policy="fail_open_silent_swallow")
+        return ""
+{% elif sdk_key_location.strategy == "vault" %}
+    secret_path = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
+    try:
+        vault = hvac.Client()
+        response = vault.secrets.kv.v2.read_secret_version(path=secret_path)
+        return response["data"]["data"]["api_key"]
+    except Exception as exc:
+        logger.error("moolabs.sdk_key.resolution_failed", secret_path=secret_path, error=str(exc),
+                     policy="fail_open_silent_swallow")
+        return ""
+{% elif sdk_key_location.strategy == "env_var" %}
+    return os.environ.get("MOOLABS_API_KEY", "")
+{% elif sdk_key_location.strategy == "custom" %}
+    # Custom resolution captured at team-engineer bootstrap Q15
+    try:
+        {{ sdk_key_read_pattern | indent(8) }}
+    except Exception as exc:
+        logger.error("moolabs.sdk_key.resolution_failed", error=str(exc),
+                     policy="fail_open_silent_swallow")
+        return ""
+{% endif %}
+
+
+@lru_cache(maxsize=1)
+def get_client() -> Moolabs:
+    """Return the singleton Moolabs SDK client.
+
+    Idempotent + thread-safe via lru_cache. First call performs the secret
+    fetch; subsequent calls return the cached instance.
+    """
+    return Moolabs(api_key=_resolve_api_key())
+
+
+def emit_usage_event_safe(
+    event_type: str,
+    subject: str,
+    data: dict,
+    *,
+    source: str = "{{ service_slug }}",
+    correlation_id: str | None = None,
+) -> None:
+    """Emit a single usage event with fail_open_silent_swallow semantics.
+
+    SDK errors MUST NOT propagate. Log + continue. The workflow continues
+    regardless of billing-side reachability.
+    """
+    payload = {
+        "type": event_type,
+        "subject": subject,
+        "source": source,
+        "data": dict(data),
+    }
+    if correlation_id is not None:
+        payload["data"]["moolabs.correlation.id"] = correlation_id
+    try:
+        get_client().meter.events.ingest_events([payload])
+    except Exception as exc:
+        logger.warning(
+            "moolabs.emission.failed",
+            event_type=event_type,
+            subject=subject,
+            error=str(exc),
+            policy="fail_open_silent_swallow",
+        )
+
+
+def emit_cost_event_safe(
+    *,
+    kind: str,
+    tenant_id: str | None = None,
+    consumer_agent: str | None = None,
+    cost_micros: int | None = None,
+    attributes: dict[str, str | int | float | bool] | None = None,
+) -> None:
+    """Enrich the current OTel span with ``moolabs.cost.*`` attributes.
+
+    Sibling-pair counterpart to emit_usage_event_safe(). Cost events do NOT
+    travel through the Moolabs SDK — they ride the existing OpenTelemetry
+    TracerProvider and flow downstream to the acute cost-enricher via OTLP.
+
+    Args:
+        kind: Cost-event category. Example: ``"llm-tokens"``, ``"s3-put"``,
+            ``"netsuite-api-call"``. Written as ``moolabs.cost.kind``.
+        tenant_id: Tenant UUID for cross-cutting attribution. Written as
+            ``moolabs.tenant.id`` (global, NOT under ``cost.*``).
+        consumer_agent: Agent that incurred the cost. Written as
+            ``moolabs.cost.consumer_agent``.
+        cost_micros: Pre-resolved cost in micros from the upstream API
+            response (NEVER invent one from token counts). Written as
+            ``moolabs.cost.micros``.
+        attributes: Free-form additional attributes. Each key namespaced
+            under ``moolabs.cost.``.
+
+    Fail-open contract (mirrors emit_usage_event_safe):
+        - No recording span → no-op (sampler dropped / tracing disabled).
+        - Any exception during attribute write → log warning, return None.
+    """
+    try:
+        from opentelemetry import trace as _trace
+
+        span = _trace.get_current_span()
+        if span is None or not span.is_recording():
+            return
+
+        span.set_attribute("moolabs.cost.kind", kind)
+        if tenant_id is not None:
+            span.set_attribute("moolabs.tenant.id", str(tenant_id))
+        if consumer_agent is not None:
+            span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
+        if cost_micros is not None:
+            span.set_attribute("moolabs.cost.micros", int(cost_micros))
+        for k, v in (attributes or {}).items():
+            span.set_attribute(f"moolabs.cost.{k}", v)
+    except Exception as exc:
+        logger.warning(
+            "moolabs.cost_emission.failed",
+            kind=kind,
+            error=str(exc),
+            policy="fail_open_silent_swallow",
+        )

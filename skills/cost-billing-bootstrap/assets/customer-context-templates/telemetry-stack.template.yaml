@@ -37,8 +37,19 @@ trace_context_extraction_strategy: ""
 
 instrumentation_install_command: ""
 # In greenfield mode, the command the codemod will recommend in the PR description
-# (the codemod itself does NOT run it). Examples:
-#   "pip install moolabs opentelemetry-instrumentation-fastapi"
-#   "npm install moolabs @opentelemetry/api @opentelemetry/sdk-node"
+# (the codemod itself does NOT run it).
+#
+# ⚠️ The Moolabs SDK is NOT on PyPI / npm / Go module proxy as of 2026-05-25
+# (registry installs return 404). The authoritative install commands live in
+# 04-final.signed.yaml > integration.sdk_package_install (captured by
+# team-engineer bootstrap Q16) — codemod reads from there and falls back to
+# canonical git-URL commands in cost-billing-shared/sdk-surface-reference.md.
+#
+# This field is for the OPTIONAL OpenTelemetry sibling packages only (which ARE
+# on registries). Examples:
+#   "pip install opentelemetry-instrumentation-fastapi"
+#   "npm install @opentelemetry/api @opentelemetry/sdk-node"
+# Do NOT include 'moolabs' / 'moolabs-py' / 'moolabs-ts' / 'moolabs-go' here —
+# those are handled separately via the git-URL pipeline.
 
 notes: ""

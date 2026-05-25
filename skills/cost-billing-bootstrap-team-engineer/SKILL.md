@@ -156,10 +156,12 @@ You are LAST in the chain. Your output IS the consolidated `customer-context/` t
 >
 > Per language you use (skip languages you don't):
 >
-> **Default for all 3 (recommended):** install latest GitHub release tag directly:
-> - **Python:** `pip install -U "git+https://github.com/moolabs-hq/moolabs-py.git@$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-py.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1)"`
-> - **TypeScript:** `LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-ts.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | sort -V | tail -1) && npm install -E "moolabs-hq/moolabs-ts#$LATEST"`
-> - **Go:** `go get -u github.com/moolabs-hq/moolabs-go@latest` (Go's `@latest` natively resolves to highest semver tag)
+> **Default for all 3 (recommended):** install latest **stable** GitHub release tag directly:
+> - **Python:** `pip install -U "git+https://github.com/moolabs-hq/moolabs-py.git@$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-py.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | grep -E '^v?[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -V | tail -1)"`
+> - **TypeScript:** `LATEST=$(git ls-remote --tags https://github.com/moolabs-hq/moolabs-ts.git | grep -v '\\^{}' | awk -F'refs/tags/' '{print $2}' | grep -E '^v?[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -V | tail -1) && npm install -E "moolabs-hq/moolabs-ts#$LATEST"`
+> - **Go:** Requires `go.mod` workaround (upstream module-path mismatch — `moolabs-hq/moolabs-go`'s go.mod declares `github.com/moolabs/moolabs-go`). The codemod emits a `require` + `replace` block in the PR pre-merge note; see `cost-billing-shared/sdk-surface-reference.md` §"Go". Q16 will record `strategy: latest-tag` for Go; codemod handles the workaround.
+>
+> ⚠️ The `^v?[0-9]+\.[0-9]+\.[0-9]+$` regex filters to stable releases only — without it `sort -V` picks `v1.0.0-rc1` over `v1.0.0`. Customers wanting prereleases must use Q16 strategy `pinned`.
 >
 > **Overrides** if you have:
 > - **Pinned version:** give me `v1.2.3` per language and I'll pin it

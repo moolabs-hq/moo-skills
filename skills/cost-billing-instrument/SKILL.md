@@ -169,9 +169,40 @@ warnings:
 
 **Always show the plan to the user before proceeding.** If they say "go", continue to Phase 2.
 
-### Phase 2: Per-pattern insert (the actual codemod)
+### Phase 2: Generate the per-service `moolabs_client.py` helper (MANDATORY, ONCE per service)
 
-For each insert, pick the right adapter and pattern.
+**This MUST run before any call-site insert.** The codemod generates exactly ONE helper file per service that owns all SDK and OTel-span emission. Every call-site insert in Phase 2b imports from this helper — never instantiates `Moolabs(api_key=...)` inline.
+
+**Why this is mandatory** (lessons from the moo-arc dogfood, 2026-05-25):
+
+1. **One client per process, not one per call site.** Inline `Moolabs(api_key=...)` at every emission site creates N clients per request (one per emission), each with its own connection pool, each re-reading the secret from the secret store. The helper uses `@lru_cache(maxsize=1)` to make the client + key resolution true singletons.
+2. **Fail-open-silent-swallow is one contract, enforced once.** If every call site implements its own `try/except`, the contract drifts. The helper exposes `emit_usage_event_safe()` / `emit_cost_event_safe()` — every call site uses them, every error path is identical.
+3. **Secret resolution is per-customer.** AWS Secrets Manager / GCP Secret Manager / Vault / 1Password / env var — the helper template renders the right strategy from `04-final.signed.yaml > integration.sdk_key_location`. Call-site templates stay strategy-agnostic.
+4. **The signoff chain is auditable from inside the code.** The helper's docstring header lists the 5 signed-stage sha256 hashes (cfo/pm/cfo/engineer/pm) — when an engineer reads the file 6 months later, the provenance is `head -20 services/<svc>/.../moolabs_client.py`, not "go ask git blame".
+5. **Brownfield directive lives next to the code that would violate it.** If `telemetry.mode == brownfield`, the helper's top-of-file comment says "do NOT register a second TracerProvider" — the next person editing this file sees it.
+
+**Where to write the helper:**
+
+| Language | Path (relative to service root) |
+|---|---|
+| Python | `app/services/moolabs_client.py` (or `<package>/services/moolabs_client.py` matching service's existing module layout) |
+| TypeScript | `src/services/moolabs-client.ts` |
+| Go (v1.5) | `internal/moolabsclient/client.go` |
+
+**What goes in the helper (generated from `assets/codemod-templates/<lang>-moolabs-client.<ext>.j2`):**
+
+| Function | Purpose | Fail-open behavior |
+|---|---|---|
+| `_resolve_api_key()` | Read key from configured secret store; `lru_cache(maxsize=1)` singleton | Returns empty string on failure; logs `moolabs.sdk_key.resolution_failed` |
+| `get_client()` | Singleton `Moolabs(...)` instance; `lru_cache(maxsize=1)` | First-call lazy; never raises |
+| `emit_usage_event_safe(event_type, subject, data, ...)` | The ONLY surface for SDK emission. Per-call-site templates call this — they NEVER touch `client.meter.events.ingest_events()` directly | SDK errors logged + swallowed; workflow continues |
+| `emit_cost_event_safe(kind, tenant_id, cost_micros, attributes, ...)` | The ONLY surface for OTel-span cost-event enrichment. Sibling-pair of `emit_usage_event_safe` | No-recording-span → no-op; attribute-write exceptions logged + swallowed |
+
+**Codemod commit:** First commit on the branch is `feat(moolabs): generate per-service emission helper`. Reviewable in isolation before any business-logic file changes.
+
+### Phase 2b: Per-pattern insert (the actual codemod)
+
+For each insert, pick the right adapter and pattern. Every emission MUST go through the Phase 2 helper — `from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe`. No `Moolabs(api_key=...)` lines outside the helper file.
 
 **Pattern selection (deterministic, from `output-input-map.yaml`):**
 
@@ -225,7 +256,9 @@ Run `scripts/pr_writer.py`. Output per chunk:
 - A PR description with:
   - Summary: N inserts, M files, K cost-only TODOs, latency profile per insert (cite `sdk-surface-reference.md` ~35ms).
   - **Pre-merge checklist:**
-    - SDK install commands — codemod reads `04-final.signed.yaml > integration.sdk_package_install` for the EXACT commands per language (default: latest GitHub release tag dynamically resolved via `git ls-remote --tags`). Codemod does NOT run these (per `v1-decisions-log.md`). **SDKs are NOT on public registries — never emit `pip install moolabs` / `npm install moolabs` / `go get moolabs.com/sdk` (all 404 as of 2026-05-25).** See `cost-billing-shared/sdk-surface-reference.md` §"Install" for the canonical commands. Codemod falls back to the canonical commands if customer-context lacks `sdk_package_install` (warns prominently in the PR description that the customer should run team-engineer bootstrap Q16 to lock the install path).
+    - SDK install commands — codemod reads `04-final.signed.yaml > integration.sdk_package_install` for the EXACT commands per language (default: latest **stable** GitHub release tag, filtered via `grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$'` to exclude `-rc*`/`-beta*`/`-alpha*` prereleases that `sort -V` otherwise sorts AFTER stable). Codemod does NOT run these (per `v1-decisions-log.md`). **SDKs are NOT on public registries — never emit `pip install moolabs` / `npm install moolabs` / `go get moolabs.com/sdk` (all 404 as of 2026-05-25).** See `cost-billing-shared/sdk-surface-reference.md` §"Install" for the canonical commands. Codemod falls back to the canonical commands if customer-context lacks `sdk_package_install` (warns prominently in the PR description that the customer should run team-engineer bootstrap Q16 to lock the install path).
+    - **Go-specific (until upstream go.mod is fixed):** When `repo.languages[]` includes `go`, the codemod MUST emit the `require` + `replace` directives from `cost-billing-shared/sdk-surface-reference.md` §"Go" **verbatim in the PR pre-merge note** — bare `go get github.com/moolabs-hq/moolabs-go@latest` fails today with "module declares its path as: github.com/moolabs/moolabs-go". Customer's import statements use `github.com/moolabs/moolabs-go` (the module path) NOT the repo path. Codemod templates for Go must use this import path.
+    - **Pipeline prerequisites (accepted v1 risk):** The default install pipeline assumes `git`, `awk`, `grep`, `sort` are on the customer's PATH. Minimal containers (Alpine without `apk add git`, distroless) will fail — customer-context's Q16 lets the customer override with `strategy: custom` + a verbatim command for their environment. PR pre-merge note documents this dependency.
     - Run `pytest` (or equivalent) — codemod does NOT run this.
     - Verify three-role signoff files still present + unchanged since codemod ran.
   - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod chose Option B (blocking + documented) per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."

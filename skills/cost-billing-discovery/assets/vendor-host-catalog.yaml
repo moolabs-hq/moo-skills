@@ -1,0 +1,118 @@
+# vendor-host-catalog.yaml — hostname-to-vendor mapping for raw-HTTP cost-event detection.
+#
+# Used by Phase 3 step 4 of /cost-billing-discovery to catch vendors called via raw
+# httpx.Client / requests / aiohttp / fetch, where AST class-based matching fails.
+#
+# Added 2026-05-25 after the moo-arc dogfood missed NetSuite — moo-arc's
+# integrations/netsuite_client.py uses httpx.post to *.suitetalk.api.netsuite.com,
+# which is a real per-API-call billable surface. Pure AST scan saw `self._http.post(...)`
+# with no recognizable SDK class and silently skipped it.
+#
+# Schema:
+#   <vendor-id>:
+#     hosts: [list of host patterns, supporting * prefix wildcard]
+#     billing_model: per_api_call | per_message | per_token | per_email | per_seat | subscription
+#     cost_dimension: e.g. api_call | message_sent | token | seat_seconds
+#     v0_1_catalog_status: IN | PARTIAL | NOT_IN
+#     paid_saas: true | false
+#     notes: brief context for the team-product review
+
+netsuite:
+  hosts:
+    - "*.suitetalk.api.netsuite.com"
+    - "rest.netsuite.com"
+    - "*.netsuite.com"
+  billing_model: per_api_call
+  cost_dimension: api_call_governance_points
+  v0_1_catalog_status: NOT_IN
+  paid_saas: true
+  notes: |
+    NetSuite charges based on SuiteTalk governance points (per-API-call quota tied to
+    license tier). Concurrent connections also gated. Surface as cell ④ for the
+    team-product review — moo-arc dogfood gap, 2026-05-25.
+
+salesforce:
+  hosts:
+    - "api.salesforce.com"
+    - "*.my.salesforce.com"
+    - "*.salesforce.com"
+  billing_model: per_api_call
+  cost_dimension: api_call
+  v0_1_catalog_status: NOT_IN
+  paid_saas: true
+  notes: "Daily API call limit by edition (Enterprise: 1k+15/license)."
+
+hubspot:
+  hosts:
+    - "api.hubapi.com"
+  billing_model: per_api_call
+  cost_dimension: api_call
+  v0_1_catalog_status: NOT_IN
+  paid_saas: true
+
+twilio:
+  hosts:
+    - "api.twilio.com"
+    - "messaging.twilio.com"
+  billing_model: per_message
+  cost_dimension: sms_segment | voice_minute
+  v0_1_catalog_status: PARTIAL
+  paid_saas: true
+
+stripe:
+  hosts:
+    - "api.stripe.com"
+  billing_model: per_api_call
+  cost_dimension: api_call
+  v0_1_catalog_status: IN
+  paid_saas: true
+  notes: "Already in v0.1 SDK catalog; raw-HTTP path is rare but possible."
+
+sendgrid:
+  hosts:
+    - "api.sendgrid.com"
+  billing_model: per_email
+  cost_dimension: email_sent
+  v0_1_catalog_status: PARTIAL
+  paid_saas: true
+  notes: "Already detected via SDK; raw-httpx path also exists (see moo-arc inventory)."
+
+resend:
+  hosts:
+    - "api.resend.com"
+  billing_model: per_email
+  cost_dimension: email_sent
+  v0_1_catalog_status: PARTIAL
+  paid_saas: true
+
+openai:
+  hosts:
+    - "api.openai.com"
+    - "*.openai.azure.com"
+  billing_model: per_token
+  cost_dimension: token
+  v0_1_catalog_status: IN
+  paid_saas: true
+  notes: "SDK-only is most common; raw-HTTP detection is the bypass path."
+
+anthropic:
+  hosts:
+    - "api.anthropic.com"
+  billing_model: per_token
+  cost_dimension: token
+  v0_1_catalog_status: IN
+  paid_saas: true
+
+deepinfra:
+  hosts:
+    - "api.deepinfra.com"
+  billing_model: per_token
+  cost_dimension: token
+  v0_1_catalog_status: NOT_IN
+  paid_saas: true
+  notes: "moo-arc uses this via LLMPort abstraction; raw-HTTP path possible at other customers."
+
+# Add new vendors here. Keep entries alphabetical within billing-model groups.
+# When a customer-specific paid SaaS isn't here, surface as
+# cell ④ with vendor_host: <host>, billing_model: unknown — let the team-product
+# review classify it.
