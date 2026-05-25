@@ -132,7 +132,13 @@ client.notifications  # channels + rules + alerts           → NotificationsApi
 | Usage | `client.usage` | `ingest_events([...])` | ✓ |
 | Cost  | `client.cost`  | `ingest_events_batch([...])`, `ingest_event(...)`, `ingest_sdk_spans(...)`, `submit_adjustment(...)` | ✓ |
 
-Routing is internal (`api.moolabs.com`, `meter.moolabs.com`, `acute.moolabs.com` per capability). The SDK derives subdomains from `base_url`; the codemod does NOT wire base URLs per call.
+**The SDK handles ALL URL routing internally.** Customer code constructs `Moolabs(api_key=...)` — nothing else. The SDK:
+
+- Defaults to apex `moolabs.com` (production).
+- Derives `api.{apex}` / `meter.{apex}` / `arc.{apex}` for the capability backends.
+- Looks up regional ingest URLs via `/tenant/config` on first ingest call, caches for process lifetime, falls back to a region-map + `meter.{apex}` chain on failure.
+
+**The codemod does NOT prompt the customer for any URL.** No `base_url`. No `meter_base_url`. No region selection. If a customer needs a non-default apex (dev, staging, self-hosted), they set whatever env var the SDK itself respects and patch the generated `moolabs_client.py` helper post-codemod. We don't capture URL overrides in `04-final.signed.yaml` — that would be a footgun (see §"Known upstream SDK issues" below for what happens when customers pass per-service URLs as `base_url`).
 
 ---
 
@@ -183,9 +189,23 @@ The decision to swap to background-wrap is per-customer, not per-codemod. See `r
 
 ## Authentication and routing
 
-- One API key authenticates both namespaces (per README).
+- One API key authenticates all capability namespaces (per README).
 - API keys are region-encoded (`sk_use1_*`, `sk_apse1_*`) — the SDK routes regionally on its own. The codemod does NOT prompt for region.
-- Base URL override for staging/private deploys is supported (`cls_base_url`, `meter_base_url`). Skill A's discovery surface should ask "is this production?" and if no, surface the base-URL override pattern.
+- The SDK handles URL routing internally (see top of this section). The codemod's helper template constructs `Moolabs(api_key=...)` — NOTHING ELSE. No `base_url`, no per-service URLs, no region. Customers needing non-default routing (dev / staging / self-hosted) configure it via whatever env var the SDK natively respects, or patch the generated helper post-codemod. **The codemod does not capture URLs in customer-context.**
+
+---
+
+## Known upstream SDK issues (open as of 2026-05-25)
+
+These are pre-existing SDK / platform-infra bugs surfaced during a moo-arc end-to-end probe. The codemod does NOT cause them; the codemod ALSO can't fix them (they're upstream). Documented here so customers running on dev / encountering them recognize the cause.
+
+| Issue | Symptom | Why it happens | Workaround |
+|---|---|---|---|
+| **`base_url` mis-use → DNS mangling** | Customer passes `base_url="https://meter.dev.moolabs.com"` (the meter service URL from their .env). SDK then derives `ingest.us.meter.dev.moolabs.com` (extra `meter.` segment), DNS NXDOMAIN. | SDK expects `base_url` to be the APEX hostname (e.g. `dev.moolabs.com`), not a service-specific URL. Customer's .env exposes per-service URLs (`METER_BASE_URL=...`) which look like reasonable defaults but break the apex assumption. | Pass apex only OR don't pass `base_url` at all (use SDK default). The codemod NEVER passes `base_url` — this is documented here so customers don't add it themselves. |
+| **URL path doubling** | Final ingest URL ends `/api/v1/events/api/v1/events` (path repeated). | The internal resolver returns `/api/v1/events`, then `EventsApi` re-prefixes it. | Upstream SDK fix needed — track at moolabs-hq/moolabs-py. Not codemod's surface. |
+| **Dev DNS topology mismatch** | SDK's ingest resolver expects `ingest.<region>.<apex>` subdomain. Dev only exposes `meter.dev.moolabs.com`. | Platform-infra hasn't deployed the regional ingest topology to dev. | Production environments don't hit this. Dev customers should test in buffer mode (`Moolabs(api_key, buffer=True)`) which returns `{'buffered': True}` instead of attempting the live POST. |
+
+If a customer reports an ingest failure during PR review, check these first before debugging the codemod's emitted code.
 
 ---
 
