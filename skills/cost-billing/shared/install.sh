@@ -1417,7 +1417,7 @@ for skill in "${SUITE_SKILLS[@]}"; do
 done
 echo ""
 echo "Shared docs (read-only, not slash-invocable):"
-echo "  cost-billing-shared/SUITE_README.md"
+echo "  cost-billing/README.md"
 echo "  cost-billing-shared/anchor-taxonomy.md"
 echo "  cost-billing-shared/sdk-surface-reference.md"
 echo "  cost-billing-shared/v1-decisions-log.md"
