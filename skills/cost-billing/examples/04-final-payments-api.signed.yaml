@@ -1,0 +1,59 @@
+# Stage 4 output — per-service engineer signed (one file per service).
+# Schema: cost-billing/bootstrap-team-engineer/assets/04-final.schema.yaml.
+
+stage: team-engineer
+chain_position: 4
+service_slug: payments-api
+generated_at: "2026-05-26T13:00:00Z"
+
+input_chain:
+  - stage: finance
+    file: "01-finance.signed.yaml"
+    sha256: "abc123..."
+  - stage: cpo
+    file: "02-cpo.signed.yaml"
+    sha256: "def456..."
+  - stage: team-product
+    file: "03-team-product-checkout.signed.yaml"
+    sha256: "789abc..."
+    product_slug: checkout
+
+adversarial_review:
+  phase: post-bootstrap-team-engineer-payments-api
+  verdict: clean
+
+signoff:
+  signed_by_role: team-engineer
+  signed_by_name: "Sam (Payments-API IC)"
+  signed_at: "2026-05-26T13:30:00Z"
+  service_slug: payments-api
+
+repo:
+  primary_path: "services/payments-api"
+  multi_repo_shape: monorepo
+  languages: [python]
+  frameworks: [fastapi]
+  build_command: "uv pip install -e ."
+  test_command: "pytest"
+
+telemetry:
+  primary_tracer: opentelemetry
+  mode: brownfield
+  request_context_propagation: "Already wired via fastapi-instrumentation; OM-Namespace middleware sets request.state.tenant_id"
+
+mcp:
+  agent_surface: claude-code
+  active_llm: { provider: anthropic, model: claude-opus-4-7 }
+  recommended_reviewer_model: { provider: anthropic, model: claude-sonnet-4-6 }
+
+integration:
+  sdk_key_location:
+    strategy: aws_secrets_manager
+    region: us-east-1
+    secret_id_template: "{env}/moolabs/sdk-api-key"
+  sdk_key_read_pattern: |
+    boto3.client("secretsmanager", region_name="us-east-1") \
+        .get_secret_value(SecretId="prod/moolabs/sdk-api-key")["SecretString"]
+  sdk_package_install:
+    python:
+      strategy: latest-tag

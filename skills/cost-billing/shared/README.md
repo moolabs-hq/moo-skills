@@ -1,69 +1,39 @@
-# cost-billing-shared — Shared assets for the Cost+Billing Discovery & Instrumentation Suite
+# `shared/` — library, not a slash-invocable skill
 
-This directory holds material that **all six skills** in the suite depend on. It is not invoked directly. Each SKILL.md links here.
+This directory is **not a skill**. It has no `SKILL.md`, no slash command, and
+nothing happens if you type `/cost-billing-shared`. Despite that, `install.sh`
+copies it to `~/.claude/skills/cost-billing-shared/` so the other 10 skills can
+reach it via consistent post-install paths.
 
-## The Suite
+## What lives here
 
-Six sibling skills implement the customer-facing portion of the framework from `docs/grooming/2026-05-19-cost-billing-discovery-requirements.md`. Each is independently invocable; together they form the customer integration pipeline.
+| File | Used by |
+|---|---|
+| `install.sh` | The actual install workhorse (suite-root `install.sh` is a thin wrapper that delegates here). |
+| `operating-principles.md` | Hard rules every skill in the suite follows (NEVER assume, ASK if in doubt, ONE question at a time, save state). Referenced by every SKILL.md. |
+| `chain-handoff.md` | The 4-silo bootstrap workflow + multi-product / multi-service fan-out diagram. Referenced by every `bootstrap-*` skill. |
+| `three-role-review.md` | The CFO ⇄ PM ⇄ Engineer review cycle the `signoff` orchestrator implements. |
+| `sdk-surface-reference.md` | Human-readable summary of the Moolabs SDK shape. The Phase 1.5 snapshot (`instrument/scripts/sdk_snapshot.py`) is the runtime source of truth; this doc is the hint for human reviewers. Also documents known upstream SDK issues. |
+| `v1-decisions-log.md` | Audit trail of v1 default decisions, each with rationale + "revisit at" trigger. |
+| `gaps-tracker.md` | Open gaps from the requirements doc + status of each. |
+| `anchor-taxonomy.md` | Vocabulary — cost vs usage event, refund test, attribution keys, cells ③/④, etc. |
+| `desktop-app-guide.md` | How to use the .zip outputs of `install.sh --package` with Claude Desktop. |
+| `assets/mcp-catalog.json` | Catalog of MCPs `install.sh --mcp <name>` knows how to configure. |
 
-| Order | Skill | Purpose |
-|-------|-------|---------|
-| 0 | `/cost-billing-bootstrap` | Customer-context generator (run first). LLM-driven setup. |
-| 1 | `/cost-billing-discovery` | Skill A — scan customer repo, produce three inventories (cost / usage / output↔input). |
-| 2 | `/cost-billing-cloud-bill` | Skill B — wire AWS CUR / GCP BigQuery export / Azure Cost Management; surface cell ③ findings. |
-| 3 | `/cost-billing-instrument` | Skill 2 — codemod that wires SDK calls (cost + usage) into customer code. **Framework's core deliverable.** |
-| 4 | `/cost-billing-drift-lint` | Skill 3 — CI step that diffs code against saved inventories on every PR. |
-| 5 | `/cost-billing-adversarial-review` | Skill R — 5-phase adversarial review gate; runs at every workflow handoff. |
+## Why it lives in `skills/` despite not being a skill
 
-> Skill C (attribution-engine reconciliation harness, WAPE/Coverage validation) is **engineering-internal Moolabs infrastructure** and is not part of this customer-portable suite. Tracked separately.
+The Claude Code platform doesn't have a first-class concept of "shared library
+within a skill suite." If `shared/` lived outside `skills/`, the other skills'
+references to `cost-billing-shared/X.md` would break after install (the files
+wouldn't exist at the expected post-install path). Putting `shared/` inside
+`skills/` and installing it alongside the others as `cost-billing-shared/`
+makes cross-references stable.
 
-## Pipeline order
+The platform will list `cost-billing-shared` in its skill list. That's
+cosmetic — there's no slash command, so it can't be invoked. We accept that
+trade-off rather than fragment the suite across multiple directories.
 
-```mermaid
-flowchart TD
-    D[discovery: 1A→1B→1C→1D inventories]
-    BOOT[/cost-billing-bootstrap: customer-context/]
-    CFO[CFO Stage 1]
-    PM[PM Stage 2]
-    CFOPM[CFO ⇄ PM Stage 2b]
-    ENG[Engineer Stage 3]
-    ENGPM[Engineer ⇄ PM Stage 3b]
-    RH[Skill R: holistic-pre-codemod]
-    CODEMOD[/cost-billing-instrument: codemod/]
-    DRIFT[drift-lint CI]
-    CLOUD[cloud-bill]
-    RECON[reconcile<br/>Moolabs-internal]
+## See also
 
-    BOOT --> D --> CFO --> PM
-    PM <--> CFOPM
-    CFOPM --> ENG
-    ENG <--> ENGPM
-    ENGPM --> RH --> CODEMOD --> DRIFT
-    CLOUD -.-> RECON
-
-    style CODEMOD fill:#222,stroke:#000,color:#fff
-    style RH fill:#ffe0e0,stroke:#a32c2c,color:#000
-    style CFO fill:#fff7e0,stroke:#b58900,color:#000
-    style PM fill:#e7e9ff,stroke:#2c39a3,color:#000
-    style ENG fill:#e0f5e7,stroke:#1d7a3d,color:#000
-    style RECON fill:#eee,stroke:#666,color:#000
-```
-
-Skill R adversarial-review fires at every stage handoff (post-discovery, post-cfo-stage1, post-pm-stage2, post-engineer-stage3, holistic-pre-codemod, post-codemod) — see `gaps-tracker.md` §6.3 for the v1 decision on whether R also runs on B and C.
-
-## Read these before invoking any skill
-
-| File | What it gives you |
-|------|-------------------|
-| `anchor-taxonomy.md` | Load-bearing vocabulary — every downstream skill agrees on these terms. |
-| `v1-decisions-log.md` | The 11 §10 decisions resolved for v1. **Mark these revisited at HLD.** |
-| `sdk-surface-reference.md` | Verified-against-code SDK call shapes — `client.usage.ingest_events`, `client.cost.ingest_events_batch`, namespace inconsistencies. |
-| `three-role-review.md` | CFO / PM / engineer projection model the review surface emits. |
-| `gaps-tracker.md` | The §6 open questions — what's still ambiguous, with v1 status. |
-
-## Source of truth
-
-- Requirements: `docs/grooming/2026-05-19-cost-billing-discovery-requirements.md`
-- Source docs (gated): Doc 1 `JRsb8oZxxd`, Doc 2 `uFNMOWABYB`, Doc 3 `3ef884d4` on docs.moolabs.com
-- Reference SDKs: `github.com/moolabs-hq/moolabs-{py,go,ts}`, local at `../moolabs-py/`
-- Reference services: `../moolabs/services/{moo-acute,moo-meter}` and `../moolabs/sdks/generator/`
+For the full architecture and "how the 10 skills fit together", see the
+suite-root `../README.md`.

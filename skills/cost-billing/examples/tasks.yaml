@@ -1,0 +1,75 @@
+# Output of /cost-billing-instrument Phase 2c (task_planner.py) — one task per
+# file. Each task is self-contained: carries only the inventory slice +
+# attribution sources + snapshot capabilities relevant to its inserts.
+
+generated_at: "2026-05-26T15:15:00Z"
+total_tasks: 3
+total_inserts: 5
+
+tasks:
+  - task_id: tsk_001_a1b2c3d4
+    file: services/payments-api/app/agents/recommender.py
+    service_slug: payments-api
+    framework: fastapi
+    language: python
+    template: assets/codemod-templates/python-fastapi.j2
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    snapshot_capabilities:
+      cost_event_direct_emit: true
+      cost_event_method_path: "client.cost.ingest_events_batch"
+      usage_event_emit: true
+    inserts:
+      - line: 142
+        pattern: sibling-pair
+        attribution_keys: [tenant_id, request_id, customer_id]
+        attribution_sources:
+          tenant_id: "request.state.tenant_id"
+          request_id: "request.state.request_id"
+          customer_id: "request.state.customer_id"
+          consumer_agent: null
+        entry:
+          workflow_id: "checkout.recommendation.delivered"
+          event_type: "checkout.recommendation.delivered"
+          cost_kind: "llm-tokens"
+          cost_micros_source: "response.cost_micros"
+          cost_workflow_ids: [shared.llm.call]
+          idempotency_anchor:
+            handler: recommend_products
+            path_param: customer_id
+            confidence: 0.95
+          refund_unit:
+            unit: per_completion
+            derivation: "1"
+    audit:
+      cost_inventory_sha: "abc12345"
+      output_input_map_sha: "def67890"
+      snapshot_sha: "111aaa22"
+
+  - task_id: tsk_002_e5f6g7h8
+    file: services/payments-api/app/api/v1/webhooks/router.py
+    service_slug: payments-api
+    framework: fastapi
+    language: python
+    template: assets/codemod-templates/python-fastapi.j2
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    snapshot_capabilities:
+      cost_event_direct_emit: true
+      cost_event_method_path: "client.cost.ingest_events_batch"
+      usage_event_emit: true
+    inserts:
+      - line: 67
+        pattern: cost-only
+        attribution_keys: [tenant_id, request_id]
+        attribution_sources:
+          # Per-file override — webhook handler bypasses TenantMiddleware.
+          tenant_id: 'request.headers.get("x-tenant-id", "")'
+          request_id: "request.state.request_id"
+          customer_id: null
+          consumer_agent: null
+        entry:
+          workflow_id: "shared.email.send"
+          cost_kind: "email-send"
+    audit:
+      cost_inventory_sha: "abc12345"
+      output_input_map_sha: "def67890"
+      snapshot_sha: "111aaa22"

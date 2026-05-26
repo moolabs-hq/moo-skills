@@ -63,7 +63,7 @@ Skill R fires at every stage handoff. PM is the apex of the review workflow with
 ## Install — persona-aware
 
 ```bash
-./cost-billing-shared/install.sh
+./install.sh
 ```
 
 Auto-detects your agent platform (Claude Code, Cursor, Copilot, Windsurf, etc.) and **interactively asks which persona you are**:
@@ -85,10 +85,10 @@ The skill subset installed depends on persona:
 Non-interactive:
 
 ```bash
-./cost-billing-shared/install.sh --persona engineering --repo /path/to/customer/repo
-./cost-billing-shared/install.sh --persona finance --no-bootstrap-cta
-./cost-billing-shared/install.sh --persona all --project
-./cost-billing-shared/install.sh --uninstall          # removes all skills (any persona)
+./install.sh --persona engineering --repo /path/to/customer/repo
+./install.sh --persona finance --no-bootstrap-cta
+./install.sh --persona all --project
+./install.sh --uninstall          # removes all skills (any persona)
 ```
 
 Honors `CLAUDE_CONFIG_DIR` for Claude Code installs.
@@ -203,7 +203,7 @@ Per `cost-billing-shared/gaps-tracker.md`, eight items remain open and should dr
 | "What §10 decisions are locked?" | `cost-billing-shared/v1-decisions-log.md` |
 | "How does the review flow?" | `cost-billing-shared/three-role-review.md` |
 | "What's still open?" | `cost-billing-shared/gaps-tracker.md` |
-| "How do I install?" | `cost-billing-shared/install.sh --help` |
+| "How do I install?" | `./install.sh --help` |
 
 ---
 

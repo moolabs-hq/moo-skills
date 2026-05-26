@@ -1,0 +1,49 @@
+# Stage 2 output — CPO signed. Schema: cost-billing/bootstrap-cpo/assets/02-cpo.schema.yaml.
+# Anonymized example.
+
+stage: cpo
+chain_position: 2
+generated_at: "2026-05-26T11:00:00Z"
+
+input_chain:
+  - stage: finance
+    file: "01-finance.signed.yaml"
+    sha256: "abc123..."
+    signed_at: "2026-05-26T10:30:00Z"
+
+adversarial_review:
+  phase: post-bootstrap-cpo
+  verdict: clean
+
+signoff:
+  signed_by_role: cpo
+  signed_by_name: "Alex (CPO)"
+  signed_at: "2026-05-26T11:30:00Z"
+
+company:
+  name: "Acme AI"
+  customer_facing_name: "Acme"
+
+products:
+  - slug: checkout
+    name: "Acme Checkout"
+    description: "AI-assisted product recommendations during checkout flow"
+    team_pm_contact: "morgan@example.com"
+    services: [services/checkout-api, services/recommender]
+    top_features:
+      - feature_id: recommend
+        label: "Personalized product recommendations"
+      - feature_id: cart_summarize
+        label: "Cart-summary email to customer"
+  - slug: support
+    name: "Acme Support"
+    description: "AI-assisted customer support agent"
+    team_pm_contact: "rowan@example.com"
+    services: [services/support-api]
+    top_features:
+      - feature_id: triage
+        label: "Inbound ticket triage + auto-response"
+
+terminology:
+  end_user: "shopper"          # customer's preferred term
+  billable_output: "completion"

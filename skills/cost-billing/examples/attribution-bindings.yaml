@@ -1,0 +1,52 @@
+# Output of /cost-billing-discovery Phase 1.6 — developer confirms where each
+# attribution variable lives in their code. Used by Phase 2c (task_planner.py) to
+# substitute into the per-file emission templates.
+
+service_slug: payments-api
+framework: fastapi
+generated_at: "2026-05-26T14:00:00Z"
+
+bindings:
+  tenant_id:
+    source: "request.state.tenant_id"
+    confidence: high
+    evidence:
+      - "services/payments-api/app/middleware/tenant.py:34"
+    fallback_when_absent: skip
+    confirmed_by: "sam@example.com"
+    confirmed_at: "2026-05-26T14:05:00Z"
+
+  request_id:
+    source: "request.state.request_id"
+    confidence: high
+    evidence:
+      - "services/payments-api/app/middleware/request_id.py:18"
+    fallback_when_absent: skip
+    confirmed_by: "sam@example.com"
+    confirmed_at: "2026-05-26T14:05:00Z"
+
+  customer_id:
+    source: "request.state.customer_id"
+    confidence: medium
+    evidence:
+      - "services/payments-api/app/middleware/auth.py:62"
+    fallback_when_absent: skip
+    confirmed_by: "sam@example.com"
+    confirmed_at: "2026-05-26T14:05:00Z"
+
+  consumer_agent:
+    # No middleware sets this — developer chose to skip rather than invent.
+    source: null
+    confidence: n_a
+    confirmed_by: "sam@example.com"
+    confirmed_at: "2026-05-26T14:05:00Z"
+
+# Per-file overrides — routes that bypass the standard middleware (webhooks,
+# health-checks, etc.) get their own source expressions for affected keys.
+overrides:
+  - file: services/payments-api/app/api/v1/webhooks/router.py
+    reason: "Webhook handler — signature-verified path bypasses TenantMiddleware"
+    bindings:
+      tenant_id:
+        source: 'request.headers.get("x-tenant-id", "")'
+        confidence: confirmed

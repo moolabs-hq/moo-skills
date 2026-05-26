@@ -1,0 +1,35 @@
+# Output of /cost-billing-instrument Phase 1.5 — verified SDK shape at the
+# customer-pinned version. Drives helper-template rendering. Refuses-to-emit
+# if expected methods are missing.
+
+generated_at: "2026-05-26T15:00:00Z"
+
+sdk_versions:
+  python:
+    repo_url: "https://github.com/moolabs-hq/moolabs-py.git"
+    resolved_tag: "v0.2.0-rc9"
+    commit_sha: "7d5b07d771b2"
+    is_prerelease: true
+
+# 11 flat capabilities on the unified Moolabs() client.
+namespaces:
+  python:
+    - path: "client.usage"
+      methods: [ingest_events, list_events, query_meter, create_meter, get_usage_summary]
+    - path: "client.cost"
+      methods: [ingest_event, ingest_events_batch, ingest_sdk_spans, submit_adjustment]
+    - path: "client.billing"
+      methods: [create_billing_profile, simulate_invoice, list_invoices_get, get_invoice]
+    - path: "client.customers"
+      methods: [create_customer, get_customer, list_customers_get, update_customer]
+    # ... 7 more capabilities (catalog, subscriptions, entitlements, wallets,
+    # credits, collections, notifications)
+
+capabilities:
+  usage_event_emit: true
+  cost_event_direct_emit: true
+  cost_event_method_path: "client.cost.ingest_events_batch"
+
+contract_drift:
+  missing_expected_methods: []
+  renamed_methods: []

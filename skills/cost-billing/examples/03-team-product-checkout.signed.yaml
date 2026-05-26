@@ -1,0 +1,42 @@
+# Stage 3 output — per-product PM signed (one file per product).
+# Schema: cost-billing/bootstrap-team-product/assets/03-team-product.schema.yaml.
+
+stage: team-product
+chain_position: 3
+product_slug: checkout
+generated_at: "2026-05-26T12:00:00Z"
+
+input_chain:
+  - stage: finance
+    file: "01-finance.signed.yaml"
+    sha256: "abc123..."
+  - stage: cpo
+    file: "02-cpo.signed.yaml"
+    sha256: "def456..."
+
+adversarial_review:
+  phase: post-bootstrap-team-product-checkout
+  verdict: clean-with-accepted-risks
+
+signoff:
+  signed_by_role: team-product
+  signed_by_name: "Morgan (Checkout PM)"
+  signed_at: "2026-05-26T12:30:00Z"
+  product_slug: checkout
+
+features:
+  - feature_id: recommend
+    label: "Personalized product recommendations"
+    billable_unit_id: per_completion         # matches finance.billable_units[].unit_id
+    event_type: "checkout.recommendation.delivered"
+    output_input_edges:
+      - input_workflow_id: shared.llm.call
+        weight: 1.0
+        note: "1:1 — one LLM call per recommendation set"
+  - feature_id: cart_summarize
+    label: "Cart-summary email to customer"
+    billable_unit_id: per_email_sent          # sibling-pair per finance
+    event_type: "checkout.cart-summary.delivered"
+    output_input_edges:
+      - input_workflow_id: shared.email.send
+        weight: 1.0

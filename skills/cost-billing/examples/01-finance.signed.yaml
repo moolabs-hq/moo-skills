@@ -1,0 +1,76 @@
+# Stage 1 output — CFO signed. Schema: cost-billing/bootstrap-finance/assets/01-finance.schema.yaml.
+# Anonymized example; real values reflect the customer's actual contracts.
+
+stage: finance
+chain_position: 1
+generated_at: "2026-05-26T10:00:00Z"
+generator: "/cost-billing-bootstrap-finance v0.3.0"
+agent_surface: "claude-code"
+llm_used: "claude-opus-4-7"
+
+input_chain: []  # Stage 1 has no upstream
+
+adversarial_review:
+  phase: post-bootstrap-finance
+  verdict: clean-with-accepted-risks
+  reviewer_model: "claude-sonnet-4-6"
+  notes: "1 MEDIUM accepted: fair-usage threshold for per_email_sent unclear in contract; CFO will revisit in Q3."
+
+signoff:
+  signed_by_role: finance
+  signed_by_name: "Jamie (CFO)"
+  signed_at: "2026-05-26T10:30:00Z"
+
+pricing_model:
+  primary_type: hybrid
+  sub_aspects: [subscription_with_overage, usage_with_credit_wallet]
+  sources_of_truth:
+    - location: "https://example.com/pricing"
+      authority: primary
+      freshness: live
+    - location: "Notion: Pricing Playbook (rev-12)"
+      authority: secondary
+      freshness: live
+
+  billable_units:
+    - unit_id: per_completion
+      label: "completion delivered (with margin on top of LLM cost)"
+      price_usd: 0.05
+      per_what: "1 completion"
+      classification: customer_facing_billable
+      classification_justification: "customer's MSA bills per completion; LLM token cost absorbed with margin"
+    - unit_id: per_email_sent
+      label: "transactional email delivered to end-user"
+      price_usd: 0.001
+      per_what: "1 email"
+      classification: sibling_pair
+      vendor_when_cogs: "SendGrid; we track per-email COGS internally AND bill customer per-email"
+    - unit_id: per_internal_alert
+      label: "internal operational alert (oncall pages, deploy notifications)"
+      classification: vendor_cogs_only
+      vendor_when_cogs: "AWS SES; not customer-facing — these are our own ops emails"
+
+  fair_usage_per_unit:
+    per_completion:
+      free_quota: 1000
+      period: month
+      overage_handling: warn_at_80pct
+
+compliance:
+  regimes: [SOC2, GDPR]
+  pii_field_blocklist: [email, phone, full_name, ip_address]
+  phi_field_blocklist: []
+
+deployment:
+  regions:
+    - id: use1
+      key_prefix: "sk_use1_"
+      primary: true
+    - id: euw1
+      key_prefix: "sk_euw1_"
+  environments:
+    - name: prod
+    - name: staging
+  multi_tenant:
+    shape: shared-db
+    tenant_id_source: "request.state.tenant_id (set by AuthMiddleware)"
