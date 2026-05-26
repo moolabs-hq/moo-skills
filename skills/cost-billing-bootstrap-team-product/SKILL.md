@@ -91,7 +91,7 @@ For each billable feature, ask ONE question:
 > Pick a convention. The codemod will follow it for every event_type inserted."
 
 ### Q5 — Per-feature event_type values
-> "Now give me the exact `event_type` string per confirmed feature, using the convention from Q4. (Example for the 'completion' feature with period-separated convention: `completion.delivered`.) These strings will appear in every codemod insert AND drive the moo-meter rule synthesis."
+> "Now give me the exact `event_type` string per confirmed feature, using the convention from Q4. (Example for the 'completion' feature with period-separated convention: `completion.delivered`.) These strings will appear in every codemod insert AND drive the the Moolabs metering backend's rule synthesis."
 
 ### Q6 — Per-feature synonyms / aliases (beyond CPO's list)
 > "CPO listed these synonyms: [from `02-cpo.signed.yaml > terminology.synonyms`]. Are there per-feature synonyms specific to your area? Examples:

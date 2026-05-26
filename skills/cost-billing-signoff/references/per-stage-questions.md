@@ -41,7 +41,7 @@ CFO re-confirming after PM's per-product spec.
 
 ## Engineer Stage 3 per-service (`engineer-stage3-<service>`)
 
-Engineer Dan reviewing engineer-view-moo-acute.html.
+Engineer Dan reviewing engineer-view-<your-service>.html.
 
 | # | Question |
 |---|---|

@@ -31,7 +31,7 @@ You are LAST in the chain. Your output IS the consolidated `customer-context/` t
     --repo /path/to/customer/repo
 
 /cost-billing-bootstrap-team-engineer --resume
-/cost-billing-bootstrap-team-engineer --section telemetry --service moo-acute
+/cost-billing-bootstrap-team-engineer --section telemetry --service <your-service>
 ```
 
 **`--service <slug>` is REQUIRED.** Multi-service orgs run this skill ONCE PER SERVICE (on the relevant engineer's machine). Single-service orgs still pass `--service` matching their sole service. The slug MUST appear under at least one `02-cpo.signed.yaml > products[].services` entry — refuses otherwise.

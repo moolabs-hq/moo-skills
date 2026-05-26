@@ -103,12 +103,12 @@ adversarial_review:
 notes: ""
 ```
 
-## Example: Engineer stage 3 for service=moo-acute with re-open-pm
+## Example: Engineer stage 3 for service=<your-service> with re-open-pm
 
 ```yaml
 $schema: https://moolabs.com/schemas/cost-billing-signoff/0.1.0
 stage: engineer-stage3
-service_slug: moo-acute
+service_slug: <your-service>
 status: re-open-pm
 generated_at: 2026-05-20T21:00:00Z
 signed_by:
@@ -116,14 +116,14 @@ signed_by:
   name: Dan Engineer
   signed_at: 2026-05-20T21:00:00Z
 adversarial_review:
-  phase: post-signoff-engineer-stage3-moo-acute
+  phase: post-signoff-engineer-stage3-<your-service>
   verdict: clean-with-accepted-risks
   reviewer_model: claude-sonnet-4-6
   ran_at: 2026-05-20T20:58:00Z
   findings_total: 1
   findings_resolved: 1
 edits_to_inventory:
-  - entry_workflow_id: moo-acute.attribution.attribute-cost
+  - entry_workflow_id: analytics.attribution.attribute-cost
     change: change-idempotency-anchor
     old_value: "{handler}.{customer_id}.{epoch}"
     new_value: "{handler}.{request_id}"
@@ -147,7 +147,7 @@ The codemod loads each signoff file and verifies:
 2. `stage` matches the expected stage for the filename.
 3. `product_slug` (if applicable) is in `02-cpo.signed.yaml > products[].slug`.
 4. `service_slug` (if applicable) appears under at least one `products[].services`.
-5. **Body-slug ↔ filename match:** for PM/engineer stages, `product_slug` / `service_slug` in the YAML body matches the slug in the filename. Catches typos like body `service_slug: moo_acute` (underscore) vs filename `engineer-stage3-signoff-moo-acute.yaml` (hyphen). **(F2 fix.)**
+5. **Body-slug ↔ filename match:** for PM/engineer stages, `product_slug` / `service_slug` in the YAML body matches the slug in the filename. Catches typos like body `service_slug: moo_acute` (underscore) vs filename `engineer-stage3-signoff-<your-service>.yaml` (hyphen). **(F2 fix.)**
 6. `status` == `approved`.
 7. `adversarial_review.verdict` ∈ `{clean, clean-with-accepted-risks}`.
 8. **PM contact cross-check:** for PM stages, `signed_by.contact` matches `products[product_slug].team_pm_contact` IFF the product has `team_pm_contact` set (not internal-only). Catches wrong-PM-claiming-a-product. If team_pm_contact is unset, WARN (not reject) so internal-only products don't deadlock. **(F1 fix.)**

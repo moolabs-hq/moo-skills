@@ -1,6 +1,6 @@
 # JSON-Schema (YAML form) for usage-events-inventory.yaml
 # This is the OUTPUT side of the chargeability graph.
-# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument, /cost-billing-drift-lint, moo-meter rule synthesis.
+# Owned by /cost-billing-discovery; consumed by /cost-billing-instrument, /cost-billing-drift-lint, the Moolabs metering backend's rule synthesis.
 
 $schema: https://json-schema.org/draft/2020-12/schema
 $id: https://moolabs.com/schemas/usage-events-inventory/0.1.0
@@ -182,10 +182,10 @@ example:
         cfo: pending
         engineer: pending
   suppressions:
-    - file: "services/moolabs-app/bff/app/services/notifications.py"
+    - file: "services/api-gateway/app/services/notifications.py"
       line: 140
       handler: send_email
-      suppressed_event_type: "bff.ops.aws-ses-alert"
+      suppressed_event_type: "ops.internal.alert"
       unit_id: per_email_internal_alert
       vendor: AWS SES
       reason: "Internal operational alerts (oncall pages, deploy notifications) — not customer-facing email."

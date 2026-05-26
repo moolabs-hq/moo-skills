@@ -31,8 +31,8 @@ stateDiagram-v2
 
     note right of engineer_stage3_done_for_service
         Cardinality: M files (one per engineer's --service)
-        engineer-stage3-signoff-moo-acute.yaml
-        engineer-stage3-signoff-moo-meter.yaml
+        engineer-stage3-signoff-<your-service>.yaml
+        engineer-stage3-signoff-<other-service>.yaml
         ...
         State machine evaluates per-service.
     end note
@@ -53,7 +53,7 @@ On every invocation, the skill:
 A signoff's `status` field can be `approved` (move forward) or `re-open-<who>` (loop back to that stage). Re-open invalidates downstream signoffs per the rules in `state-machine.yaml > reopen_rules`. The skill emits clear warnings when a re-open causes other signoffs to become stale:
 
 ```
-⚠️ engineer-stage3-signoff-moo-acute.yaml had status=re-open-pm.
+⚠️ engineer-stage3-signoff-<your-service>.yaml had status=re-open-pm.
    Following signoffs are now INVALID:
      - cfo-stage2b-signoff-acute.yaml
      - cfo-stage2b-signoff-arc.yaml
@@ -64,11 +64,11 @@ A signoff's `status` field can be `approved` (move forward) or `re-open-<who>` (
 
 ## Multi-service shared engineer
 
-If an engineer owns multiple services (e.g., Dan owns both `moo-acute` and `moo-arc`), they invoke per-service:
+If an engineer owns multiple services (e.g., one engineer owns both `analytics` and `billing-api`), they invoke per-service:
 
 ```
-/cost-billing-signoff --persona team-engineer --service moo-acute
-/cost-billing-signoff --persona team-engineer --service moo-arc
+/cost-billing-signoff --persona team-engineer --service <your-service>
+/cost-billing-signoff --persona team-engineer --service <your-service>
 ```
 
 Each writes its own `engineer-stage3-signoff-<S>.yaml`. The codemod per `--service <S>` only requires that S's signoff, not the others — engineers can iterate independently.

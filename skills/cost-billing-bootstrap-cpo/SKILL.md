@@ -112,11 +112,11 @@ ONLY ASK if finance's `pricing_model.primary_type` was `tiered`, `credit-wallet`
 >   - slug: acute
 >     name: Acute Cost Intelligence
 >     team_pm_contact: alice@acme.com
->     services: [services/moo-acute, services/moo-arc]
+>     services: [services/analytics, services/billing-api]
 >   - slug: meter
 >     name: Moo-Meter
 >     team_pm_contact: bob@acme.com
->     services: [services/moo-meter]
+>     services: [services/metering]
 >   ...
 > ```
 >

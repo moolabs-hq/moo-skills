@@ -24,8 +24,8 @@ You are an expert codemod author who wires Moolabs SDK calls into customer code 
 ```
 /cost-billing-instrument /path/to/customer/repo --service <service-slug>   # REQUIRED for multi-service orgs
 /cost-billing-instrument /path/to/customer/repo --service services/api
-/cost-billing-instrument /path/to/customer/repo --service moo-acute --dry-run
-/cost-billing-instrument /path/to/customer/repo --service moo-acute --pattern usage-only
+/cost-billing-instrument /path/to/customer/repo --service <your-service> --dry-run
+/cost-billing-instrument /path/to/customer/repo --service <your-service> --pattern usage-only
 ```
 
 **`--service <slug>` is REQUIRED for multi-service customers.** Each engineer runs the codemod for THEIR service. The codemod reads `.moolabs/chain/04-final-<service-slug>.signed.yaml` for technical decisions + scopes the AST scan + PR emission to that service's subdirectories. Single-service orgs may omit `--service` and the codemod runs over the whole repo (back-compat).
@@ -173,7 +173,7 @@ warnings:
 
 **The codemod MUST NOT trust the static `cost-billing-shared/sdk-surface-reference.md` at emission time.** That doc is a curated hint from 2026-05-18 (and earlier dates); the SDK has likely moved since. The truth lives in the SDK repo at the version the customer locked into `04-final.signed.yaml > integration.sdk_package_install` — fetch and introspect it before generating helpers or call-site inserts.
 
-**Why this exists (added 2026-05-25 after moo-arc dogfood + framing correction):**
+**Why this exists (added 2026-05-25 after an early integration uncovered framing issues):**
 
 1. **The SDK evolves between curation and customer runs.** Method names, namespace structure, even the import name can change. A static reference rots silently.
 2. **New capabilities should not require a new codemod release.** When the unified SDK adds `client.meter.cost.ingest_events()` (final path TBD), customers re-running the codemod should automatically get direct SDK emission for cost events — no skill update needed. The snapshot is how the helper finds out.
@@ -253,20 +253,20 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 4. Persist confirmations to `.moolabs/customer-context/attribution-bindings.yaml`:
 
    ```yaml
-   service_slug: moo-arc
+   service_slug: <your-service>
    framework: fastapi
    generated_at: 2026-05-25T16:45:00Z
    bindings:
      tenant_id:
        source: "request.state.tenant_id"
        confidence: high
-       evidence: ["services/moo-arc/app/middleware/tenant.py:34 — TenantMiddleware"]
+       evidence: ["services/billing-api/app/middleware/tenant.py:34 — TenantMiddleware"]
        confirmed_by: kritivas.shukla@moolabs.com
        confirmed_at: 2026-05-25T16:45:00Z
      request_id:
        source: "request.state.request_id"
        confidence: high
-       evidence: ["services/moo-arc/app/middleware/request_id.py:18"]
+       evidence: ["services/billing-api/app/middleware/request_id.py:18"]
        confirmed_by: kritivas.shukla@moolabs.com
        confirmed_at: 2026-05-25T16:45:00Z
      customer_id:
@@ -280,7 +280,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
        confidence: n_a
        confirmed_by: kritivas.shukla@moolabs.com
    overrides:
-     - file: services/moo-arc/app/api/v1/webhooks/router.py
+     - file: services/billing-api/app/api/v1/webhooks/router.py
        reason: "webhook handler — bypasses TenantMiddleware; signature-verified path"
        bindings:
          tenant_id:
@@ -297,7 +297,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 **This MUST run before any call-site insert.** The codemod generates exactly ONE helper file per service that owns all SDK and OTel-span emission. Every call-site insert in Phase 2b imports from this helper — never instantiates `Moolabs(api_key=...)` inline.
 
-**Why this is mandatory** (lessons from the moo-arc dogfood, 2026-05-25):
+**Why this is mandatory** (lessons from an early integration, 2026-05-25):
 
 1. **One client per process, not one per call site.** Inline `Moolabs(api_key=...)` at every emission site creates N clients per request (one per emission), each with its own connection pool, each re-reading the secret from the secret store. The helper uses `@lru_cache(maxsize=1)` to make the client + key resolution true singletons.
 2. **Fail-open-silent-swallow is one contract, enforced once.** If every call site implements its own `try/except`, the contract drifts. The helper exposes `emit_usage_event_safe()` / `emit_cost_event_safe()` — every call site uses them, every error path is identical.
@@ -320,7 +320,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 | `_resolve_api_key()` | Read key from configured secret store; `lru_cache(maxsize=1)` singleton | Returns empty string on failure; logs `moolabs.sdk_key.resolution_failed` |
 | `get_client()` | Singleton `Moolabs(...)` instance; `lru_cache(maxsize=1)` | First-call lazy; never raises |
 | `emit_usage_event_safe(event_type, subject, data, ...)` | The ONLY surface for SDK emission. Per-call-site templates call this — they NEVER touch `client.meter.events.ingest_events()` directly | SDK errors logged + swallowed; workflow continues |
-| `emit_cost_event_safe(kind, tenant_id, cost_micros, attributes, ...)` | The ONLY surface for cost-event emission. Sibling-pair of `emit_usage_event_safe`. **Dual transport (added 2026-05-25 after moo-arc dogfood):** prefers OTel span attribute when a recording span exists; falls back to structured log (`logger.info("moolabs.cost.event", ...)`) when no recording span is available. Acute ingests both transports. | Cost events are **never silently dropped** when transport is unavailable. Only true exceptions (during both write AND log fallback) get swallowed. |
+| `emit_cost_event_safe(kind, tenant_id, cost_micros, attributes, ...)` | The ONLY surface for cost-event emission. Sibling-pair of `emit_usage_event_safe`. **Dual transport (added 2026-05-25 after an early integration run):** prefers OTel span attribute when a recording span exists; falls back to structured log (`logger.info("moolabs.cost.event", ...)`) when no recording span is available. Acute ingests both transports. | Cost events are **never silently dropped** when transport is unavailable. Only true exceptions (during both write AND log fallback) get swallowed. |
 
 **Why dual transport** — the OTel-span-only design silently drops cost data for any code path the tracer doesn't sample. Concrete impact: head-sampling at 10% drops 90% of cost signal; background workers without trace-context propagation drop all of theirs; dev/CI without OTel drops everything. The function arguments carry the truth (kind, tenant_id, cost_micros) — span vs log is just transport. Both arrive at the same ClickHouse `acute_analytics` table downstream; trace_id is salvaged from the span context even when the span isn't recording, so log-path events can still join the trace. When the unified Moolabs SDK adds its cost-event endpoint (same `Moolabs` client, exact method path TBD by platform team — there is no separate "acute SDK"), the helper's PRIMARY transport swaps from OTel-span-write to that SDK call on the same `get_client()` singleton. The structured-log path stays as the recovery rail. Call sites do not change.
 
@@ -335,8 +335,8 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
 ```yaml
 # Example tasks.yaml entry
 - task_id: tsk_001
-  file: services/moo-arc/app/agents/communications.py
-  service_slug: moo-arc
+  file: services/billing-api/app/agents/communications.py
+  service_slug: <your-service>
   framework: fastapi
   language: python
   template: assets/codemod-templates/python-fastapi.j2
@@ -348,12 +348,12 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
     - line: 729
       pattern: sibling-pair
       entry:                       # the inventory entry — JUST this one
-        workflow_id: arc.dunning.email-composed
+        workflow_id: messaging.email.sent
         event_type: completion.delivered
         idempotency_anchor: { handler: compose_email, path_param: customer_id, confidence: 0.95 }
         refund_unit: { unit: email, derivation: "1" }
         cost_kind: llm-tokens
-        cost_workflow_ids: [arc.shared.llmport-call]
+        cost_workflow_ids: [shared.llm.call]
         cost_micros_source: "response.cost_micros"
         consumer_agent_source: 'log_context["agent"]'
       attribution_keys: [tenant_id, request_id, customer_id, consumer_agent]

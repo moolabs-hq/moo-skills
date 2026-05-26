@@ -141,7 +141,7 @@ Run `scripts/catalog_match.py` against each detected service. It performs:
    - `anthropic.messages.create` → cost (Claude tokens)
 2. **Discard-pattern filter** — drop SDK internals, retry loops, auth refreshes, health checks via attribute-presence allowlist (e.g., must have `gen_ai.usage.input_tokens` set for OTel-instrumented LLM calls to count).
 3. **Catalog miss surfacing** — any vendor SDK call detected by AST but NOT in catalog → cell ④ finding (per `v1-decisions-log.md` #6, never silently skip).
-4. **Raw-HTTP vendor detection (added 2026-05-25 after moo-arc dogfood)** — AST-only matching misses vendors accessed via raw `httpx.Client.post()` / `requests.post()` / `aiohttp.ClientSession.post()` / `fetch()` because the call site has no recognizable SDK class. For every raw-HTTP call site, resolve the URL or `base_url` constant **textually** and match against `assets/vendor-host-catalog.yaml`:
+4. **Raw-HTTP vendor detection (added 2026-05-25 after an early integration run)** — AST-only matching misses vendors accessed via raw `httpx.Client.post()` / `requests.post()` / `aiohttp.ClientSession.post()` / `fetch()` because the call site has no recognizable SDK class. For every raw-HTTP call site, resolve the URL or `base_url` constant **textually** and match against `assets/vendor-host-catalog.yaml`:
    - `*.suitetalk.api.netsuite.com`, `rest.netsuite.com` → NetSuite (paid SaaS, per-API-call quota)
    - `api.sendgrid.com` → SendGrid (already catches the raw-httpx path)
    - `api.salesforce.com`, `*.my.salesforce.com` → Salesforce
@@ -149,7 +149,7 @@ Run `scripts/catalog_match.py` against each detected service. It performs:
    - `api.twilio.com`, `messaging.twilio.com` → Twilio
    - `api.stripe.com` → Stripe (when called outside the SDK)
    - `api.openai.com`, `api.anthropic.com`, `api.deepinfra.com`, `*.openai.azure.com` → LLM vendors (when called outside LLMPort or the SDK)
-   - Any host with a known billing model that's NOT in the v0.1 catalog → cell ④ with `via_abstraction: raw_http`. **The moo-arc dogfood (2026-05-25) missed NetSuite this way — adding this step is the gap-closure fix.**
+   - Any host with a known billing model that's NOT in the v0.1 catalog → cell ④ with `via_abstraction: raw_http`. **An early integration run (2026-05-25) missed NetSuite this way — adding this step is the gap-closure fix.**
 
 **Output:** intermediate `.moolabs/discovery/code-graph.yaml` (call sites by file, with confidence).
 
@@ -200,10 +200,10 @@ edges:
 Then run `scripts/three_role_views.py` to project the role views. Per `customer-context > products[]` + fan-out architecture, views split per product (PM) and per service (engineer):
 
 - `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue (1, ORG-WIDE — CFO sees everything). **Also includes a "Vendor-COGS suppressions" section listing every terminal-event candidate the CFO's `vendor_cogs_only` classification blocked** (unit_id, vendor, handler `file:line`, the would-be usage event). Lets the CFO verify the suppression was correct — if a handler shows up here that should have been billable, the CFO either reclassifies the unit in finance.signed.yaml (cycle the chain) or accepts the suppression.
-- `reviews/pm-view-<product>.html` — output→inputs graph filtered to entries whose service path is in `products[<product>].services` (N, ONE PER PRODUCT — PM Alice for `acute` sees only acute features; PM Bob for `meter` sees only meter features).
-- `reviews/engineer-view-<service>.html` — file-grouped inventory with file:line / framework / confidence, filtered to entries under that service's path (M, ONE PER SERVICE — engineer Dan for `moo-acute` sees only moo-acute entries).
+- `reviews/pm-view-<product>.html` — output→inputs graph filtered to entries whose service path is in `products[<product>].services` (N, ONE PER PRODUCT — PM Alice for `analytics` sees only acute features; PM Bob for `metering` sees only meter features).
+- `reviews/engineer-view-<service>.html` — file-grouped inventory with file:line / framework / confidence, filtered to entries under that service's path (M, ONE PER SERVICE — engineer Dan for `<your-service>` sees only entries under their service).
 
-**Cross-service entries** (shared library code that both `moo-acute` and `moo-meter` call): appear in BOTH services' engineer views with a `shared: true` tag — both engineers must confirm. Per-product PM views include entries from ALL services in `products[<p>].services`, so a product spanning multiple services sees the full feature set.
+**Cross-service entries** (shared library code that both two services (e.g. `analytics` and `metering`) call): appear in BOTH services' engineer views with a `shared: true` tag — both engineers must confirm. Per-product PM views include entries from ALL services in `products[<p>].services`, so a product spanning multiple services sees the full feature set.
 
 **Filtering logic**: an entry's "owning service" is determined by which service path in `customer-context > repo-info.yaml > services[].path` contains its `file` field. If multiple match (e.g., shared lib at `packages/shared` that both services depend on), use the explicit `service` field on the entry (engineer-spec stage decides which service "owns" it for codemod purposes).
 

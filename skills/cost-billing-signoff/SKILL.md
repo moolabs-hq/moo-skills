@@ -31,7 +31,7 @@ You are **state-aware**: you read what's already signed off in `.moolabs/invento
 /cost-billing-signoff                              # auto-detect persona + next stage
 /cost-billing-signoff --persona cfo                # explicit persona
 /cost-billing-signoff --persona team-product --product acute
-/cost-billing-signoff --persona team-engineer --service moo-acute
+/cost-billing-signoff --persona team-engineer --service <your-service>
 /cost-billing-signoff --status                     # just print current state machine — no actions
 /cost-billing-signoff --reset cfo-stage1           # invalidate a signoff (forces re-review)
 ```
@@ -42,7 +42,7 @@ Sign off on the inventory
 Review the CFO view
 Stage 1 signoff
 PM review of inventory for product acute
-Engineer review for service moo-acute
+Engineer review for service <your-service>
 What stage am I in?
 ```
 
@@ -120,7 +120,7 @@ PM stage (per product):
 - `[Q3] Any features that should be merged/split?`
 
 Engineer stage (per service):
-- `[Stage 3 / service=moo-acute, Q1] Verify file:line for each cost-event entry.`
+- `[Stage 3 / service=<your-service>, Q1] Verify file:line for each cost-event entry.`
 - `[Q2] Confirm framework adapter selection per service.`
 - `[Q3] Idempotency-anchor decisions per entry.`
 
@@ -175,7 +175,7 @@ After all findings handled, the persona's `signoff.status` is computed:
 Promote `<stage>-signoff.draft.yaml` → `<stage>-signoff.yaml` with the final `status` block, signer identity, R verdict, and rationale notes.
 
 **Invariants verified BEFORE writing (F2 fix):**
-- For PM/engineer stages: filename suffix slug == YAML body `product_slug` / `service_slug` (catches typo drift like file `*-moo-acute.yaml` vs body `service_slug: moo_acute`).
+- For PM/engineer stages: filename suffix slug == YAML body `product_slug` / `service_slug` (catches typo drift like file `*-billing-api.yaml` vs body `service_slug: billing_api`).
 - For pm-stage3b on multi-owner services: `co_signed_by[]` contains one entry per owning product's PM, each with `on_behalf_of_product` matching a `products[]` slug whose `services[]` contains this service_slug (F3 invariant).
 - For PM stages: `signed_by.contact` matches `02-cpo.signed.yaml > products[product_slug].team_pm_contact` IFF that field is set (F1 invariant; warn if unset).
 - `signed_at` is after `generated_at` (catches backdating).
@@ -219,8 +219,8 @@ Print:
 The /cost-billing-instrument gate is now satisfied. Engineers can run
 per-service:
 
-  /cost-billing-instrument --service moo-acute
-  /cost-billing-instrument --service moo-meter
+  /cost-billing-instrument --service <your-service>
+  /cost-billing-instrument --service <your-service>
   ...
 
 After the codemod emits each PR, iterate on it with your existing

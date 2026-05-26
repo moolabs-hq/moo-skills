@@ -151,7 +151,7 @@ See `cost-billing-shared/sdk-surface-reference.md` for the verified call shapes.
 
 **It isn't:**
 - A replacement for the Moolabs SDKs — it WIRES them into customer code.
-- A margin-computation system — that's downstream (`moo-acute` + `moo-meter`).
+- A margin-computation system — that's downstream (Moolabs attribution + metering backends).
 - An admin / config UI — v1 is markdown PR + YAML inventories.
 
 See `cost-billing-shared/anchor-taxonomy.md` for the full out-of-scope list.
@@ -244,5 +244,5 @@ on 2026-05-19, grounded against:
 - `github.com/moolabs-hq/moolabs-ts` (verified 2026-05-18)
 - `github.com/moolabs-hq/moolabs-go` (verified 2026-05-18)
 - `../moolabs/sdks/generator/scripts/stitch-specs.py` (BFF+meter+arc N-way stitcher, 2026-05-15)
-- `../moolabs/services/moo-acute/app/services/attribution_engine.py` (12-algorithm ladder)
+- `the Moolabs platform's attribution_engine.py` (12-algorithm ladder)
 - User clarifications 2026-05-19 (sequential workflow with CFO ⇄ PM and Engineer ⇄ PM loops)

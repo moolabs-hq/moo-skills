@@ -3,7 +3,7 @@
 # Used by Phase 3 step 4 of /cost-billing-discovery to catch vendors called via raw
 # httpx.Client / requests / aiohttp / fetch, where AST class-based matching fails.
 #
-# Added 2026-05-25 after the moo-arc dogfood missed NetSuite — moo-arc's
+# Added 2026-05-25 after an early integration run missed NetSuite — the early-integration repo's
 # integrations/netsuite_client.py uses httpx.post to *.suitetalk.api.netsuite.com,
 # which is a real per-API-call billable surface. Pure AST scan saw `self._http.post(...)`
 # with no recognizable SDK class and silently skipped it.
@@ -29,7 +29,7 @@ netsuite:
   notes: |
     NetSuite charges based on SuiteTalk governance points (per-API-call quota tied to
     license tier). Concurrent connections also gated. Surface as cell ④ for the
-    team-product review — moo-arc dogfood gap, 2026-05-25.
+    team-product review — early-integration gap, 2026-05-25.
 
 salesforce:
   hosts:
@@ -75,7 +75,7 @@ sendgrid:
   cost_dimension: email_sent
   v0_1_catalog_status: PARTIAL
   paid_saas: true
-  notes: "Already detected via SDK; raw-httpx path also exists (see moo-arc inventory)."
+  notes: "Already detected via SDK; raw-httpx path also exists (see early-integration inventory)."
 
 resend:
   hosts:
@@ -110,7 +110,7 @@ deepinfra:
   cost_dimension: token
   v0_1_catalog_status: NOT_IN
   paid_saas: true
-  notes: "moo-arc uses this via LLMPort abstraction; raw-HTTP path possible at other customers."
+  notes: "early-integration repo uses this via an LLM-port abstraction; raw-HTTP path possible at other customers."
 
 # Add new vendors here. Keep entries alphabetical within billing-model groups.
 # When a customer-specific paid SaaS isn't here, surface as

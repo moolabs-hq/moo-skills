@@ -123,7 +123,7 @@ SKILLS_ALL=(
 # in v0.3.0; the 4 silo bootstraps replace it. cost-billing-reconcile is not in this
 # suite (Moolabs-engineering-internal, tracked separately).
 # Note: cost-billing-reconcile was removed from this customer-portable suite.
-# It is an engineering-internal Moolabs harness for validating moo-acute's
+# It is an engineering-internal Moolabs harness for validating the Moolabs attribution-engine's
 # attribution_engine.py against real customer cloud bills; it has no business
 # running in a customer environment. Tracked separately as Moolabs internal
 # infrastructure — see cost-billing-shared/v1-decisions-log.md.

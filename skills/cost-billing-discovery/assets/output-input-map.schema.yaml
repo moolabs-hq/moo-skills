@@ -45,7 +45,7 @@ $defs:
           - manual_weights
         description: |
           v1 default = equal_split. PM can override per edge.
-          Matches moo-acute's four allocation rules; selection here informs Tier 5 allocation rule.
+          Matches the Moolabs attribution backend's four allocation rules; selection here informs Tier 5 allocation rule.
       derivation_strategy_note:
         type: string
         description: When manual_weights, the rationale for the chosen weights.

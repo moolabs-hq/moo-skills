@@ -5,7 +5,7 @@
    emit_cost_event_safe() — NEVER instantiate Moolabs() inline at the call site.
 
    Variables expected:
-     service_slug                — e.g. "moo-arc"
+     service_slug                — e.g. "<your-service>"
      signoff_chain_hashes        — list of {stage, file, sha256} entries
      sdk_key_location.strategy   — aws_secrets_manager | gcp_secret_manager | vault | onepassword | env_var | custom
      sdk_key_location.region     — for AWS (e.g. "us-east-1")

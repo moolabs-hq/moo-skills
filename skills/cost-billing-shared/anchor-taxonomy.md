@@ -118,12 +118,12 @@ The codemod (Skill 2) reads all three; the drift-lint (Skill 3) checks all three
 
 ## Out of scope (clarified) — never confuse these for in-scope work
 
-- Margin computation logic (downstream of inventories; ACUTE + moo-meter handle it).
-- Plan / pricing configuration UX (moo-meter's plan-builder is separate).
+- Margin computation logic (downstream of inventories; the Moolabs attribution + metering backends handle it).
+- Plan / pricing configuration UX (the Moolabs metering backend's plan-builder is separate).
 - v2 web UI for inventory review (v1 = markdown PR).
 - Refund / credit reconciliation logic (ACUTE append-only adjustments unchanged).
 - Multi-cloud cost-allocation rule engine (ACUTE's four rules unchanged; Skill B configures inputs only).
 - Customer's internal cost-categorization taxonomy (customer-side transform on top of FOCUS export).
 - Gateway URL unification (Doc 3 §7.4, §8.2; deferred indefinitely).
 - Cross-region admin operations (Doc 3 §8.1.c; deferred until admin SDK surface is built).
-- moo-meter `BillingEvent` rename refactor (Doc 3 §1.7; not blocking).
+- platform-side `BillingEvent` rename refactor (Doc 3 §1.7; not blocking).

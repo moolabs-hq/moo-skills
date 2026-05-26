@@ -11,7 +11,7 @@ script produces. No bindings → codemod refuses to run (fail loud).
 
 Usage:
     python attribution_discovery.py \
-        --service-root services/moo-arc \
+        --service-root services/billing-api \
         --framework fastapi \
         --customer-context-dir .moolabs/customer-context \
         [--reconfirm]            # re-prompt even for previously confirmed keys
@@ -429,7 +429,7 @@ def _naive_yaml_load(text: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--service-root", required=True, help="Path to the service to scan, e.g. services/moo-arc")
+    ap.add_argument("--service-root", required=True, help="Path to the service to scan, e.g. services/billing-api")
     ap.add_argument("--framework", required=True, choices=["fastapi", "django", "flask", "express", "nestjs", "nextjs"])
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
     ap.add_argument("--reconfirm", action="store_true", help="re-prompt for previously confirmed keys")
