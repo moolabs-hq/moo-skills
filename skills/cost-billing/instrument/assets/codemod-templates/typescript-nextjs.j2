@@ -19,29 +19,37 @@
 import { emitUsageEventSafe, emitCostEventSafe } from '@/services/moolabs-client';
 
 emitCostEventSafe({
+  // Event-specific
   kind: '{{ entry.cost_kind | default("unknown") }}',
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}{% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
+  {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
   {% endif %}attributes: {
     'workflow_id': '{{ entry.workflow_id }}',
     'event_type': '{{ entry.event_type }}',
     {% for cost_wf in entry.cost_workflow_ids %}'upstream.{{ loop.index }}.workflow_id': '{{ cost_wf }}',
-    {% endfor %}{% if attribution_sources.request_id %}'request.id': String({{ attribution_sources.request_id }} ?? ''),
-    {% endif %}{% if attribution_sources.customer_id %}'customer.id': String({{ attribution_sources.customer_id }} ?? ''),
-    {% endif %}
+    {% endfor %}
   },
+  // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
+  {% endif %}
 });
 
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
+  // Event-specific
   eventType: '{{ entry.event_type }}',
   subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
-  data: {
-    quantity: {{ entry.refund_unit.derivation }},
-    unit: '{{ entry.refund_unit.unit }}',
-  },
-  {% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),{% endif %}
+  quantity: {{ entry.refund_unit.derivation }},
+  unit: '{{ entry.refund_unit.unit }}',
+  // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
+  {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}
 });
 {% elif entry.pattern == "usage-only" %}
 // ─────────────────────────────────────────────────────────────────────────
@@ -52,13 +60,18 @@ import { emitUsageEventSafe } from '@/services/moolabs-client';
 
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
+  // Event-specific
   eventType: '{{ entry.event_type }}',
   subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
-  data: {
-    quantity: {{ entry.refund_unit.derivation }},
-    unit: '{{ entry.refund_unit.unit }}',
-  },
-  {% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),{% endif %}
+  quantity: {{ entry.refund_unit.derivation }},
+  unit: '{{ entry.refund_unit.unit }}',
+  // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
+  {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}
 });
 {% elif entry.pattern == "cost-only" %}
 // ─────────────────────────────────────────────────────────────────────────
@@ -67,15 +80,17 @@ await emitUsageEventSafe({
 import { emitCostEventSafe } from '@/services/moolabs-client';
 
 emitCostEventSafe({
+  // Event-specific
   kind: '{{ entry.cost_kind | default(entry.workflow_id.split(".")[-1]) }}',
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}{% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
+  {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
   {% endif %}attributes: {
     'workflow_id': '{{ entry.workflow_id }}',
-    {% if attribution_sources.request_id %}'request.id': String({{ attribution_sources.request_id }} ?? ''),
-    {% endif %}{% if attribution_sources.customer_id %}'customer.id': String({{ attribution_sources.customer_id }} ?? ''),
-    {% endif %}
   },
+  // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
+  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
+  {% endif %}
 });
 {% endif %}

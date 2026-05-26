@@ -31,13 +31,18 @@ emit_cost_event_safe(
 
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
+    # ── Event-specific ──
     event_type="{{ entry.event_type }}",
     subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
-    data={
-        "quantity": {{ entry.refund_unit.derivation }},
-        "unit": "{{ entry.refund_unit.unit }}",
-    },
-    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
+    quantity={{ entry.refund_unit.derivation }},
+    unit="{{ entry.refund_unit.unit }}",
+    # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
+    {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
+    {% endif %}
 )
 {% elif entry.pattern == "usage-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,13 +53,18 @@ from app.services.moolabs_client import emit_usage_event_safe
 
 # REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
+    # ── Event-specific ──
     event_type="{{ entry.event_type }}",
     subject=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
-    data={
-        "quantity": {{ entry.refund_unit.derivation }},
-        "unit": "{{ entry.refund_unit.unit }}",
-    },
-    {% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},{% endif %}
+    quantity={{ entry.refund_unit.derivation }},
+    unit="{{ entry.refund_unit.unit }}",
+    # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
+    {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
+    {% endif %}
 )
 {% elif entry.pattern == "cost-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,15 +73,17 @@ emit_usage_event_safe(
 from app.services.moolabs_client import emit_cost_event_safe
 
 emit_cost_event_safe(
+    # ── Event-specific ──
     kind="{{ entry.cost_kind | default(entry.workflow_id.split('.')[-1]) }}",
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
-    {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
+    {% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
-        {% if attribution_sources.request_id %}"request.id": {{ attribution_sources.request_id }},
-        {% endif %}{% if attribution_sources.customer_id %}"customer.id": str({{ attribution_sources.customer_id }}),
-        {% endif %}
     },
+    # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
+    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
+    {% endif %}
 )
 {% endif %}

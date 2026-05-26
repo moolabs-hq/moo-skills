@@ -118,53 +118,68 @@ def get_client() -> Moolabs:
 
 
 def emit_usage_event_safe(
+    *,
+    # ── Event-specific (required) ─────────────────────────────────
     event_type: str,
     subject: str,
-    data: dict,
-    *,
+    # ── Event-specific (usage) ────────────────────────────────────
+    quantity: float = 1,
+    unit: str | None = None,
+    data: dict | None = None,
+    # ── Shared envelope (identical to emit_cost_event_safe) ───────
+    tenant_id: str | None = None,
+    request_id: str | None = None,
+    customer_id: str | None = None,
+    consumer_agent: str | None = None,
     source: str = "{{ service_slug }}",
     correlation_id: str | None = None,
 ) -> None:
-    """Persist a usage event. Never drops the event — uses SDK when reachable,
-    structured log as recovery rail when not.
+    """Persist a usage event.
 
-    Dual transport (matches emit_cost_event_safe — both events follow the same
-    never-drop contract):
+    Shares its envelope (tenant_id / request_id / customer_id / consumer_agent /
+    source / correlation_id) with emit_cost_event_safe — the two helpers carry
+    the same attribution surface so events from the same call site can be joined
+    downstream by tenant or by correlation id without per-event reconstruction.
 
-      1. **Preferred — Moolabs SDK HTTP** (``client.usage.ingest_events``):
-         the normal path, verified against the Phase 1.5 snapshot. Idempotency
-         key in the payload makes any re-ingestion safe.
+    Event-specific fields:
+      - event_type: the SDK event-type string (e.g. "completion.delivered")
+      - subject:    CloudEvents subject (typically customer_id or request_id)
+      - quantity:   how many billable units this event represents (default 1)
+      - unit:       label for quantity (e.g. "1k_tokens", "render", "minute")
+      - data:       free-form additional event data
 
-      2. **Recovery rail — structured log** (``moolabs.usage.event`` log line):
-         when the SDK call raises (network out, 5xx, secret-manager outage,
-         rate-limit, connection-pool exhaustion), the full event payload is
-         logged with all fields flattened. The customer's log pipeline
-         (CloudWatch / Datadog / Loki) retains it; recovery — auto-ingest by
-         meter, or manual replay — depends on platform support that is
-         tracked separately from this helper. The point is the data is
-         **preserved**, not lost.
+    Never-drop contract — dual transport (matches emit_cost_event_safe):
+      1. Preferred: client.usage.ingest_events([payload]) via the SDK.
+      2. Recovery rail: on SDK exception, emit moolabs.usage.event structured
+         log line with the full payload + trace context salvaged for
+         correlation. The event is preserved; whether platform auto-ingests
+         the log line is a separate concern.
 
-    The SDK-error-then-log path means usage events are auditable even when the
-    billing-side is unreachable. "No DLQ in v1" (PM Stage 3b) remains true —
-    this is not a DLQ; there's no retry queue, no delivery guarantee. It's an
-    auditable record that the event was generated.
-
-    SDK errors MUST NOT propagate. Log + continue. The workflow continues
-    regardless of billing-side reachability.
+    SDK errors MUST NOT propagate.
     """
+    # Build the wire payload. tenant_id / request_id / customer_id ride in
+    # `data` because the SDK's usage-event schema is open-shape on data but
+    # strict on top-level CloudEvents fields.
+    merged_data: dict = dict(data) if data else {}
+    if tenant_id is not None:      merged_data["moolabs.tenant.id"] = str(tenant_id)
+    if request_id is not None:     merged_data["moolabs.request.id"] = str(request_id)
+    if customer_id is not None:    merged_data["moolabs.customer.id"] = str(customer_id)
+    if consumer_agent is not None: merged_data["moolabs.consumer_agent"] = str(consumer_agent)
+    if correlation_id is not None: merged_data["moolabs.correlation.id"] = str(correlation_id)
+    if quantity is not None:       merged_data["quantity"] = quantity
+    if unit is not None:           merged_data["unit"] = unit
+
     payload = {
         "type": event_type,
         "subject": subject,
         "source": source,
-        "data": dict(data),
+        "data": merged_data,
     }
-    if correlation_id is not None:
-        payload["data"]["moolabs.correlation.id"] = correlation_id
     try:
         get_client().usage.ingest_events([payload])
         return
     except Exception as exc:
-        # Recovery rail: log the full event so it is auditable + replayable.
+        # Recovery rail — same shape as emit_cost_event_safe's fallback.
         log_kwargs: dict[str, object] = {
             "transport": "log_recovery_rail",
             "policy": "never_drop_usage_event",
@@ -173,11 +188,17 @@ def emit_usage_event_safe(
             "source": source,
             "sdk_error": str(exc),
         }
-        if correlation_id is not None:
-            log_kwargs["correlation_id"] = correlation_id
-        for k, v in payload["data"].items():
-            log_kwargs[f"data.{k}"] = v
-        # Salvage trace context if there is one (correlation across the rails).
+        if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
+        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
+        if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if consumer_agent is not None: log_kwargs["consumer_agent"] = str(consumer_agent)
+        if correlation_id is not None: log_kwargs["correlation_id"] = str(correlation_id)
+        if quantity is not None:       log_kwargs["quantity"] = quantity
+        if unit is not None:           log_kwargs["unit"] = unit
+        for k, v in merged_data.items():
+            if not k.startswith("moolabs.") and k not in ("quantity", "unit"):
+                log_kwargs[f"data.{k}"] = v
+        # Salvage trace context for cross-rail correlation
         try:
             from opentelemetry import trace as _trace
 
@@ -194,83 +215,64 @@ def emit_usage_event_safe(
 
 def emit_cost_event_safe(
     *,
+    # ── Event-specific (required) ─────────────────────────────────
     kind: str,
-    tenant_id: str | None = None,
-    consumer_agent: str | None = None,
+    # ── Event-specific (cost) ─────────────────────────────────────
     cost_micros: int | None = None,
     attributes: dict[str, str | int | float | bool] | None = None,
+    # ── Shared envelope (identical to emit_usage_event_safe) ──────
+    tenant_id: str | None = None,
+    request_id: str | None = None,
+    customer_id: str | None = None,
+    consumer_agent: str | None = None,
+    source: str = "{{ service_slug }}",
+    correlation_id: str | None = None,
 ) -> None:
     """Persist a cost event. Never drops the event — uses OTel span when
     available, structured log as fallback.
 
-    Sibling-pair counterpart to emit_usage_event_safe(). Both events ship
-    through the SAME unified Moolabs SDK — there is no separate "acute SDK".
-    Verified against moolabs-py@v0.2.0-rc9: the SDK exposes 11 flat capability
-    namespaces on the client. Usage events go through ``client.usage.ingest_events``;
-    cost events go through ``client.cost.ingest_events_batch`` (capability "cost"
-    routes to CostEventsApi + SdkIngestApi on the acute backend).
+    Shares its envelope (tenant_id / request_id / customer_id / consumer_agent /
+    source / correlation_id) with emit_usage_event_safe — the two helpers carry
+    the same attribution surface so events from the same call site can be joined
+    downstream by tenant or by correlation id without per-event reconstruction.
 
-    Two paths in priority order:
+    Event-specific fields:
+      - kind:        cost-event category (e.g. "llm-tokens", "s3-put",
+                     "netsuite-api-call"). The SDK's analog of `event_type`
+                     on usage events; named `kind` to match SDK wire format.
+      - cost_micros: pre-resolved cost in micros from the upstream API
+                     response (NEVER invent one from token counts).
+      - attributes:  free-form additional event data, namespaced under
+                     ``moolabs.cost.<key>`` on the OTel span.
 
-      1. **Preferred — OTel span attribute** (when an active, recording span exists):
-         attributes are set on the current span and ride the existing OTLP exporter
-         to the acute cost-enricher. Co-located with the trace → trivial correlation
-         via ``trace_id`` / ``span_id``.
+    Never-drop contract — dual transport:
+      1. Preferred (capabilities.cost_event_direct_emit=true): unified SDK
+         cost-event endpoint at the path captured by Phase 1.5 snapshot.
+      2. Preferred (capabilities.cost_event_direct_emit=false): OTel span
+         attributes on the active recording span — ride OTLP to the attribution
+         backend.
+      3. Recovery rail: on either-path failure (SDK exception OR no recording
+         span), emit moolabs.cost.event structured log with the full envelope
+         + attributes + trace context salvage. Event preserved, not lost.
 
-      2. **Fallback — structured log** (when no recording span is available):
-         a single ``moolabs.cost.event`` log line is emitted with all attributes
-         flattened. The customer's existing log pipeline (CloudWatch / Datadog / Loki)
-         ships these to the same acute cost-enricher, which already ingests
-         structured logs as a secondary input.
-
-    Both paths target the same ClickHouse ``acute_analytics`` table downstream.
-    **Cost data is never silently dropped** — that would corrupt the attribution
-    engine for any code path the tracer doesn't sample (sampler-dropped traces,
-    background workers without context propagation, dev/CI without OTel, code
-    paths running before the TracerProvider is wired).
-
-    When the unified SDK's cost-event endpoint ships, this helper's primary
-    transport swaps to that endpoint (same client instance, same
-    ``get_client()`` singleton); the structured-log path stays as the
-    recovery rail. Call sites do not change.
-
-    Args:
-        kind: Cost-event category. Example: ``"llm-tokens"``, ``"s3-put"``,
-            ``"netsuite-api-call"``. Written as ``moolabs.cost.kind`` on span,
-            ``kind`` in log fallback.
-        tenant_id: Tenant UUID for cross-cutting attribution. Written as
-            ``moolabs.tenant.id`` (global, NOT under ``cost.*``).
-        consumer_agent: Agent that incurred the cost. Written as
-            ``moolabs.cost.consumer_agent``.
-        cost_micros: Pre-resolved cost in micros from the upstream API
-            response (NEVER invent one from token counts). Written as
-            ``moolabs.cost.micros``.
-        attributes: Free-form additional attributes. Each key namespaced
-            under ``moolabs.cost.``.
-
-    Fail-open contract:
-        - Any exception during emission (span write OR log fallback) → log
-          warning under ``moolabs.cost_emission.failed`` and return None.
-          Event MAY be lost in this case (exception path), but the workflow
-          continues.
+    Fail-open: emission-time exceptions logged + swallowed.
     """
     try:
 {% if capabilities.cost_event_direct_emit %}
         # Primary transport: unified SDK cost-event endpoint
         # ({{ capabilities.cost_event_method_path }}) — verified present in the
         # Phase 1.5 snapshot at SDK version {{ sdk_pinned_version }}.
-        payload = {
+        payload: dict = {
             "kind": kind,
-            "source": "{{ service_slug }}",
+            "source": source,
         }
-        if tenant_id is not None:
-            payload["tenant_id"] = str(tenant_id)
-        if consumer_agent is not None:
-            payload["consumer_agent"] = consumer_agent
-        if cost_micros is not None:
-            payload["cost_micros"] = int(cost_micros)
-        if attributes:
-            payload["attributes"] = dict(attributes)
+        if tenant_id is not None:      payload["tenant_id"] = str(tenant_id)
+        if request_id is not None:     payload["request_id"] = str(request_id)
+        if customer_id is not None:    payload["customer_id"] = str(customer_id)
+        if consumer_agent is not None: payload["consumer_agent"] = consumer_agent
+        if correlation_id is not None: payload["correlation_id"] = str(correlation_id)
+        if cost_micros is not None:    payload["cost_micros"] = int(cost_micros)
+        if attributes:                 payload["attributes"] = dict(attributes)
         try:
             # Attribute path resolved at codemod time from snapshot:
             # {{ capabilities.cost_event_method_path }}
@@ -291,12 +293,13 @@ def emit_cost_event_safe(
         # An active, recording span: write attributes (preferred for span-transport path).
         if span is not None and span.is_recording():
             span.set_attribute("moolabs.cost.kind", kind)
-            if tenant_id is not None:
-                span.set_attribute("moolabs.tenant.id", str(tenant_id))
-            if consumer_agent is not None:
-                span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
-            if cost_micros is not None:
-                span.set_attribute("moolabs.cost.micros", int(cost_micros))
+            span.set_attribute("moolabs.source", source)
+            if tenant_id is not None:      span.set_attribute("moolabs.tenant.id", str(tenant_id))
+            if request_id is not None:     span.set_attribute("moolabs.request.id", str(request_id))
+            if customer_id is not None:    span.set_attribute("moolabs.customer.id", str(customer_id))
+            if consumer_agent is not None: span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
+            if correlation_id is not None: span.set_attribute("moolabs.correlation.id", str(correlation_id))
+            if cost_micros is not None:    span.set_attribute("moolabs.cost.micros", int(cost_micros))
             for k, v in (attributes or {}).items():
                 span.set_attribute(f"moolabs.cost.{k}", v)
             return
@@ -316,21 +319,19 @@ def emit_cost_event_safe(
 
         log_kwargs: dict[str, object] = {
             "kind": kind,
+            "source": source,
             "transport": "log_fallback",
             "policy": "never_drop_cost_event",
         }
-        if _sdk_error is not None:
-            log_kwargs["sdk_error"] = str(_sdk_error)
-        if tenant_id is not None:
-            log_kwargs["tenant_id"] = str(tenant_id)
-        if consumer_agent is not None:
-            log_kwargs["consumer_agent"] = consumer_agent
-        if cost_micros is not None:
-            log_kwargs["cost_micros"] = int(cost_micros)
-        if trace_id is not None:
-            log_kwargs["trace_id"] = trace_id
-        if span_id is not None:
-            log_kwargs["span_id"] = span_id
+        if _sdk_error is not None:     log_kwargs["sdk_error"] = str(_sdk_error)
+        if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
+        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
+        if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if consumer_agent is not None: log_kwargs["consumer_agent"] = consumer_agent
+        if correlation_id is not None: log_kwargs["correlation_id"] = str(correlation_id)
+        if cost_micros is not None:    log_kwargs["cost_micros"] = int(cost_micros)
+        if trace_id is not None:       log_kwargs["trace_id"] = trace_id
+        if span_id is not None:        log_kwargs["span_id"] = span_id
         for k, v in (attributes or {}).items():
             log_kwargs[f"cost.{k}"] = v
 
