@@ -209,21 +209,32 @@ Per `cost-billing-shared/gaps-tracker.md`, eight items remain open and should dr
 
 ## Repository
 
-This suite lives in `moo-skills/skills/cost-billing-*/`. Source files:
+This suite lives in `moo-skills/skills/cost-billing/`. Source files (skill names
+preserved in frontmatter — slash commands like `/cost-billing-discovery` still
+work; the directory prefix is dropped for cleaner distribution as one folder):
 
 ```
-moo-skills/skills/
-├── cost-billing-bootstrap/           # Customer-context generator (run first)
-├── cost-billing-discovery/           # Skill A
-├── cost-billing-cloud-bill/          # Skill B
-├── cost-billing-instrument/          # Skill 2 — the codemod (framework's core)
-├── cost-billing-drift-lint/          # Skill 3
-├── cost-billing-adversarial-review/  # Skill R
-└── cost-billing-shared/              # Taxonomy / decisions / SDK ref / review surface / gaps / install.sh
+moo-skills/skills/cost-billing/
+├── bootstrap/                # Customer-context generator (run first; pre-v0.3 single-machine)
+├── bootstrap-finance/        # Stage 1 (CFO)
+├── bootstrap-cpo/            # Stage 2 (CPO)
+├── bootstrap-team-product/   # Stage 3 (per product PM)
+├── bootstrap-team-engineer/  # Stage 4 (per service IC engineer)
+├── signoff/                  # State-aware orchestrator for three-role review
+├── discovery/                # Skill A
+├── cloud-bill/               # Skill B
+├── instrument/               # Skill 2 — the codemod (framework's core)
+├── drift-lint/               # Skill 3
+├── adversarial-review/       # Skill R
+└── shared/                   # Taxonomy / decisions / SDK ref / install.sh / gaps
 
 # Skill C (attribution-engine reconciliation) is intentionally NOT in this suite —
 # it's Moolabs-engineering-internal infrastructure tracked separately.
 ```
+
+To distribute the suite: clone the parent repo OR copy `skills/cost-billing/`
+as a single tree. `shared/install.sh` walks the sibling directories and
+installs each as `cost-billing-<short>` on the customer's platform.
 
 ---
 

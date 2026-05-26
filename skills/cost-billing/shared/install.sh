@@ -727,7 +727,7 @@ scaffold_customer_context() {
   echo ""
   echo "Scaffolding customer-context/ at $ctx ..."
   mkdir -p "$ctx"
-  local tpl="$SUITE_SRC_DIR/cost-billing-bootstrap/assets/customer-context-templates"
+  local tpl="$SUITE_SRC_DIR/bootstrap/assets/customer-context-templates"
   if [[ -d "$tpl" ]]; then
     cp "$tpl/product-summary.template.md"        "$ctx/product-summary.template.md" 2>/dev/null || true
     cp "$tpl/pricing-model.template.yaml"        "$ctx/pricing-model.template.yaml" 2>/dev/null || true
@@ -848,8 +848,8 @@ package_skills() {
   echo "Persona: $PERSONA"
   echo ""
 
-  local shared_handoff="$SUITE_SRC_DIR/cost-billing-shared/chain-handoff.md"
-  local shared_principles="$SUITE_SRC_DIR/cost-billing-shared/operating-principles.md"
+  local shared_handoff="$SUITE_SRC_DIR/shared/chain-handoff.md"
+  local shared_principles="$SUITE_SRC_DIR/shared/operating-principles.md"
   local pkg_count=0
 
   for skill in "${SUITE_SKILLS[@]}"; do
@@ -857,7 +857,7 @@ package_skills() {
     # INTO each chain-stage zip below as references/chain-handoff.md.
     if [[ "$skill" == "cost-billing-shared" ]]; then continue; fi
 
-    local src="$SUITE_SRC_DIR/$skill"
+    local src="$SUITE_SRC_DIR/${skill#cost-billing-}"
     if [[ ! -d "$src" ]]; then
       echo "  SKIP $skill (not found)" >&2
       continue
@@ -1006,7 +1006,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 
 mcp_catalog_path() {
-  echo "$SUITE_SRC_DIR/cost-billing-shared/assets/mcp-catalog.json"
+  echo "$SUITE_SRC_DIR/shared/assets/mcp-catalog.json"
 }
 
 # Print the curated catalog of MCPs.
@@ -1286,7 +1286,7 @@ fi
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[dry-run] would create: $DEST_DIR"
   for skill in "${SUITE_SKILLS[@]}"; do
-    echo "[dry-run] would copy:   $SUITE_SRC_DIR/$skill  →  $DEST_DIR/$skill"
+    echo "[dry-run] would copy:   $SUITE_SRC_DIR/${skill#cost-billing-}  →  $DEST_DIR/$skill"
   done
   if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
     echo "[dry-run] would install codegraph + run codegraph init -i in ${REPO:-<no-repo>}"
@@ -1341,7 +1341,7 @@ fi
 
 # Copy skills
 for skill in "${SUITE_SKILLS[@]}"; do
-  src="$SUITE_SRC_DIR/$skill"
+  src="$SUITE_SRC_DIR/${skill#cost-billing-}"
   dest="$DEST_DIR/$skill"
   if [[ ! -d "$src" ]]; then
     echo "  SKIP $skill (not found at $src)" >&2

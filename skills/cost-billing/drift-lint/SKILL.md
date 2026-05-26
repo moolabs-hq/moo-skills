@@ -166,7 +166,7 @@ jobs:
       - run: |
           # TODO(post-GA): replace with `pip install moolabs-drift-lint` once published.
           git clone --depth 1 https://github.com/moolabs-hq/moo-skills.git /tmp/moo-skills
-          pip install /tmp/moo-skills/skills/cost-billing-drift-lint/scripts
+          pip install /tmp/moo-skills/skills/cost-billing/drift-lint/scripts
       - run: moolabs-drift-lint --pr ${{ github.event.pull_request.number }} --format github-action
 ```
 
