@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 # What we need bindings for. The codemod templates reference exactly these keys.
-ATTRIBUTION_KEYS = ["request_id", "customer_id", "consumer_agent"]
+ATTRIBUTION_KEYS = ["tenant_id", "customer_id", "feature_id", "request_id", "consumer_agent"]
 
 # Confidence ranking — used to pick a default when --non-interactive.
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1, "n_a": 0}
@@ -221,10 +221,9 @@ def _scan_typescript(service_root: Path, flavor: str) -> dict[str, list[Proposal
 def _meta_header_to_key(header_lc: str) -> str:
     if header_lc in ("x-request-id", "request-id"):
         return "request_id"
-    if header_lc in (
-        "x-customer-id", "customer-id",
-        "x-tenant-id", "tenant-id", "x-org-id", "x-organization-id",
-    ):
+    if header_lc in ("x-tenant-id", "tenant-id", "x-org-id", "x-organization-id"):
+        return "tenant_id"
+    if header_lc in ("x-customer-id", "customer-id"):
         return "customer_id"
     return header_lc.replace("-", "_")
 
@@ -253,7 +252,9 @@ def _normalize_key(attr: str) -> str:
     snake = re.sub(r"(?<!^)(?=[A-Z])", "_", attr).lower()
     if snake in ("request_id", "req_id", "correlation_id"):
         return "request_id"
-    if snake in ("customer_id", "user_id", "account_id", "tenant_id", "org_id", "organization_id", "workspace_id"):
+    if snake in ("tenant_id", "org_id", "organization_id", "workspace_id"):
+        return "tenant_id"
+    if snake in ("customer_id", "user_id", "account_id", "end_user_id"):
         return "customer_id"
     if snake in ("agent", "agent_name", "consumer_agent", "executor"):
         return "consumer_agent"

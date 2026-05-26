@@ -126,16 +126,19 @@ def emit_usage_event_safe(
     quantity: float = 1,
     unit: str | None = None,
     data: dict | None = None,
+    event_id: str | None = None,
     # ── Shared envelope (identical to emit_cost_event_safe) ───────
-    request_id: str | None = None,
+    tenant_id: str | None = None,
     customer_id: str | None = None,
+    feature_id: str | None = None,
+    request_id: str | None = None,
     consumer_agent: str | None = None,
     source: str = "{{ service_slug }}",
     correlation_id: str | None = None,
 ) -> None:
     """Persist a usage event.
 
-    Shares its envelope (request_id / customer_id / consumer_agent /
+    Shares its envelope (tenant_id / customer_id / feature_id / request_id / consumer_agent /
     source / correlation_id) with emit_cost_event_safe — the two helpers carry
     the same attribution surface so events from the same call site can be joined
     downstream by tenant or by correlation id without per-event reconstruction.
@@ -160,14 +163,23 @@ def emit_usage_event_safe(
     # `data` because the SDK's usage-event schema is open-shape on data but
     # strict on top-level CloudEvents fields.
     merged_data: dict = dict(data) if data else {}
-    if request_id is not None:     merged_data["moolabs.request.id"] = str(request_id)
+    if tenant_id is not None:      merged_data["moolabs.tenant.id"] = str(tenant_id)
     if customer_id is not None:    merged_data["moolabs.customer.id"] = str(customer_id)
+    if feature_id is not None:     merged_data["moolabs.feature.id"] = str(feature_id)
+    if request_id is not None:     merged_data["moolabs.request.id"] = str(request_id)
     if consumer_agent is not None: merged_data["moolabs.consumer_agent"] = str(consumer_agent)
     if correlation_id is not None: merged_data["moolabs.correlation.id"] = str(correlation_id)
     if quantity is not None:       merged_data["quantity"] = quantity
     if unit is not None:           merged_data["unit"] = unit
 
+    # CloudEvents requires `id` + `specversion` on every event. event_id is the
+    # caller-supplied identifier (used for sibling-pair linking — cost event's
+    # `usage_event_id` references this); if missing, generate one.
+    import uuid as _uuid
+    resolved_event_id = event_id or str(_uuid.uuid4())
     payload = {
+        "id": resolved_event_id,
+        "specversion": "1.0",
         "type": event_type,
         "subject": subject,
         "source": source,
@@ -186,8 +198,10 @@ def emit_usage_event_safe(
             "source": source,
             "sdk_error": str(exc),
         }
-        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
+        if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
         if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if feature_id is not None:     log_kwargs["feature_id"] = str(feature_id)
+        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
         if consumer_agent is not None: log_kwargs["consumer_agent"] = str(consumer_agent)
         if correlation_id is not None: log_kwargs["correlation_id"] = str(correlation_id)
         if quantity is not None:       log_kwargs["quantity"] = quantity
@@ -217,9 +231,12 @@ def emit_cost_event_safe(
     # ── Event-specific (cost) ─────────────────────────────────────
     cost_micros: int | None = None,
     attributes: dict[str, str | int | float | bool] | None = None,
+    usage_event_id: str | None = None,
     # ── Shared envelope (identical to emit_usage_event_safe) ──────
-    request_id: str | None = None,
+    tenant_id: str | None = None,
     customer_id: str | None = None,
+    feature_id: str | None = None,
+    request_id: str | None = None,
     consumer_agent: str | None = None,
     source: str = "{{ service_slug }}",
     correlation_id: str | None = None,
@@ -227,7 +244,7 @@ def emit_cost_event_safe(
     """Persist a cost event. Never drops the event — uses OTel span when
     available, structured log as fallback.
 
-    Shares its envelope (request_id / customer_id / consumer_agent /
+    Shares its envelope (tenant_id / customer_id / feature_id / request_id / consumer_agent /
     source / correlation_id) with emit_usage_event_safe — the two helpers carry
     the same attribution surface so events from the same call site can be joined
     downstream by tenant or by correlation id without per-event reconstruction.
@@ -258,16 +275,30 @@ def emit_cost_event_safe(
         # Primary transport: unified SDK cost-event endpoint
         # ({{ capabilities.cost_event_method_path }}) — verified present in the
         # Phase 1.5 snapshot at SDK version {{ sdk_pinned_version }}.
+        # CostEventIngest schema (verified against moolabs-py@v0.2.0-rc9):
+        # tenant_id + idempotency_key are REQUIRED on the wire — refuse-to-emit
+        # if tenant_id is None (the SDK would 422 on Pydantic validation).
+        import uuid as _uuid
+        if tenant_id is None:
+            logger.warning(
+                "moolabs.cost_emission.skipped_no_tenant_id",
+                kind=kind, reason="CostEventIngest requires tenant_id; bind it in Phase 1.6",
+            )
+            return
         payload: dict = {
+            "tenant_id": str(tenant_id),
+            "idempotency_key": correlation_id or str(_uuid.uuid4()),
             "kind": kind,
             "source": source,
         }
-        if request_id is not None:     payload["request_id"] = str(request_id)
-        if customer_id is not None:    payload["customer_id"] = str(customer_id)
-        if consumer_agent is not None: payload["consumer_agent"] = consumer_agent
-        if correlation_id is not None: payload["correlation_id"] = str(correlation_id)
-        if cost_micros is not None:    payload["cost_micros"] = int(cost_micros)
-        if attributes:                 payload["attributes"] = dict(attributes)
+        if customer_id is not None:     payload["customer_id"] = str(customer_id)
+        if feature_id is not None:      payload["feature_id"] = str(feature_id)
+        if usage_event_id is not None:  payload["usage_event_id"] = str(usage_event_id)
+        if request_id is not None:      payload["request_id"] = str(request_id)
+        if consumer_agent is not None:  payload["consumer_agent"] = consumer_agent
+        if correlation_id is not None:  payload["correlation_id"] = str(correlation_id)
+        if cost_micros is not None:     payload["cost_micros"] = int(cost_micros)
+        if attributes:                  payload["attributes"] = dict(attributes)
         try:
             # Attribute path resolved at codemod time from snapshot:
             # {{ capabilities.cost_event_method_path }}
@@ -289,8 +320,11 @@ def emit_cost_event_safe(
         if span is not None and span.is_recording():
             span.set_attribute("moolabs.cost.kind", kind)
             span.set_attribute("moolabs.source", source)
-            if request_id is not None:     span.set_attribute("moolabs.request.id", str(request_id))
+            if tenant_id is not None:      span.set_attribute("moolabs.tenant.id", str(tenant_id))
             if customer_id is not None:    span.set_attribute("moolabs.customer.id", str(customer_id))
+            if feature_id is not None:     span.set_attribute("moolabs.feature.id", str(feature_id))
+            if usage_event_id is not None: span.set_attribute("moolabs.usage_event.id", str(usage_event_id))
+            if request_id is not None:     span.set_attribute("moolabs.request.id", str(request_id))
             if consumer_agent is not None: span.set_attribute("moolabs.cost.consumer_agent", consumer_agent)
             if correlation_id is not None: span.set_attribute("moolabs.correlation.id", str(correlation_id))
             if cost_micros is not None:    span.set_attribute("moolabs.cost.micros", int(cost_micros))
@@ -318,8 +352,10 @@ def emit_cost_event_safe(
             "policy": "never_drop_cost_event",
         }
         if _sdk_error is not None:     log_kwargs["sdk_error"] = str(_sdk_error)
-        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
+        if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
         if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if feature_id is not None:     log_kwargs["feature_id"] = str(feature_id)
+        if request_id is not None:     log_kwargs["request_id"] = str(request_id)
         if consumer_agent is not None: log_kwargs["consumer_agent"] = consumer_agent
         if correlation_id is not None: log_kwargs["correlation_id"] = str(correlation_id)
         if cost_micros is not None:    log_kwargs["cost_micros"] = int(cost_micros)

@@ -206,11 +206,11 @@ def _attribution_keys_for(framework: str) -> list[str]:
     attribution-bindings.yaml` from Phase 1.6.
     """
     if framework == "fastapi":
-        return ["request_id", "customer_id", "consumer_agent"]
+        return ["tenant_id", "customer_id", "feature_id", "request_id", "consumer_agent"]
     if framework in ("express", "nestjs", "nextjs"):
-        return ["request_id", "customer_id"]
+        return ["tenant_id", "customer_id", "feature_id", "request_id"]
     if framework == "django":
-        return ["request_id", "customer_id"]
+        return ["tenant_id", "customer_id", "feature_id", "request_id"]
     return ["request_id", "customer_id"]
 
 
@@ -431,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             f"  Templates cannot emit without confirmed attribution sources.\n"
         )
         return 2
-    required = ["request_id", "customer_id", "consumer_agent"]
+    required = ["tenant_id", "customer_id", "feature_id", "request_id", "consumer_agent"]
     missing = [k for k in required if k not in attribution_defaults]
     if missing:
         sys.stderr.write(

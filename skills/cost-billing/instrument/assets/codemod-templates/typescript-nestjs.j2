@@ -17,9 +17,13 @@
 // ─────────────────────────────────────────────────────────────────────────
 import { emitUsageEventSafe, emitCostEventSafe } from '@/services/moolabs-client';
 
+// Shared id for sibling-pair linking — cost event's usageEventId references this
+const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+
 emitCostEventSafe({
   // Event-specific
   kind: '{{ entry.cost_kind | default("unknown") }}',
+  usageEventId: _moolabsEventId,
   {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
   {% endif %}attributes: {
     'workflow_id': '{{ entry.workflow_id }}',
@@ -28,6 +32,8 @@ emitCostEventSafe({
     {% endfor %}
   },
   // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -37,11 +43,14 @@ emitCostEventSafe({
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
   // Event-specific
+  eventId: _moolabsEventId,
   eventType: '{{ entry.event_type }}',
   subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   quantity: {{ entry.refund_unit.derivation }},
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -58,11 +67,14 @@ import { emitUsageEventSafe } from '@/services/moolabs-client';
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
   // Event-specific
+  eventId: _moolabsEventId,
   eventType: '{{ entry.event_type }}',
   subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   quantity: {{ entry.refund_unit.derivation }},
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -83,6 +95,8 @@ emitCostEventSafe({
     'workflow_id': '{{ entry.workflow_id }}',
   },
   // Shared envelope
+  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
+  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},

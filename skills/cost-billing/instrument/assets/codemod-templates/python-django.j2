@@ -17,6 +17,10 @@
 # Attribution sources confirmed in Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe
+import uuid as _moolabs_uuid
+
+# Shared id for sibling-pair linking — cost event's usage_event_id references this
+_moolabs_event_id = str(_moolabs_uuid.uuid4())
 
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default('unknown') }}",
@@ -40,6 +44,8 @@ emit_usage_event_safe(
     quantity={{ entry.refund_unit.derivation }},
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
@@ -61,6 +67,8 @@ emit_usage_event_safe(
     quantity={{ entry.refund_unit.derivation }},
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
@@ -82,6 +90,8 @@ emit_cost_event_safe(
         "workflow_id": "{{ entry.workflow_id }}",
     },
     # ── Shared envelope ──
+    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
+    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
