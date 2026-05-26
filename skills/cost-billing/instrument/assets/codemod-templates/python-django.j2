@@ -4,13 +4,12 @@
    (developer-confirmed in Phase 1.6). Templates substitute the bound expressions
    verbatim — they do NOT hardcode Django conventions like
    `request.META.get('HTTP_X_REQUEST_ID')`. If the developer's middleware uses a
-   non-standard source (e.g. `request.tenant_id` from a custom auth backend),
-   that's what gets emitted here.
+   non-standard source (e.g. `request.tenant_id` from a custom auth backend, which binds to the
+   envelope's customer_id slot), that's what gets emitted here.
 
    Variables: identical to python-fastapi.j2 — entry.{pattern, event_type,
    workflow_id, idempotency_anchor, refund_unit, cost_kind, cost_micros_source,
-   cost_workflow_ids, consumer_agent_source} + attribution_sources{tenant_id,
-   request_id, customer_id, consumer_agent}.
+   cost_workflow_ids, consumer_agent_source} + attribution_sources{request_id, customer_id, consumer_agent}.
 #}
 {% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,8 +20,7 @@ from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_s
 
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default('unknown') }}",
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
+    {% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={
         "workflow_id": "{{ entry.workflow_id }}",
@@ -42,8 +40,7 @@ emit_usage_event_safe(
     quantity={{ entry.refund_unit.derivation }},
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
@@ -64,8 +61,7 @@ emit_usage_event_safe(
     quantity={{ entry.refund_unit.derivation }},
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
@@ -86,8 +82,7 @@ emit_cost_event_safe(
         "workflow_id": "{{ entry.workflow_id }}",
     },
     # ── Shared envelope ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}

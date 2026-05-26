@@ -78,10 +78,9 @@ async function getClient(): Promise<Moolabs> {
 /**
  * Shared envelope — identical fields on both emit*EventSafe options.
  * Lets downstream consumers join usage and cost events from the same call site
- * by tenant or correlation id without per-event reconstruction.
+ * by customer or correlation id without per-event reconstruction.
  */
 export interface EventEnvelope {
-  tenantId?: string;
   requestId?: string;
   customerId?: string;
   consumerAgent?: string;
@@ -113,7 +112,6 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
   // Merge envelope into the wire payload's `data` field — SDK schema is
   // open-shape on data but strict on top-level CloudEvents fields.
   const mergedData: Record<string, unknown> = { ...(opts.data ?? {}) };
-  if (opts.tenantId)       mergedData['moolabs.tenant.id']     = String(opts.tenantId);
   if (opts.requestId)      mergedData['moolabs.request.id']    = String(opts.requestId);
   if (opts.customerId)     mergedData['moolabs.customer.id']   = String(opts.customerId);
   if (opts.consumerAgent)  mergedData['moolabs.consumer_agent']= String(opts.consumerAgent);
@@ -140,7 +138,6 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
       source: payload.source,
       sdk_error: String(exc),
     };
-    if (opts.tenantId)      logPayload.tenant_id      = String(opts.tenantId);
     if (opts.requestId)     logPayload.request_id     = String(opts.requestId);
     if (opts.customerId)    logPayload.customer_id    = String(opts.customerId);
     if (opts.consumerAgent) logPayload.consumer_agent = String(opts.consumerAgent);
@@ -185,7 +182,6 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
     if (span && span.isRecording()) {
       span.setAttribute('moolabs.cost.kind', opts.kind);
       span.setAttribute('moolabs.source', opts.source ?? '{{ service_slug }}');
-      if (opts.tenantId !== undefined)       span.setAttribute('moolabs.tenant.id',         String(opts.tenantId));
       if (opts.requestId !== undefined)      span.setAttribute('moolabs.request.id',        String(opts.requestId));
       if (opts.customerId !== undefined)     span.setAttribute('moolabs.customer.id',       String(opts.customerId));
       if (opts.consumerAgent !== undefined)  span.setAttribute('moolabs.cost.consumer_agent', opts.consumerAgent);
@@ -208,7 +204,6 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
       transport: 'log_fallback',
       policy: 'never_drop_cost_event',
     };
-    if (opts.tenantId !== undefined)       logPayload.tenant_id      = String(opts.tenantId);
     if (opts.requestId !== undefined)      logPayload.request_id     = String(opts.requestId);
     if (opts.customerId !== undefined)     logPayload.customer_id    = String(opts.customerId);
     if (opts.consumerAgent !== undefined)  logPayload.consumer_agent = opts.consumerAgent;

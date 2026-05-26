@@ -21,9 +21,8 @@ tasks:
     inserts:
       - line: 142
         pattern: sibling-pair
-        attribution_keys: [tenant_id, request_id, customer_id]
+        attribution_keys: [request_id, customer_id]
         attribution_sources:
-          tenant_id: "request.state.tenant_id"
           request_id: "request.state.request_id"
           customer_id: "request.state.customer_id"
           consumer_agent: null
@@ -59,10 +58,10 @@ tasks:
     inserts:
       - line: 67
         pattern: cost-only
-        attribution_keys: [tenant_id, request_id]
+        attribution_keys: [request_id, customer_id]
         attribution_sources:
           # Per-file override — webhook handler bypasses TenantMiddleware.
-          tenant_id: 'request.headers.get("x-tenant-id", "")'
+          customer_id: 'request.headers.get("x-customer-id", "")'
           request_id: "request.state.request_id"
           customer_id: null
           consumer_agent: null

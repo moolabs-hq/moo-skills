@@ -25,8 +25,7 @@ emitCostEventSafe({
     {% endfor %}
   },
   // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}
@@ -40,8 +39,7 @@ await emitUsageEventSafe({
   quantity: {{ entry.refund_unit.derivation }},
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
@@ -62,8 +60,7 @@ await emitUsageEventSafe({
   quantity: {{ entry.refund_unit.derivation }},
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
@@ -83,8 +80,7 @@ emitCostEventSafe({
     'workflow_id': '{{ entry.workflow_id }}',
   },
   // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}{% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
+  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
   {% endif %}

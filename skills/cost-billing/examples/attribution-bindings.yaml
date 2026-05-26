@@ -7,14 +7,6 @@ framework: fastapi
 generated_at: "2026-05-26T14:00:00Z"
 
 bindings:
-  tenant_id:
-    source: "request.state.tenant_id"
-    confidence: high
-    evidence:
-      - "services/payments-api/app/middleware/tenant.py:34"
-    fallback_when_absent: skip
-    confirmed_by: "sam@example.com"
-    confirmed_at: "2026-05-26T14:05:00Z"
 
   request_id:
     source: "request.state.request_id"
@@ -47,6 +39,4 @@ overrides:
   - file: services/payments-api/app/api/v1/webhooks/router.py
     reason: "Webhook handler — signature-verified path bypasses TenantMiddleware"
     bindings:
-      tenant_id:
-        source: 'request.headers.get("x-tenant-id", "")'
-        confidence: confirmed
+    

@@ -20,7 +20,7 @@
      attribution_sources         — dict of CONFIRMED Python expressions per key,
                                     sourced from .moolabs/customer-context/attribution-bindings.yaml
                                     (developer-confirmed in Phase 1.6).
-                                    Keys: tenant_id, request_id, customer_id, consumer_agent.
+                                    Keys: request_id, customer_id, consumer_agent.
                                     A value of None means "skip this attribute" — the
                                     branch silently omits it. Templates NEVER hardcode
                                     framework conventions (the previous v0.1 mistake).
@@ -48,8 +48,7 @@ emit_cost_event_safe(
         {% endfor %}
     },
     # ── Shared envelope (Phase 1.6 attribution-bindings) ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}
@@ -64,8 +63,7 @@ emit_usage_event_safe(
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope (matches emit_cost_event_safe; fixes the prior bug
     # where usage events shipped un-attributed to tenant) ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
@@ -87,8 +85,7 @@ emit_usage_event_safe(
     quantity={{ entry.refund_unit.derivation }},
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id={{ attribution_sources.request_id }},
@@ -110,8 +107,7 @@ emit_cost_event_safe(
         "workflow_id": "{{ entry.workflow_id }}",
     },
     # ── Shared envelope ──
-    {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}{% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
+    {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}

@@ -142,7 +142,9 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 > The codemod uses tenant identity for attribution — you decide the shape here so the engineer can wire it correctly."
 
 ### Q12 — Tenant_id field + source
-> "What's the field name that identifies a tenant in YOUR data model? Examples: `tenant_id`, `workspace_id`, `account_id`, `org_id`. And where does it come from on a request — JWT claim, subdomain, header, request body? (You can defer the exact technical source to the engineer if you're not sure — but the FIELD NAME is yours to set.)"
+> "What's the field name that identifies a tenant in YOUR data model? Examples: `tenant_id`, `workspace_id`, `account_id`, `org_id`. And where does it come from on a request — JWT claim, subdomain, header, request body? (You can defer the exact technical source to the engineer if you're not sure — but the FIELD NAME is yours to set.)
+>
+> **Note**: whatever name you pick, downstream the codemod binds it to the envelope's `customer_id` slot — we don't track 'tenant' as a separate envelope field (that name collides with the Moolabs-internal term for 'the Moolabs customer'). Your field name stays your field name in source code; the wire-format envelope just has `customer_id`."
 
 ---
 

@@ -1,7 +1,7 @@
 """attribution_discovery.py — Phase 1.6 of /cost-billing-instrument.
 
 Discover where the customer's code keeps the attribution variables the
-templates need (tenant_id, request_id, customer_id, consumer_agent),
+templates need (request_id, customer_id, consumer_agent),
 present proposals to the developer ONE KEY AT A TIME, persist confirmed
 choices as `.moolabs/customer-context/attribution-bindings.yaml`.
 
@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 # What we need bindings for. The codemod templates reference exactly these keys.
-ATTRIBUTION_KEYS = ["tenant_id", "request_id", "customer_id", "consumer_agent"]
+ATTRIBUTION_KEYS = ["request_id", "customer_id", "consumer_agent"]
 
 # Confidence ranking — used to pick a default when --non-interactive.
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1, "n_a": 0}
@@ -221,9 +221,10 @@ def _scan_typescript(service_root: Path, flavor: str) -> dict[str, list[Proposal
 def _meta_header_to_key(header_lc: str) -> str:
     if header_lc in ("x-request-id", "request-id"):
         return "request_id"
-    if header_lc in ("x-tenant-id", "tenant-id", "x-org-id", "x-organization-id"):
-        return "tenant_id"
-    if header_lc in ("x-customer-id", "customer-id"):
+    if header_lc in (
+        "x-customer-id", "customer-id",
+        "x-tenant-id", "tenant-id", "x-org-id", "x-organization-id",
+    ):
         return "customer_id"
     return header_lc.replace("-", "_")
 
@@ -235,7 +236,7 @@ def _header_to_key(header: str) -> str:
 def _maybe_add(proposals: dict[str, list[Proposal]], attr: str, proposal: Proposal) -> None:
     """Add the proposal to the right attribution bucket (if it matches a known key).
 
-    Matches are name-based: 'tenant_id', 'tenantId', 'org_id' → tenant_id, etc.
+    Matches are name-based: 'tenant_id', 'tenantId', 'org_id' → customer_id, etc.
     """
     normalized = _normalize_key(attr)
     if normalized in ATTRIBUTION_KEYS:
@@ -250,11 +251,9 @@ def _maybe_add(proposals: dict[str, list[Proposal]], attr: str, proposal: Propos
 
 def _normalize_key(attr: str) -> str:
     snake = re.sub(r"(?<!^)(?=[A-Z])", "_", attr).lower()
-    if snake in ("tenant_id", "org_id", "organization_id", "workspace_id"):
-        return "tenant_id"
     if snake in ("request_id", "req_id", "correlation_id"):
         return "request_id"
-    if snake in ("customer_id", "user_id", "account_id"):
+    if snake in ("customer_id", "user_id", "account_id", "tenant_id", "org_id", "organization_id", "workspace_id"):
         return "customer_id"
     if snake in ("agent", "agent_name", "consumer_agent", "executor"):
         return "consumer_agent"

@@ -1,0 +1,14 @@
+# Template for .multiphase-project/state.yaml
+# Created by `scripts/state_manager.py init` — not consumed at runtime.
+# Kept here for reference and for tools that want to bootstrap a state file
+# without running the script.
+
+project:
+  name: ""                        # human-readable project name
+  description: ""                 # one-line summary
+  status: new                     # new | in_progress | complete | aborted
+  current_phase_index: 0          # 0-based index into phases[]
+  created_at: ""                  # ISO-8601 timestamp (set by script)
+  updated_at: ""                  # ISO-8601 timestamp (set on every save)
+
+phases: []                        # see references/state-schema.md for shape

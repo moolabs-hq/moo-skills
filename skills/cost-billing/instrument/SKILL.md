@@ -229,7 +229,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 ### Phase 1.6: Discover + confirm attribution sources (MANDATORY, interactive, ONCE per service)
 
-**The templates do NOT know where the customer's code keeps `tenant_id`, `request_id`, `customer_id`.** The v0.1 templates hardcoded framework conventions (`request.state.tenant_id` for FastAPI, `flask.g.request_id` for Flask, etc.) — but every customer's middleware pattern differs, webhook routes bypass middleware, custom auth code puts the tenant in non-standard places. Emitting code that references `request.state.tenant_id` when the customer's actual code reads it from `request.scope['org_id']` will compile but break at runtime with `AttributeError`.
+**The templates do NOT know where the customer's code keeps `request_id` / `customer_id`.** The v0.1 templates hardcoded framework conventions (`request.state.customer_id` for FastAPI, `flask.g.customer_id` for Flask, etc.) — but every customer's middleware pattern differs, webhook routes bypass middleware, custom auth code puts the customer identifier in non-standard places. Emitting code that references `request.state.customer_id` when the customer's actual code reads it from `request.scope['org_id']` will compile but break at runtime with `AttributeError`.
 
 **Why this exists** (added 2026-05-25 after the user observed: "skill and tasks defined should determine where to source the variables needed by usage and cost events, confirm with developer during instrumentation"):
 
@@ -243,7 +243,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 1. Run `scripts/attribution_discovery.py --service <slug> --customer-context-dir .moolabs/customer-context`. The script:
    - Scans the service for middleware files (FastAPI `@app.middleware`, Django `MIDDLEWARE` config, NestJS `@Injectable()` middleware classes, Express `app.use`).
    - Greps for assignments like `request.state.X = ...`, `request.scope[...] = ...`, `flask.g.X = ...`, `request.user = ...`, `setattr(request, ...)`.
-   - For each attribution key the templates need (`tenant_id`, `request_id`, `customer_id`, `consumer_agent`), proposes 1–3 candidate sources with confidence + evidence (`file:line`).
+   - For each attribution key the templates need (`request_id`, `customer_id`, `consumer_agent`), proposes 1–3 candidate sources with confidence + evidence (`file:line`).
 2. **Interactively** present each proposal to the developer one key at a time (per `cost-billing-shared/operating-principles.md`: ONE question at a time, NEVER assume). Developer choices:
    - Confirm the highest-confidence proposal
    - Pick an alternative from the list
@@ -257,12 +257,6 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    framework: fastapi
    generated_at: 2026-05-25T16:45:00Z
    bindings:
-     tenant_id:
-       source: "request.state.tenant_id"
-       confidence: high
-       evidence: ["services/billing-api/app/middleware/tenant.py:34 — TenantMiddleware"]
-       confirmed_by: kritivas.shukla@moolabs.com
-       confirmed_at: 2026-05-25T16:45:00Z
      request_id:
        source: "request.state.request_id"
        confidence: high
@@ -283,8 +277,8 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
      - file: services/billing-api/app/api/v1/webhooks/router.py
        reason: "webhook handler — bypasses TenantMiddleware; signature-verified path"
        bindings:
-         tenant_id:
-           source: 'request.headers.get("x-moolabs-tenant", "")'
+         customer_id:
+           source: 'request.headers.get("x-customer-id", "")'
            confidence: confirmed
            confirmed_by: kritivas.shukla@moolabs.com
    ```
@@ -320,9 +314,9 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 | `_resolve_api_key()` | Read key from configured secret store; `lru_cache(maxsize=1)` singleton | Returns empty string on failure; logs `moolabs.sdk_key.resolution_failed` |
 | `get_client()` | Singleton `Moolabs(...)` instance; `lru_cache(maxsize=1)` | First-call lazy; never raises |
 | `emit_usage_event_safe(event_type, subject, data, ...)` | The ONLY surface for SDK emission. Per-call-site templates call this — they NEVER touch `client.meter.events.ingest_events()` directly | SDK errors logged + swallowed; workflow continues |
-| `emit_cost_event_safe(kind, tenant_id, cost_micros, attributes, ...)` | The ONLY surface for cost-event emission. Sibling-pair of `emit_usage_event_safe`. **Dual transport (added 2026-05-25 after an early integration run):** prefers OTel span attribute when a recording span exists; falls back to structured log (`logger.info("moolabs.cost.event", ...)`) when no recording span is available. Acute ingests both transports. | Cost events are **never silently dropped** when transport is unavailable. Only true exceptions (during both write AND log fallback) get swallowed. |
+| `emit_cost_event_safe(kind, customer_id, cost_micros, attributes, ...)` | The ONLY surface for cost-event emission. Sibling-pair of `emit_usage_event_safe`. **Dual transport (added 2026-05-25 after an early integration run):** prefers OTel span attribute when a recording span exists; falls back to structured log (`logger.info("moolabs.cost.event", ...)`) when no recording span is available. Acute ingests both transports. | Cost events are **never silently dropped** when transport is unavailable. Only true exceptions (during both write AND log fallback) get swallowed. |
 
-**Why dual transport** — the OTel-span-only design silently drops cost data for any code path the tracer doesn't sample. Concrete impact: head-sampling at 10% drops 90% of cost signal; background workers without trace-context propagation drop all of theirs; dev/CI without OTel drops everything. The function arguments carry the truth (kind, tenant_id, cost_micros) — span vs log is just transport. Both arrive at the same ClickHouse `acute_analytics` table downstream; trace_id is salvaged from the span context even when the span isn't recording, so log-path events can still join the trace. When the unified Moolabs SDK adds its cost-event endpoint (same `Moolabs` client, exact method path TBD by platform team — there is no separate "acute SDK"), the helper's PRIMARY transport swaps from OTel-span-write to that SDK call on the same `get_client()` singleton. The structured-log path stays as the recovery rail. Call sites do not change.
+**Why dual transport** — the OTel-span-only design silently drops cost data for any code path the tracer doesn't sample. Concrete impact: head-sampling at 10% drops 90% of cost signal; background workers without trace-context propagation drop all of theirs; dev/CI without OTel drops everything. The function arguments carry the truth (kind, customer_id, cost_micros) — span vs log is just transport. Both arrive at the same ClickHouse `acute_analytics` table downstream; trace_id is salvaged from the span context even when the span isn't recording, so log-path events can still join the trace. When the unified Moolabs SDK adds its cost-event endpoint (same `Moolabs` client, exact method path TBD by platform team — there is no separate "acute SDK"), the helper's PRIMARY transport swaps from OTel-span-write to that SDK call on the same `get_client()` singleton. The structured-log path stays as the recovery rail. Call sites do not change.
 
 **Codemod commit:** First commit on the branch is `feat(moolabs): generate per-service emission helper`. Reviewable in isolation before any business-logic file changes.
 
@@ -356,7 +350,7 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
         cost_workflow_ids: [shared.llm.call]
         cost_micros_source: "response.cost_micros"
         consumer_agent_source: 'log_context["agent"]'
-      attribution_keys: [tenant_id, request_id, customer_id, consumer_agent]
+      attribution_keys: [request_id, customer_id, consumer_agent]
   audit:
     cost_events_inventory_sha: <sha of slice>
     output_input_map_sha: <sha of slice>
