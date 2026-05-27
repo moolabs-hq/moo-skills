@@ -66,7 +66,7 @@ Skill R fires at every stage handoff. PM is the apex of the review workflow with
 ./install.sh
 ```
 
-Auto-detects your agent platform (Claude Code, Cursor, Copilot, Windsurf, etc.) and **interactively asks which persona you are**:
+Auto-detects your agent platform (Claude Code, Cursor, Copilot, Windsurf, Codex CLI, Gemini CLI, etc.) and **interactively asks which persona you are**:
 
 1. **finance** — CFO / finance reviewer. Reviews pricing + projected revenue.
 2. **product** — Product Manager. Builds output↔input bill of materials.

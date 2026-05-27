@@ -244,6 +244,8 @@ detect_platform() {
     echo "goose"
   elif [[ -d "$HOME/.config/opencode" ]]; then
     echo "opencode"
+  elif [[ -d "$HOME/.codex" ]]; then
+    echo "codex"
   elif [[ -d "$HOME/.agents" ]] || [[ -d "./.agents" ]]; then
     echo "universal"
   else
@@ -272,6 +274,7 @@ resolve_dest_dir() {
     roo) echo "./.roo/rules" ;;
     goose) echo "$HOME/.config/goose/skills" ;;
     opencode) echo "$HOME/.config/opencode/skills" ;;
+    codex) echo "$HOME/.codex/skills" ;;
     universal)
       if [[ "$scope" == "project" ]]; then echo "./.agents/skills"
       else echo "$HOME/.agents/skills"; fi ;;
@@ -785,6 +788,7 @@ Pass one explicitly:
   ./install.sh --platform roo
   ./install.sh --platform goose
   ./install.sh --platform opencode
+  ./install.sh --platform codex
   ./install.sh --platform universal
 EOF
   exit 1
