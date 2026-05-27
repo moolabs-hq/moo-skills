@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 # What we need bindings for. The codemod templates reference exactly these keys.
-ATTRIBUTION_KEYS = ["tenant_id", "customer_id", "feature_id", "request_id", "consumer_agent"]
+ATTRIBUTION_KEYS = ["tenant_id", "customer_id", "feature_key", "request_id", "consumer_agent"]
 
 # Confidence ranking — used to pick a default when --non-interactive.
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1, "n_a": 0}

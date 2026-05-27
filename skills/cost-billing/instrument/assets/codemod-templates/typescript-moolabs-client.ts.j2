@@ -83,7 +83,8 @@ async function getClient(): Promise<Moolabs> {
 export interface EventEnvelope {
   tenantId?: string;       // SDK CostEventIngest requires this on the wire — the customer's multi-tenancy key (NOT Moolabs's internal tenant concept)
   customerId?: string;     // end-user customer in the customer's SaaS (optional on wire)
-  featureId?: string;      // links cost/usage to a Feature in client.catalog (for margin computation)
+  featureKey?: string;     // human-readable slug (e.g. "ai_chat") — rides in tags/data dict so ACUTE's mapping engine extracts it
+  featureId?: string;      // catalog-assigned UUID — top-level CostEventIngest field; usually unknown at emit time
   requestId?: string;
   consumerAgent?: string;
   source?: string;
@@ -117,6 +118,7 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
   const mergedData: Record<string, unknown> = { ...(opts.data ?? {}) };
   if (opts.tenantId)       mergedData['moolabs.tenant.id']     = String(opts.tenantId);
   if (opts.customerId)     mergedData['moolabs.customer.id']   = String(opts.customerId);
+  if (opts.featureKey)     mergedData['moolabs.feature.key']   = String(opts.featureKey);
   if (opts.featureId)      mergedData['moolabs.feature.id']    = String(opts.featureId);
   if (opts.requestId)      mergedData['moolabs.request.id']    = String(opts.requestId);
   if (opts.consumerAgent)  mergedData['moolabs.consumer_agent']= String(opts.consumerAgent);
@@ -150,6 +152,7 @@ export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<v
     };
     if (opts.tenantId)      logPayload.tenant_id      = String(opts.tenantId);
     if (opts.customerId)    logPayload.customer_id    = String(opts.customerId);
+    if (opts.featureKey)    logPayload.feature_key    = String(opts.featureKey);
     if (opts.featureId)     logPayload.feature_id     = String(opts.featureId);
     if (opts.requestId)     logPayload.request_id     = String(opts.requestId);
     if (opts.consumerAgent) logPayload.consumer_agent = String(opts.consumerAgent);
@@ -197,6 +200,7 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
       span.setAttribute('moolabs.source', opts.source ?? '{{ service_slug }}');
       if (opts.tenantId !== undefined)       span.setAttribute('moolabs.tenant.id',         String(opts.tenantId));
       if (opts.customerId !== undefined)     span.setAttribute('moolabs.customer.id',       String(opts.customerId));
+      if (opts.featureKey !== undefined)     span.setAttribute('moolabs.feature.key',       String(opts.featureKey));
       if (opts.featureId !== undefined)      span.setAttribute('moolabs.feature.id',        String(opts.featureId));
       if (opts.usageEventId !== undefined)   span.setAttribute('moolabs.usage_event.id',    String(opts.usageEventId));
       if (opts.requestId !== undefined)      span.setAttribute('moolabs.request.id',        String(opts.requestId));
@@ -222,6 +226,7 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
     };
     if (opts.tenantId !== undefined)       logPayload.tenant_id      = String(opts.tenantId);
     if (opts.customerId !== undefined)     logPayload.customer_id    = String(opts.customerId);
+    if (opts.featureKey !== undefined)     logPayload.feature_key    = String(opts.featureKey);
     if (opts.featureId !== undefined)      logPayload.feature_id     = String(opts.featureId);
     if (opts.usageEventId !== undefined)   logPayload.usage_event_id = String(opts.usageEventId);
     if (opts.requestId !== undefined)      logPayload.request_id     = String(opts.requestId);

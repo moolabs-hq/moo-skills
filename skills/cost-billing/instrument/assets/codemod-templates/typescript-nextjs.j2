@@ -34,7 +34,7 @@ emitCostEventSafe({
   },
   // Shared envelope
   {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -51,7 +51,7 @@ await emitUsageEventSafe({
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
   {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -75,7 +75,7 @@ await emitUsageEventSafe({
   unit: '{{ entry.refund_unit.unit }}',
   // Shared envelope
   {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
@@ -97,7 +97,7 @@ emitCostEventSafe({
   },
   // Shared envelope
   {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureId: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
   {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
   {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
   {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},

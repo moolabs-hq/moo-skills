@@ -130,7 +130,8 @@ def emit_usage_event_safe(
     # ── Shared envelope (identical to emit_cost_event_safe) ───────
     tenant_id: str | None = None,
     customer_id: str | None = None,
-    feature_id: str | None = None,
+    feature_key: str | None = None,   # human-readable slug (e.g. "ai_chat"); rides in tags dict — ACUTE's mapping engine extracts it
+    feature_id: str | None = None,    # catalog-assigned UUID; usually None at emit-time. Top-level wire field on CostEventIngest.
     request_id: str | None = None,
     consumer_agent: str | None = None,
     source: str = "{{ service_slug }}",
@@ -138,7 +139,7 @@ def emit_usage_event_safe(
 ) -> None:
     """Persist a usage event.
 
-    Shares its envelope (tenant_id / customer_id / feature_id / request_id / consumer_agent /
+    Shares its envelope (tenant_id / customer_id / feature_key + feature_id / request_id / consumer_agent /
     source / correlation_id) with emit_cost_event_safe — the two helpers carry
     the same attribution surface so events from the same call site can be joined
     downstream by tenant or by correlation id without per-event reconstruction.
@@ -165,6 +166,7 @@ def emit_usage_event_safe(
     merged_data: dict = dict(data) if data else {}
     if tenant_id is not None:      merged_data["moolabs.tenant.id"] = str(tenant_id)
     if customer_id is not None:    merged_data["moolabs.customer.id"] = str(customer_id)
+    if feature_key is not None:    merged_data["moolabs.feature.key"] = str(feature_key)
     if feature_id is not None:     merged_data["moolabs.feature.id"] = str(feature_id)
     if request_id is not None:     merged_data["moolabs.request.id"] = str(request_id)
     if consumer_agent is not None: merged_data["moolabs.consumer_agent"] = str(consumer_agent)
@@ -200,6 +202,7 @@ def emit_usage_event_safe(
         }
         if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
         if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if feature_key is not None:    log_kwargs["feature_key"] = str(feature_key)
         if feature_id is not None:     log_kwargs["feature_id"] = str(feature_id)
         if request_id is not None:     log_kwargs["request_id"] = str(request_id)
         if consumer_agent is not None: log_kwargs["consumer_agent"] = str(consumer_agent)
@@ -235,7 +238,8 @@ def emit_cost_event_safe(
     # ── Shared envelope (identical to emit_usage_event_safe) ──────
     tenant_id: str | None = None,
     customer_id: str | None = None,
-    feature_id: str | None = None,
+    feature_key: str | None = None,   # human-readable slug; rides in tags dict / data dict (MooMeter sees it here)
+    feature_id: str | None = None,    # catalog-assigned UUID; top-level CostEventIngest field
     request_id: str | None = None,
     consumer_agent: str | None = None,
     source: str = "{{ service_slug }}",
@@ -244,7 +248,7 @@ def emit_cost_event_safe(
     """Persist a cost event. Never drops the event — uses OTel span when
     available, structured log as fallback.
 
-    Shares its envelope (tenant_id / customer_id / feature_id / request_id / consumer_agent /
+    Shares its envelope (tenant_id / customer_id / feature_key + feature_id / request_id / consumer_agent /
     source / correlation_id) with emit_usage_event_safe — the two helpers carry
     the same attribution surface so events from the same call site can be joined
     downstream by tenant or by correlation id without per-event reconstruction.
@@ -292,8 +296,11 @@ def emit_cost_event_safe(
             "source": source,
         }
         if customer_id is not None:     payload["customer_id"] = str(customer_id)
-        if feature_id is not None:      payload["feature_id"] = str(feature_id)
+        if feature_id is not None:      payload["feature_id"] = str(feature_id)  # UUID — ACUTE stores in cost_events.feature_id
         if usage_event_id is not None:  payload["usage_event_id"] = str(usage_event_id)
+        # feature_key (slug) rides in tags — ACUTE's mapping engine reads it and lands it in usage_event_log + ClickHouse cost_by_feature_metric MV.
+        if feature_key is not None:
+            payload.setdefault("tags", {})["feature_key"] = str(feature_key)
         if request_id is not None:      payload["request_id"] = str(request_id)
         if consumer_agent is not None:  payload["consumer_agent"] = consumer_agent
         if correlation_id is not None:  payload["correlation_id"] = str(correlation_id)
@@ -322,6 +329,7 @@ def emit_cost_event_safe(
             span.set_attribute("moolabs.source", source)
             if tenant_id is not None:      span.set_attribute("moolabs.tenant.id", str(tenant_id))
             if customer_id is not None:    span.set_attribute("moolabs.customer.id", str(customer_id))
+            if feature_key is not None:    span.set_attribute("moolabs.feature.key", str(feature_key))
             if feature_id is not None:     span.set_attribute("moolabs.feature.id", str(feature_id))
             if usage_event_id is not None: span.set_attribute("moolabs.usage_event.id", str(usage_event_id))
             if request_id is not None:     span.set_attribute("moolabs.request.id", str(request_id))
@@ -354,6 +362,7 @@ def emit_cost_event_safe(
         if _sdk_error is not None:     log_kwargs["sdk_error"] = str(_sdk_error)
         if tenant_id is not None:      log_kwargs["tenant_id"] = str(tenant_id)
         if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
+        if feature_key is not None:    log_kwargs["feature_key"] = str(feature_key)
         if feature_id is not None:     log_kwargs["feature_id"] = str(feature_id)
         if request_id is not None:     log_kwargs["request_id"] = str(request_id)
         if consumer_agent is not None: log_kwargs["consumer_agent"] = consumer_agent

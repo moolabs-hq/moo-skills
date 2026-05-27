@@ -45,7 +45,7 @@ emit_usage_event_safe(
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
     {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+    {% endif %}feature_key="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
@@ -68,7 +68,7 @@ emit_usage_event_safe(
     unit="{{ entry.refund_unit.unit }}",
     # ── Shared envelope ──
     {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+    {% endif %}feature_key="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
@@ -91,7 +91,7 @@ emit_cost_event_safe(
     },
     # ── Shared envelope ──
     {% if attribution_sources.tenant_id %}tenant_id={{ attribution_sources.tenant_id }},
-    {% endif %}feature_id="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+    {% endif %}feature_key="{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
     {% if attribution_sources.request_id %}request_id={{ attribution_sources.request_id }},
     {% endif %}{% if attribution_sources.customer_id %}customer_id={{ attribution_sources.customer_id }},
     {% endif %}{% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
