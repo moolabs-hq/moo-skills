@@ -153,6 +153,10 @@ select_skills_for_persona() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITE_SRC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Capture original argv before parsing so we can forward to per-platform
+# self-recursion in the multi-target install path below.
+_ORIG_ARGS=("$@")
+
 PLATFORM=""
 SCOPE="user"
 PERSONA=""
@@ -220,6 +224,9 @@ done
 # ──────────────────────────────────────────────────────────────────────
 
 detect_platform() {
+  # Back-compat single-platform detector. Returns the first match in the
+  # elif chain — used only as a fallback. The default multi-target install
+  # path uses detect_all_platforms() instead.
   if [[ -n "${CLAUDE_CONFIG_DIR:-}" && -d "$CLAUDE_CONFIG_DIR" ]]; then
     echo "claude-code"
   elif [[ -d "$HOME/.claude" ]] || [[ -d "./.claude" ]]; then
@@ -251,6 +258,31 @@ detect_platform() {
   else
     echo ""
   fi
+}
+
+# Enumerates EVERY agent platform present on the machine — not just the first.
+# This is the default for `./install.sh` with no --platform: developers commonly
+# run multiple agents (Claude Code AND Codex AND Cursor) and expect the suite to
+# land in all of them. Output is one platform name per line, deduplicated, in
+# precedence order. The main flow recurses self per line.
+detect_all_platforms() {
+  local found=()
+  [[ -n "${CLAUDE_CONFIG_DIR:-}" && -d "$CLAUDE_CONFIG_DIR" ]] && found+=("claude-code")
+  { [[ -d "$HOME/.claude" ]] || [[ -d "./.claude" ]]; } && found+=("claude-code")
+  { [[ -d "./.cursor" ]] || [[ -d "$HOME/.cursor" ]]; } && found+=("cursor")
+  { [[ -d "./.github" ]] && [[ -f "./.github/copilot-instructions.md" ]]; } && found+=("copilot")
+  { [[ -d "$HOME/.codeium/windsurf" ]] || [[ -d "./.windsurf" ]]; } && found+=("windsurf")
+  [[ -d "./.clinerules" ]] && found+=("cline")
+  [[ -d "$HOME/.gemini" ]] && found+=("gemini")
+  [[ -d "./.kiro" ]] && found+=("kiro")
+  [[ -d "./.trae" ]] && found+=("trae")
+  [[ -d "./.roo" ]] && found+=("roo")
+  [[ -d "$HOME/.config/goose" ]] && found+=("goose")
+  [[ -d "$HOME/.config/opencode" ]] && found+=("opencode")
+  [[ -d "$HOME/.codex" ]] && found+=("codex")
+  { [[ -d "$HOME/.agents" ]] || [[ -d "./.agents" ]]; } && found+=("universal")
+  # Dedupe preserving order (claude-code can appear twice — env var + ~/.claude).
+  printf '%s\n' "${found[@]}" | awk 'NF && !seen[$0]++'
 }
 
 resolve_dest_dir() {
@@ -770,11 +802,18 @@ EOF
 # ──────────────────────────────────────────────────────────────────────
 
 if [[ -z "$PLATFORM" ]]; then
-  PLATFORM="$(detect_platform)"
-fi
-if [[ -z "$PLATFORM" ]]; then
-  cat >&2 <<'EOF'
-ERROR: Could not auto-detect agent platform.
+  # No --platform passed: auto-detect ALL agent platforms on this machine and
+  # install to each. Developers typically run multiple agents (Claude Code +
+  # Codex + Cursor) and expect the suite to land in all of them. To install
+  # to just one, pass --platform NAME explicitly.
+  declare -a _DETECTED=()
+  while IFS= read -r _p; do
+    [[ -n "$_p" ]] && _DETECTED+=("$_p")
+  done < <(detect_all_platforms)
+
+  if [[ ${#_DETECTED[@]} -eq 0 ]]; then
+    cat >&2 <<'EOF'
+ERROR: Could not auto-detect any agent platform.
 
 Pass one explicitly:
   ./install.sh --platform claude-code
@@ -791,7 +830,73 @@ Pass one explicitly:
   ./install.sh --platform codex
   ./install.sh --platform universal
 EOF
-  exit 1
+    exit 1
+  fi
+
+  if [[ ${#_DETECTED[@]} -gt 1 ]]; then
+    echo ""
+    echo "Detected ${#_DETECTED[@]} agent platforms on this machine: ${_DETECTED[*]}"
+    echo "Installing to each (override with --platform NAME for a single target)."
+
+    # Run prompts ONCE at the top so per-platform recursions inherit the answers
+    # via explicit flags instead of re-prompting per platform.
+    if [[ $UNINSTALL -eq 0 ]]; then
+      if [[ $PACKAGE_MODE -eq 1 && -z "$PERSONA" ]]; then PERSONA="all"; fi
+      prompt_persona
+      prompt_repo
+      if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
+        prompt_handoff
+      fi
+    fi
+
+    _arg_in() { local n="$1"; shift; for a in "$@"; do [[ "$a" == "$n" ]] && return 0; done; return 1; }
+    declare -a _FWD=("${_ORIG_ARGS[@]}")
+    # Inject prompt-captured values when not already present in original args
+    # so children skip the corresponding prompt.
+    if [[ -n "$PERSONA" ]] && ! _arg_in --persona "${_ORIG_ARGS[@]}"; then
+      _FWD+=("--persona" "$PERSONA")
+    fi
+    if [[ -n "$REPO" ]] && ! _arg_in --repo "${_ORIG_ARGS[@]}"; then
+      _FWD+=("--repo" "$REPO")
+    fi
+    # Handoff was prompted once above (writes shared artifacts independent of
+    # install dest); children should not re-prompt.
+    if ! _arg_in --no-handoff-prompt "${_ORIG_ARGS[@]}"; then
+      _FWD+=("--no-handoff-prompt")
+    fi
+    # Codegraph init is per-repo, not per-platform: run it on the first child
+    # only. Forward --skip-codegraph to every child *after* the first.
+    declare -a _FAILED=()
+    local_idx=0
+    for plat in "${_DETECTED[@]}"; do
+      echo ""
+      echo "═══════════════════════════════════════════════════════════"
+      echo "  Target platform: $plat"
+      echo "═══════════════════════════════════════════════════════════"
+      declare -a _PLAT_FWD=("${_FWD[@]}")
+      if [[ $local_idx -gt 0 ]] && ! _arg_in --skip-codegraph "${_ORIG_ARGS[@]}"; then
+        _PLAT_FWD+=("--skip-codegraph")
+      fi
+      if ! "$0" --platform "$plat" "${_PLAT_FWD[@]}"; then
+        _FAILED+=("$plat")
+      fi
+      local_idx=$((local_idx + 1))
+    done
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    if [[ ${#_FAILED[@]} -eq 0 ]]; then
+      echo "  Done. Installed to ${#_DETECTED[@]} platform(s): ${_DETECTED[*]}"
+    else
+      echo "  Installed to ${#_DETECTED[@]} platform(s); ${#_FAILED[@]} failed: ${_FAILED[*]}"
+      exit 1
+    fi
+    echo "═══════════════════════════════════════════════════════════"
+    exit 0
+  fi
+
+  # Single platform detected — fall through to existing single-target flow.
+  PLATFORM="${_DETECTED[0]}"
 fi
 
 DEST_DIR="$(resolve_dest_dir "$PLATFORM" "$SCOPE")"
