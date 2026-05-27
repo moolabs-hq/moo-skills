@@ -59,6 +59,52 @@ These remain open and should drive HLD agenda:
 
 ---
 
+## Maintenance rules — lessons from v1 wire-format iterations
+
+These are **process rules**, not decisions about specific defaults. They exist because the same class of mistake recurred three times during v1 implementation and each time required a forward-fix commit. Future maintainers touching helper templates, attribution envelopes, or cost/usage emission routing MUST follow these before pushing.
+
+### MR-1: SDK Pydantic types don't tell you what the platform stores
+
+The cost/usage SDK's Pydantic models tell you what passes **client-side validation**. They do NOT tell you:
+- Which fields are routed by ACUTE's mapping engine vs. stored as-is
+- Which columns expect specific types in the database (UUID vs. slug vs. free-form string)
+- Which fields drive analytics joins/MVs vs. are stored for audit only
+- Which fields are extracted from `tags` / `otel_attributes` / `provider_metadata` vs. read at the top level
+
+**Before adding, removing, or re-routing any wire-format field in the helper templates**, read:
+
+1. `services/moo-acute/app/services/cost_enricher.py` — which fields the cost enricher reads from incoming events; how it maps `tags["X"]` → storage columns; which fields feed `usage_event_log` vs. `cost_events`.
+2. `services/moo-acute/app/services/clickhouse.py` — which fields are first-class analytics columns vs. dimension dictionaries; which materialized views group by which fields.
+3. `services/moo-acute/app/services/mapping_engine.py` — what mapping rules can extract (OTel attrs, headers, Kafka properties, static values) and which target fields they support.
+4. `services/moo-acute/app/api/v1/cost/analytics/*` — which `feature_key` / `customer_id` / `meter_slug` / `feature_id` slices the analytics endpoints actually return — those endpoints are the consumer contract that drives helper-emit decisions.
+
+If you cannot find the field's storage destination after consulting all four, the field does not belong on the wire envelope — open a platform-team question first.
+
+### MR-2: Read the storage model before redesigning wire routing
+
+For any wire-format decision (which field is top-level, which rides in a dict, which is required, which is omitted-when-null), confirm:
+- **Storage column type**: UUID columns reject non-UUID strings; slug columns reject UUIDs that look like slugs.
+- **Whether the field is JOIN-able**: top-level fields support direct FK joins; dict-extracted fields require mapping rules to run first.
+- **Which materialized view groups by it**: MVs are pre-aggregated; getting the field there means it's queryable in seconds, not minutes.
+
+**Example failure mode that justified this rule** (commit `b87db37`, 2026-05-26): the cost SDK declared `feature_id: Optional[StrictStr]`. The helper template emitted `feature_id="recommendation"` (a slug derived from workflow_id). Wire validation passed. But ACUTE's `cost_events.feature_id` is a UUID column — the slug would have been rejected at insert OR stored as garbage that would never JOIN against the Feature catalog. Fix: route slugs via `tags["feature_key"]` (where ACUTE's mapping engine extracts them); reserve top-level `feature_id` for actual UUIDs.
+
+### MR-3: Three-commit pattern as the warning signal
+
+Each of these three commits was a forward-fix of a wire-format mistake that passed all SDK type checks but failed against the actual platform behavior:
+
+| Commit | What I assumed | What I missed |
+|---|---|---|
+| `0552ad0` | "acute SDK is a separate roadmap item not yet shipped" | The unified SDK already routes `client.cost.*` to ACUTE via `_dx_routing.CAPABILITY_MAP` — I didn't read the routing table |
+| `0cc98e4` | "`tenant_id` collides with Moolabs internal term; drop it" | `CostEventIngest.tenant_id: StrictStr` (required, not Optional) — I didn't run the helper end-to-end against the SDK's validation |
+| `b87db37` | "feature slug binds to `feature_id` wire field" | `cost_events.feature_id` is a UUID column; slugs route via `tags["feature_key"]` per ACUTE's mapping engine — I didn't read `cost_enricher.py` |
+
+Every one of these passed `python -m py_compile` on the rendered template and 36/36 render smoke-test assertions. **None of those checks tells you the field will be stored, joined, or analytics-aggregated correctly.** The smoke tests verify the helper-call shape; the platform's storage and mapping behavior is what determines whether the emitted event is actually useful downstream.
+
+If you're about to push a fourth commit in this category, stop and re-run MR-1 first.
+
+---
+
 ## How to update this log
 
 When HLD revisits a decision, update the row's "Revisit at" to "REVISITED" and append a new dated entry with the new default + rationale. **Never delete old rows.** Audit trail.
