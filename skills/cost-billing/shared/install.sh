@@ -850,18 +850,21 @@ EOF
     fi
 
     _arg_in() { local n="$1"; shift; for a in "$@"; do [[ "$a" == "$n" ]] && return 0; done; return 1; }
-    declare -a _FWD=("${_ORIG_ARGS[@]}")
+    # Bash 3.2 (macOS default) + `set -u` treats "${arr[@]}" on an empty array
+    # as an unbound-variable error. Use "${arr[@]+"${arr[@]}"}" everywhere:
+    # expands to the array contents iff non-empty, else to nothing.
+    declare -a _FWD=("${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}")
     # Inject prompt-captured values when not already present in original args
     # so children skip the corresponding prompt.
-    if [[ -n "$PERSONA" ]] && ! _arg_in --persona "${_ORIG_ARGS[@]}"; then
+    if [[ -n "$PERSONA" ]] && ! _arg_in --persona "${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}"; then
       _FWD+=("--persona" "$PERSONA")
     fi
-    if [[ -n "$REPO" ]] && ! _arg_in --repo "${_ORIG_ARGS[@]}"; then
+    if [[ -n "$REPO" ]] && ! _arg_in --repo "${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}"; then
       _FWD+=("--repo" "$REPO")
     fi
     # Handoff was prompted once above (writes shared artifacts independent of
     # install dest); children should not re-prompt.
-    if ! _arg_in --no-handoff-prompt "${_ORIG_ARGS[@]}"; then
+    if ! _arg_in --no-handoff-prompt "${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}"; then
       _FWD+=("--no-handoff-prompt")
     fi
     # Codegraph init is per-repo, not per-platform: run it on the first child
@@ -873,11 +876,11 @@ EOF
       echo "═══════════════════════════════════════════════════════════"
       echo "  Target platform: $plat"
       echo "═══════════════════════════════════════════════════════════"
-      declare -a _PLAT_FWD=("${_FWD[@]}")
-      if [[ $local_idx -gt 0 ]] && ! _arg_in --skip-codegraph "${_ORIG_ARGS[@]}"; then
+      declare -a _PLAT_FWD=("${_FWD[@]+"${_FWD[@]}"}")
+      if [[ $local_idx -gt 0 ]] && ! _arg_in --skip-codegraph "${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}"; then
         _PLAT_FWD+=("--skip-codegraph")
       fi
-      if ! "$0" --platform "$plat" "${_PLAT_FWD[@]}"; then
+      if ! "$0" --platform "$plat" "${_PLAT_FWD[@]+"${_PLAT_FWD[@]}"}"; then
         _FAILED+=("$plat")
       fi
       local_idx=$((local_idx + 1))
