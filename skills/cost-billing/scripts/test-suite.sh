@@ -41,7 +41,7 @@ echo "Suite root: $SUITE_ROOT"
 echo ""
 
 # ─── SKILL.md frontmatter ──────────────────────────────────────────────
-echo "[1/5] SKILL.md frontmatter present (name + description)"
+echo "[1/7] SKILL.md frontmatter present (name + description)"
 for skill_dir in "$SUITE_ROOT"/*/; do
   name=$(basename "$skill_dir")
   case "$name" in
@@ -69,7 +69,7 @@ done
 echo ""
 
 # ─── YAML schemas parse ─────────────────────────────────────────────────
-echo "[2/5] YAML schemas + assets parse"
+echo "[2/7] YAML schemas + assets parse"
 while IFS= read -r -d '' yaml_file; do
   rel="${yaml_file#$SUITE_ROOT/}"
   if python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]).read())" "$yaml_file" 2>/dev/null; then
@@ -83,7 +83,7 @@ done < <(find "$SUITE_ROOT" -name "*.yaml" -not -path "*/node_modules/*" -not -p
 echo ""
 
 # ─── Python scripts parse ──────────────────────────────────────────────
-echo "[3/5] Python scripts compile"
+echo "[3/7] Python scripts compile"
 while IFS= read -r -d '' py_file; do
   rel="${py_file#$SUITE_ROOT/}"
   if python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$py_file" 2>/dev/null; then
@@ -97,13 +97,19 @@ done < <(find "$SUITE_ROOT" -name "*.py" -not -path "*/__pycache__/*" -print0)
 echo ""
 
 # ─── install.sh syntax ─────────────────────────────────────────────────
-echo "[4/5] install.sh syntax (wrapper + real)"
+echo "[4/7] install.sh syntax (wrapper + real)"
 check "install.sh wrapper"     bash -n "$SUITE_ROOT/install.sh"
 check "shared/install.sh"      bash -n "$SUITE_ROOT/shared/install.sh"
+# Also parse under /bin/bash (macOS ships 3.2.57). Catches array / parameter
+# expansion syntax that modern bash silently accepts but 3.2 rejects.
+if [[ -x /bin/bash ]]; then
+  check "install.sh wrapper (/bin/bash)"  /bin/bash -n "$SUITE_ROOT/install.sh"
+  check "shared/install.sh (/bin/bash)"   /bin/bash -n "$SUITE_ROOT/shared/install.sh"
+fi
 echo ""
 
 # ─── install.sh dry-run for each persona ───────────────────────────────
-echo "[5/5] install.sh --dry-run per persona"
+echo "[5/7] install.sh --dry-run per persona"
 for persona in finance product team-product engineering all; do
   if bash "$SUITE_ROOT/install.sh" \
        --persona "$persona" \
@@ -122,9 +128,39 @@ for persona in finance product team-product engineering all; do
 done
 echo ""
 
-# ─── [6/6] Codemod-template renders + Codex regression assertions ──────
+# ─── [6/7] install.sh dry-run under /bin/bash (macOS bash 3.2 customer env) ─
+# Phase 5 runs under $PATH bash (typically 5.x on dev boxes). Customers on
+# macOS hit /bin/bash 3.2.57 — different array/expansion semantics under
+# `set -u`. This phase re-runs the same matrix under /bin/bash to catch
+# bash-3.2 regressions before they reach customer dogfood.
+echo "[6/7] install.sh --dry-run per persona under /bin/bash (bash 3.2 customer env)"
+if [[ ! -x /bin/bash ]]; then
+  yellow "  SKIP  /bin/bash not present on this host"
+else
+  bash32_version="$(/bin/bash --version | head -1)"
+  echo "  /bin/bash → $bash32_version"
+  for persona in finance product team-product engineering all; do
+    if /bin/bash "$SUITE_ROOT/install.sh" \
+         --persona "$persona" \
+         --dry-run \
+         --skip-codegraph \
+         --skip-plugins \
+         --no-bootstrap-cta \
+         --no-prune \
+         2>&1 | grep -q "would copy:"; then
+      green "  PASS  persona=$persona (/bin/bash)"
+      PASS=$((PASS + 1))
+    else
+      red "  FAIL  persona=$persona (/bin/bash) — install.sh aborted; suspect bash 3.2 + set -u"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+fi
+echo ""
+
+# ─── [7/7] Codemod-template renders + Codex regression assertions ──────
 # Each assertion guards a class of bug found in cross-model adversarial review.
-echo "[6/6] template renders + adversarial-regression assertions"
+echo "[7/7] template renders + adversarial-regression assertions"
 python3 - "$SUITE_ROOT" <<'PYEOF'
 import sys
 from pathlib import Path
@@ -256,7 +292,7 @@ else:
     print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate")
     pass_count += 1
 
-print(f"\n  Phase-6 result: {pass_count} pass, {fail_count} fail")
+print(f"\n  Phase-7 result: {pass_count} pass, {fail_count} fail")
 sys.exit(0 if fail_count == 0 else 1)
 PYEOF
 PHASE6=$?
