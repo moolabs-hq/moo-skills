@@ -192,9 +192,12 @@ def emit_usage_event_safe(
         return
     except Exception as exc:
         # Recovery rail — same shape as emit_cost_event_safe's fallback.
+        # event_id MUST survive the recovery rail: log-path replay rebuilds
+        # the sibling-pair join (cost_event.usage_event_id == usage_event.event_id).
         log_kwargs: dict[str, object] = {
             "transport": "log_recovery_rail",
             "policy": "never_drop_usage_event",
+            "event_id": resolved_event_id,
             "event_type": event_type,
             "subject": subject,
             "source": source,
@@ -364,6 +367,9 @@ def emit_cost_event_safe(
         if customer_id is not None:    log_kwargs["customer_id"] = str(customer_id)
         if feature_key is not None:    log_kwargs["feature_key"] = str(feature_key)
         if feature_id is not None:     log_kwargs["feature_id"] = str(feature_id)
+        # usage_event_id MUST survive the recovery rail — without it,
+        # log-path replay cannot rebuild the sibling-pair join.
+        if usage_event_id is not None: log_kwargs["usage_event_id"] = str(usage_event_id)
         if request_id is not None:     log_kwargs["request_id"] = str(request_id)
         if consumer_agent is not None: log_kwargs["consumer_agent"] = consumer_agent
         if correlation_id is not None: log_kwargs["correlation_id"] = str(correlation_id)

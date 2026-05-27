@@ -17,7 +17,7 @@ import { emitUsageEventSafe, emitCostEventSafe } from '@/services/moolabs-client
 // Shared id for sibling-pair linking — cost event's usageEventId references this
 const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
 
-emitCostEventSafe({
+await emitCostEventSafe({
   // Event-specific
   kind: '{{ entry.cost_kind | default("unknown") }}',
   usageEventId: _moolabsEventId,
@@ -64,7 +64,6 @@ import { emitUsageEventSafe } from '@/services/moolabs-client';
 // REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
   // Event-specific
-  eventId: _moolabsEventId,
   eventType: '{{ entry.event_type }}',
   subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   quantity: {{ entry.refund_unit.derivation }},
@@ -84,7 +83,7 @@ await emitUsageEventSafe({
 // ─────────────────────────────────────────────────────────────────────────
 import { emitCostEventSafe } from '@/services/moolabs-client';
 
-emitCostEventSafe({
+await emitCostEventSafe({
   // Event-specific
   kind: '{{ entry.cost_kind | default(entry.workflow_id.split(".")[-1]) }}',
   {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},

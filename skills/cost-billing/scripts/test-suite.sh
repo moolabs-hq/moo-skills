@@ -122,6 +122,151 @@ for persona in finance product team-product engineering all; do
 done
 echo ""
 
+# ─── [6/6] Codemod-template renders + Codex regression assertions ──────
+# Each assertion guards a class of bug found in cross-model adversarial review.
+echo "[6/6] template renders + adversarial-regression assertions"
+python3 - "$SUITE_ROOT" <<'PYEOF'
+import sys
+from pathlib import Path
+try:
+    from jinja2 import Environment, FileSystemLoader
+except ImportError:
+    print("  SKIP  jinja2 not installed; rendered-template assertions skipped")
+    sys.exit(0)
+
+suite_root = Path(sys.argv[1])
+tpl_dir = suite_root / "instrument" / "assets" / "codemod-templates"
+env = Environment(loader=FileSystemLoader(str(tpl_dir)))
+
+entry_base = {
+    "event_type":"completion.delivered","workflow_id":"checkout.recommendation.delivered",
+    "idempotency_anchor":{"handler":"r","path_param":"customer_id","confidence":0.9},
+    "refund_unit":{"unit":"completion","derivation":"1"},
+    "cost_kind":"llm-tokens","cost_micros_source":"resp.cm",
+    "cost_workflow_ids":["s.llm"],"consumer_agent_source":'"agent"',
+}
+sources = {"tenant_id":"req.state.tid","request_id":"req.state.rid","customer_id":"req.state.cid",
+           "consumer_agent":None,"feature_key":None}
+templates = ["python-fastapi.j2","python-django.j2","python-flask.j2",
+             "typescript-express.j2","typescript-nestjs.j2","typescript-nextjs.j2"]
+patterns = ["sibling-pair","usage-only","cost-only"]
+
+pass_count, fail_count = 0, 0
+
+# Helper-template renders (per-service, capability-true)
+helper_ctx = {
+    "service_slug": "test-svc",
+    "signoff_chain_hashes": [],
+    "sdk_key_location": {"strategy": "env_var"},
+    "sdk_key_read_pattern": "",
+    "sdk_pinned_version": "v0.2.0-rc9",
+    "telemetry": {"mode": "brownfield"},
+    "capabilities": {
+        "cost_event_direct_emit": True,
+        "cost_event_method_path": "client.cost.ingest_events_batch",
+    },
+}
+for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
+    try:
+        r = env.get_template(helper).render(**helper_ctx)
+        # CODEX-REGRESSION-1: cost log fallback must carry usage_event_id
+        # CODEX-REGRESSION-1: usage log fallback must carry event_id
+        if helper.startswith("python"):
+            # Usage log fallback adds event_id in the initial dict literal.
+            # Cost log fallback adds usage_event_id as a conditional bracket assignment.
+            usage_id_in_log = '"event_id": resolved_event_id' in r
+            cost_id_in_log = 'log_kwargs["usage_event_id"] = str(usage_event_id)' in r
+            if usage_id_in_log and cost_id_in_log:
+                print(f"  PASS  helper {helper}: sibling-pair ids survive recovery rail")
+                pass_count += 1
+            else:
+                missing = []
+                if not usage_id_in_log: missing.append("usage event_id in log")
+                if not cost_id_in_log: missing.append("cost usage_event_id in log")
+                print(f"  FAIL  helper {helper}: log fallback drops {missing} (Codex Finding #1)")
+                fail_count += 1
+        else:
+            if "logPayload.usage_event_id" in r and "ingestEventsBatch" in r:
+                print(f"  PASS  helper {helper}: SDK direct branch + log fallback ids present")
+                pass_count += 1
+            else:
+                print(f"  FAIL  helper {helper}: TS SDK branch missing OR log drops sibling-pair ids (Codex Finding #1/#3)")
+                fail_count += 1
+    except Exception as e:
+        print(f"  FAIL  helper {helper}: render error: {e}")
+        fail_count += 1
+
+# Per-callsite template renders × all 3 patterns
+for tpl in templates:
+    for pat in patterns:
+        entry = {**entry_base, "pattern": pat}
+        try:
+            r = env.get_template(tpl).render(entry=entry, attribution_sources=sources)
+        except Exception as e:
+            print(f"  FAIL  {tpl}[{pat}]: render error: {e}")
+            fail_count += 1
+            continue
+
+        # CODEX-REGRESSION-2: TS usage-only / cost-only must NOT reference _moolabsEventId (undefined in those branches)
+        if tpl.startswith("typescript-") and pat in ("usage-only", "cost-only"):
+            if "_moolabsEventId" in r:
+                print(f"  FAIL  {tpl}[{pat}]: references undefined _moolabsEventId (Codex Finding #2)")
+                fail_count += 1; continue
+
+        # Sibling-pair must wire both ids
+        if pat == "sibling-pair":
+            if tpl.startswith("python-"):
+                ok = "_moolabs_event_id" in r and "event_id=_moolabs_event_id" in r and "usage_event_id=_moolabs_event_id" in r
+            else:
+                ok = "_moolabsEventId" in r and "eventId: _moolabsEventId" in r and "usageEventId: _moolabsEventId" in r
+            if not ok:
+                print(f"  FAIL  {tpl}[{pat}]: sibling-pair missing shared event_id wiring")
+                fail_count += 1; continue
+
+        # Python: ast-compile rendered output
+        if tpl.startswith("python-"):
+            try:
+                src = "import response, request, customer_id, log_context\ndef _fn():\n"
+                for line in r.splitlines(): src += "    " + line + "\n"
+                compile(src, tpl, "exec")
+            except SyntaxError as e:
+                print(f"  FAIL  {tpl}[{pat}]: py syntax error: {e.msg}")
+                fail_count += 1; continue
+
+        # TS: cost call must be awaited (post-async helper)
+        if tpl.startswith("typescript-") and pat in ("sibling-pair", "cost-only"):
+            if "emitCostEventSafe(" in r and "await emitCostEventSafe(" not in r:
+                print(f"  FAIL  {tpl}[{pat}]: emitCostEventSafe is async; callsite missing await")
+                fail_count += 1; continue
+
+        print(f"  PASS  {tpl}[{pat}]")
+        pass_count += 1
+
+# CODEX-REGRESSION-4: example attribution-bindings satisfies planner gate
+bindings_yaml = suite_root / "examples" / "attribution-bindings.yaml"
+import yaml
+b = yaml.safe_load(bindings_yaml.read_text())
+required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
+declared = list((b.get("bindings") or {}).keys())
+missing = [k for k in required if k not in declared]
+if missing:
+    print(f"  FAIL  examples/attribution-bindings.yaml: missing required keys {missing} (Codex Finding #4)")
+    fail_count += 1
+else:
+    print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate")
+    pass_count += 1
+
+print(f"\n  Phase-6 result: {pass_count} pass, {fail_count} fail")
+sys.exit(0 if fail_count == 0 else 1)
+PYEOF
+PHASE6=$?
+if [[ $PHASE6 -ne 0 ]]; then
+  FAIL=$((FAIL + 1))
+else
+  PASS=$((PASS + 1))
+fi
+echo ""
+
 # ─── Summary ───────────────────────────────────────────────────────────
 echo "─────────────────────────────────────"
 echo "  PASS: $PASS    FAIL: $FAIL"

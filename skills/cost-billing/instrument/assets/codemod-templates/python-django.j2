@@ -24,6 +24,7 @@ _moolabs_event_id = str(_moolabs_uuid.uuid4())
 
 emit_cost_event_safe(
     kind="{{ entry.cost_kind | default('unknown') }}",
+    usage_event_id=_moolabs_event_id,
     {% if attribution_sources.consumer_agent %}consumer_agent={{ attribution_sources.consumer_agent }},
     {% endif %}{% if entry.cost_micros_source %}cost_micros={{ entry.cost_micros_source }},
     {% endif %}attributes={

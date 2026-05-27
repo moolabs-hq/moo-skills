@@ -183,18 +183,80 @@ export interface EmitCostEventOptions extends EventEnvelope {
 }
 
 /**
- * Persist a cost event. Never drops — uses OTel span when available,
- * structured log as fallback. See the Python sibling
- * `python-moolabs-client.py.j2` for the full rationale.
+ * Persist a cost event. Never drops — capability-gated transport mirrors
+ * the Python sibling (`python-moolabs-client.py.j2`).
  *
- * Path 1 (preferred): active recording span → set attributes.
- * Path 2 (fallback): no recording span → structured log line that the
- *   customer's log pipeline ships to the acute cost-enricher.
+ * When the Phase 1.5 snapshot reports `capabilities.cost_event_direct_emit=true`
+ * (verified against moolabs-ts at codemod time):
+ *   Path 1 (preferred): SDK direct → `client.cost.ingestEventsBatch([payload])`
+ *     with the wire CostEventIngest shape (tenant_id + idempotency_key required;
+ *     feature_key in tags so ACUTE's mapping engine extracts it; feature_id
+ *     top-level only when caller passes a UUID).
+ *   Path 2 (fallback): SDK exception → structured log with full envelope.
+ *
+ * When `capabilities.cost_event_direct_emit=false` (SDK doesn't yet expose
+ * the cost-event method on this customer's pinned version):
+ *   Path 1 (preferred): active recording span → set `moolabs.cost.*` attrs;
+ *     ACUTE's enricher reads these from OTLP exports.
+ *   Path 2 (fallback): no recording span → structured log.
+ *
+ * Returns a Promise — must be awaited at call sites. Helper itself is
+ * fail-open: any internal exception logs `moolabs.cost_emission.failed`
+ * and swallows.
  */
-export function emitCostEventSafe(opts: EmitCostEventOptions): void {
+export async function emitCostEventSafe(opts: EmitCostEventOptions): Promise<void> {
+  let _sdkError: unknown = null;
   try {
-    const span = trace.getActiveSpan();
+{% if capabilities.cost_event_direct_emit %}
+    // Primary transport: unified SDK cost-event endpoint
+    // ({{ capabilities.cost_event_method_path }}) — verified present in the
+    // Phase 1.5 snapshot at SDK version {{ sdk_pinned_version }}.
+    if (opts.tenantId === undefined || opts.tenantId === null) {
+      logger.warn(
+        { kind: opts.kind, reason: 'CostEventIngest requires tenant_id; bind it in Phase 1.6' },
+        'moolabs.cost_emission.skipped_no_tenant_id',
+      );
+      return;
+    }
+    const idempotencyKey = opts.correlationId ?? (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+    const payload: Record<string, unknown> = {
+      tenant_id: String(opts.tenantId),
+      idempotency_key: String(idempotencyKey),
+      kind: opts.kind,
+      source: opts.source ?? '{{ service_slug }}',
+    };
+    if (opts.customerId !== undefined)     payload.customer_id     = String(opts.customerId);
+    if (opts.featureId !== undefined)      payload.feature_id      = String(opts.featureId);  // UUID — ACUTE stores in cost_events.feature_id
+    if (opts.usageEventId !== undefined)   payload.usage_event_id  = String(opts.usageEventId);
+    if (opts.requestId !== undefined)      payload.request_id      = String(opts.requestId);
+    if (opts.consumerAgent !== undefined)  payload.consumer_agent  = opts.consumerAgent;
+    if (opts.correlationId !== undefined)  payload.correlation_id  = String(opts.correlationId);
+    if (opts.costMicros !== undefined)     payload.cost_micros     = Math.trunc(opts.costMicros);
+    if (opts.attributes)                   payload.attributes      = { ...opts.attributes };
+    // feature_key (slug) rides in tags — ACUTE's mapping engine reads it,
+    // lands it in usage_event_log + ClickHouse cost_by_feature_metric MV.
+    if (opts.featureKey !== undefined) {
+      const tags = (payload.tags as Record<string, unknown> | undefined) ?? {};
+      tags.feature_key = String(opts.featureKey);
+      payload.tags = tags;
+    }
+    try {
+      const client = await getClient();
+      // Resolved at codemod time from snapshot:
+      // {{ capabilities.cost_event_method_path }}
+      await client.cost.{{ capabilities.cost_event_method_path | replace("client.cost.", "") }}([payload]);
+      return;
+    } catch (exc) {
+      _sdkError = exc;
+      // fall through to log recovery rail
+    }
+{% endif %}
 
+    const span = trace.getActiveSpan();
+{% if not capabilities.cost_event_direct_emit %}
+    // Primary transport: OTel span attributes (the unified SDK doesn't yet
+    // expose a cost-event method at this pinned version — Phase 1.5 snapshot
+    // reports capabilities.cost_event_direct_emit=false).
     if (span && span.isRecording()) {
       span.setAttribute('moolabs.cost.kind', opts.kind);
       span.setAttribute('moolabs.source', opts.source ?? '{{ service_slug }}');
@@ -212,8 +274,12 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
       }
       return;
     }
+{% endif %}
 
-    // Fallback — no recording span. Salvage trace_id when context is valid-but-not-recording.
+    // Recovery rail — fires on:
+    //   - SDK exception when direct-emit capable
+    //   - no recording span when not capable
+    // Salvage trace_id when context is valid-but-not-recording (correlation).
     const ctx = span?.spanContext();
     const traceId = ctx && ctx.traceId !== '00000000000000000000000000000000' ? ctx.traceId : undefined;
     const spanId  = ctx && ctx.spanId  !== '0000000000000000'                  ? ctx.spanId  : undefined;
@@ -224,6 +290,7 @@ export function emitCostEventSafe(opts: EmitCostEventOptions): void {
       transport: 'log_fallback',
       policy: 'never_drop_cost_event',
     };
+    if (_sdkError !== null)                logPayload.sdk_error      = String(_sdkError);
     if (opts.tenantId !== undefined)       logPayload.tenant_id      = String(opts.tenantId);
     if (opts.customerId !== undefined)     logPayload.customer_id    = String(opts.customerId);
     if (opts.featureKey !== undefined)     logPayload.feature_key    = String(opts.featureKey);

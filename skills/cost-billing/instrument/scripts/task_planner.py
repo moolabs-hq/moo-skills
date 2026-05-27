@@ -431,7 +431,9 @@ def main(argv: list[str] | None = None) -> int:
             f"  Templates cannot emit without confirmed attribution sources.\n"
         )
         return 2
-    required = ["tenant_id", "customer_id", "feature_key", "request_id", "consumer_agent"]
+    # NOTE: feature_key is NOT required — per-callsite templates derive it from
+    # entry.workflow_id at render time. Customers don't need a middleware-set source.
+    required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
     missing = [k for k in required if k not in attribution_defaults]
     if missing:
         sys.stderr.write(
