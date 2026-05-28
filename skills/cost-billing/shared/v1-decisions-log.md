@@ -24,6 +24,8 @@
 >
 > **What changed for the codemod:** Phase 1.5 introspection (`scripts/sdk_snapshot.py`) sets `cost_event_direct_emit=true` when the pinned SDK exposes the cost method. When true, the helper's **PRIMARY** cost transport is the direct `client.cost.ingest_events_batch` call; OTel span + structured log become the recovery rail (the never-drop contract is unchanged). Cost-only call sites are **no longer TODO-blocked** — they emit the direct call. The `# TODO` annotation remains **only** for the genuine case where a customer's pinned SDK predates the cost endpoint (`cost_event_direct_emit=false`).
 >
+> **Namespace-shape correction:** row 3 also states the client exposes `client.cls.*` + `client.meter.*` — that was likewise wrong. The shipped SDK has **11 flat capability namespaces**; usage is `client.usage.*` (capability "usage" → EventsApi), cost is `client.cost.*`. There is no `client.cls.*` or `client.meter.events.*`. (Reconciled across the suite 2026-05-28 — "Error B".)
+>
 > The row 3 text above is retained verbatim as the historical record of what was believed pre-2026-05-28.
 
 ---

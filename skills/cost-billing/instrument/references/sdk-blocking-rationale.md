@@ -15,7 +15,7 @@ Per `cost-billing-shared/sdk-surface-reference.md` and Doc 3 §6.1, the Moolabs 
 The codemod inserts a synchronous call inline:
 
 ```python
-client.meter.events.ingest_events([...])
+client.usage.ingest_events([...])
 ```
 
 It does NOT background-wrap (Option A). The PR description includes:
@@ -35,11 +35,11 @@ If the customer has explicitly told you "hot paths must be non-blocking", pass `
 
 | Framework | Pattern |
 |---|---|
-| FastAPI / Starlette | `asyncio.create_task(client.meter.events.ingest_events([...]))` (handler must be `async def`) |
+| FastAPI / Starlette | `asyncio.create_task(client.usage.ingest_events([...]))` (handler must be `async def`) |
 | Django (sync) | `threading.Thread(target=..., daemon=True).start()` |
 | Django (async) | Same as FastAPI |
 | Flask | `concurrent.futures.ThreadPoolExecutor().submit(...)` |
-| Express | `setImmediate(() => client.meter.events.ingestEvents([...]))` |
+| Express | `setImmediate(() => client.usage.ingestEvents([...]))` |
 | NestJS | Inject a `Logger`-style provider that uses `setImmediate` internally |
 
 **Caveat:** background-wrap means a process exit could lose the in-flight events. For production, recommend flushing on shutdown (e.g., FastAPI `lifespan`). The codemod does NOT emit shutdown-flush — it's customer-policy.

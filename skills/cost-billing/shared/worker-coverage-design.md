@@ -186,9 +186,12 @@ stopgap (worker library signatures + templates without true call-anchoring).
 
 ---
 
-## 7. Relationship to Error B (usage-namespace inversion)
+## 7. Relationship to Error B (usage-namespace inversion) — RESOLVED 2026-05-28
 
-Independent of this design, the usage-namespace prose is currently inverted
-(docs say `client.meter.events.*` is live; source says `client.usage.*`). That is a
-separate flagged finding; the worker templates in W5 must use the **correct**
-`client.usage.ingest_events` shape, so Error B should be resolved before or during W5.
+The usage-namespace prose was inverted across the suite (docs said
+`client.meter.events.*` was live and `client.usage.*` was the anti-pattern; source
+proves the opposite). **Reconciled 2026-05-28** against the oracle
+`sdk-surface-reference.md:147` — all guidance now points to `client.usage.*`, and
+drift-lint's anti-pattern list is flipped. W5 worker templates therefore use the
+correct `client.usage.ingest_events` / `client.usage.ingestEvents` shape; no longer
+a blocker.

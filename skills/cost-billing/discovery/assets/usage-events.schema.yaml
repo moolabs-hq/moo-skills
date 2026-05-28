@@ -38,7 +38,7 @@ $defs:
         type: string
         description: |
           The SDK event type (e.g. "completion.delivered", "image.rendered", "video.transcribed").
-          Will be passed as `type` field on `client.meter.events.ingest_events()`.
+          Will be passed as `type` field on `client.usage.ingest_events()`.
 
       confidence:
         type: number

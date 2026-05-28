@@ -79,7 +79,7 @@ If `customer-context/` is missing, refuse with: "customer-context/ not found at 
 Before scanning a repo, load these from `cost-billing-shared/`:
 
 - `anchor-taxonomy.md` — vocabulary (cost vs usage event, refund test, attribution keys, chargeability map, cells ③/④)
-- `sdk-surface-reference.md` — what to emit (`client.meter.events.ingest_events` for usage; cost via `client.cost.ingest_events_batch` when the snapshot reports it, OTel spans as the recovery rail)
+- `sdk-surface-reference.md` — what to emit (`client.usage.ingest_events` for usage; cost via `client.cost.ingest_events_batch` when the snapshot reports it, OTel spans as the recovery rail)
 - `three-role-review.md` — CFO/PM/engineer projection model — your outputs feed this surface
 - `v1-decisions-log.md` — the §10 v1 calls that shape your defaults (coverage-first, Python+TS, OTel-for-cost, etc.)
 - `gaps-tracker.md` — the §6 open questions you may hit in customer code

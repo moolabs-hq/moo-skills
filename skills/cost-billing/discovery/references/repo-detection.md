@@ -75,7 +75,7 @@ If the customer has `moolabs` (Python) or `@moolabs/sdk` (TypeScript) already in
 
 1. `/cost-billing-discovery` records this in `repo-profile.yaml` and surfaces a note.
 2. The integrator (running discovery) is asked: "Upgrade in place" or "Fresh re-instrument"?
-3. "Upgrade in place" → Skill 2 codemod skips files where existing `client.meter.events.*` calls are detected; only inserts where SDK is missing.
+3. "Upgrade in place" → Skill 2 codemod skips files where existing `client.usage.*` calls are detected; only inserts where SDK is missing.
 4. "Fresh re-instrument" → Skill 2 codemod replaces existing inserts with current best-practice templates.
 
 ## Repo type classification
