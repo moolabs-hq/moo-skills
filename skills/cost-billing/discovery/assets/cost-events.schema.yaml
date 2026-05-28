@@ -100,10 +100,14 @@ $defs:
 
       emission_path:
         type: string
-        enum: [otel-span, sdk-direct-acute-future, sdk-cls-billing]
+        enum: [sdk-direct-cost, otel-span, structured-log]
         description: |
-          v1 only `otel-span` is valid for cost events.
-          `sdk-direct-acute-future` is reserved for when client.acute.* lands.
+          How the cost event reaches Acute. `sdk-direct-cost` =
+          client.cost.ingest_events_batch (primary when the Phase 1.5 snapshot
+          reports cost_event_direct_emit=true). `otel-span` / `structured-log` are
+          the dual-transport recovery rails. (The old `sdk-direct-acute-future` /
+          `sdk-cls-billing` values predated the shipped cost endpoint — see Error A
+          reconciliation 2026-05-28.)
 
       attribution_keys_available:
         type: array
@@ -139,7 +143,20 @@ $defs:
 
       framework:
         type: string
-        description: Detected framework (fastapi, django, express, nestjs, etc.); informs codemod adapter.
+        description: Detected HTTP framework (fastapi, django, express, nestjs, etc.); informs codemod adapter. May be empty for non-HTTP execution contexts.
+
+      execution_context:
+        type: string
+        enum: [http_request, queue_worker, stream_consumer, scheduled_job, cli_batch, background_task, unknown]
+        description: |
+          Where this call site runs (see shared/assets/execution-context.schema.yaml).
+          Set by the W2 AST context classifier. `unknown` = the classifier found no
+          signal → route to Phase 1.6 confirmation; NEVER assume http_request.
+      execution_context_confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+        description: Classifier confidence in execution_context (0.0 = unknown).
 
       review_notes:
         type: array

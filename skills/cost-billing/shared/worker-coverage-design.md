@@ -168,15 +168,36 @@ Recommended order: **W0 → W1 → W2** (de-risk the classifier early — it gat
 W2 is the make-or-break; if AST classification proves too noisy, fall back to the
 stopgap (worker library signatures + templates without true call-anchoring).
 
-### W0-W2 implementation notes (landed 2026-05-28)
+### W0-W3 implementation notes (landed 2026-05-28)
 
 - **W0** `shared/assets/execution-context.schema.yaml` + anchor-taxonomy section.
   Enum gained a 7th value `unknown` — the classifier emits it when no signal
-  matches (never assume `http_request`).
-- **W1** `repo_scan.py` `execution_runtimes` axis + worker-only "instrumentable"
-  note; also fixed a latent `_read_go_deps` gap (single-line `require`).
+  matches (never assume `http_request`). `traced_by_default`/`transport_default`
+  reframed as overridable expectations (not hard verdicts) after a re-scan trap.
+- **W1** `repo_scan.py` `execution_runtimes` axis (a HINT — never a verdict; a
+  worker library does not prove emission sites exist); also fixed a latent
+  `_read_go_deps` gap (single-line `require`).
 - **W2** `context_classifier.py` — decorator + consumer-loop + main-guard signals,
   scope-bounded body walk (does not descend into nested defs). Stdlib-AST only.
+  Dropped the `"subscription"` loop token (collides with billing subscriptions).
+- **W3** `catalog_match.py` — Python cost-call scanner: matches provider-catalog
+  patterns by attribute-suffix + a vendor-import gate (precision-first), then tags
+  each hit with the W2 `execution_context` and a `needs_confirmation` flag
+  (`unknown`/low-confidence → Phase 1.6). `execution_context` +
+  `execution_context_confidence` added to the cost- and usage-event inventory
+  schemas. Also corrected the residual stale `emission_path` enum
+  (`sdk-direct-acute-future` → `sdk-direct-cost`).
+
+**Still deferred (carry into W4+ / later W3 hardening):**
+- boto3/bedrock & sendgrid instance-var patterns are low-recall by the import-gate
+  matcher; sufficient for v1, revisit if dogfood shows misses.
+- TS / Go cost-call scanners (Python first).
+- One-hop call-graph propagation so cost calls in helper modules inherit a caller's
+  context instead of `unknown` (W3 currently emits `needs_confirmation`).
+- Tornado / aiohttp class-based handler methods still classify `unknown`; reconcile
+  with the W1 framework hint.
+- Phase-1.6 interaction mechanics for confirming `unknown` sites are agent-driven
+  (SKILL.md), not yet wired into a script.
 
 **Carried into W3 (must handle):**
 1. **`unknown` routing.** The classifier walks the AST, not the call graph, so a

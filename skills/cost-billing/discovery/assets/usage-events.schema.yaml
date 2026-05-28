@@ -32,7 +32,20 @@ $defs:
 
       file: { type: string }
       line: { type: integer, minimum: 1 }
-      framework: { type: string }
+      framework: { type: string }   # detected HTTP framework; may be empty for non-HTTP contexts
+
+      execution_context:
+        type: string
+        enum: [http_request, queue_worker, stream_consumer, scheduled_job, cli_batch, background_task, unknown]
+        description: |
+          Where this emission site runs (see shared/assets/execution-context.schema.yaml).
+          Set by the W2 AST context classifier. `unknown` → Phase 1.6 confirmation;
+          never assume http_request.
+      execution_context_confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+        description: Classifier confidence in execution_context (0.0 = unknown).
 
       event_type:
         type: string
