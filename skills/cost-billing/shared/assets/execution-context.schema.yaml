@@ -17,6 +17,9 @@ last_updated: "2026-05-28"
 
 # ── The enum ────────────────────────────────────────────────────────────────
 # These are the only legal values of `execution_context` on an inventory entry.
+# `unknown` is a real, distinct state — the W2 classifier emits it when no signal
+# matches (it must NEVER assume http_request). W3 routes `unknown` sites to
+# Phase 1.6 interactive confirmation rather than guessing.
 execution_context_enum:
   - http_request
   - queue_worker
@@ -24,6 +27,7 @@ execution_context_enum:
   - scheduled_job
   - cli_batch
   - background_task
+  - unknown
 
 # ── Per-context metadata ─────────────────────────────────────────────────────
 # Downstream layers read these to pick the right attribution extractors and the

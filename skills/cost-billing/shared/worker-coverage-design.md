@@ -163,6 +163,32 @@ Recommended order: **W0 → W1 → W2** (de-risk the classifier early — it gat
 W2 is the make-or-break; if AST classification proves too noisy, fall back to the
 stopgap (worker library signatures + templates without true call-anchoring).
 
+### W0-W2 implementation notes (landed 2026-05-28)
+
+- **W0** `shared/assets/execution-context.schema.yaml` + anchor-taxonomy section.
+  Enum gained a 7th value `unknown` — the classifier emits it when no signal
+  matches (never assume `http_request`).
+- **W1** `repo_scan.py` `execution_runtimes` axis + worker-only "instrumentable"
+  note; also fixed a latent `_read_go_deps` gap (single-line `require`).
+- **W2** `context_classifier.py` — decorator + consumer-loop + main-guard signals,
+  scope-bounded body walk (does not descend into nested defs). Stdlib-AST only.
+
+**Carried into W3 (must handle):**
+1. **`unknown` routing.** The classifier walks the AST, not the call graph, so a
+   cost call in a helper module called from a handler resolves to the helper →
+   `unknown`. Expect a meaningful share of `unknown` in real repos. W3 routes
+   `unknown` to Phase 1.6 confirmation, and may add a one-hop who-calls/who-imports
+   propagation pass to inherit a caller's context.
+2. **Tornado / aiohttp class-based handlers.** W1 flags `tornado`/`aiohttp` as
+   frameworks, but W2 does not yet classify a `RequestHandler.post` *method* as
+   `http_request` (decorator table is function-decorator-based). W3 fallback should
+   reconcile the W1 framework hint with the W2 per-site result.
+3. **Substring noise.** `"consumer" in name` will match `consumer_list` etc.
+   Acceptable v1 noise; tighten to token-boundary if false positives surface.
+4. **Confidence values uncalibrated** (0.9 / 0.7 / 0.55) — recalibrate after the
+   first real-codebase pass, per the recalibration trigger in
+   `terminal-event-heuristics.yaml`.
+
 ---
 
 ## 6. Open questions (need a decision before W5)
