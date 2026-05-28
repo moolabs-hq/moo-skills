@@ -140,31 +140,44 @@ $defs:
   # reviews/cfo-view.html so the CFO can verify the suppression was correct.
   suppressions:
     type: array
+    description: |
+      Terminal-event candidates the refund-test heuristic flagged but that the
+      AUTHORITATIVE billing model says must NOT be emitted as billable usage
+      events. The refund-test score is necessary but NOT sufficient — the billing
+      model gates emission (see discovery/SKILL.md Phase 4 "Billing-surface gate").
     items:
       type: object
-      required: [file, line, suppressed_event_type, unit_id, vendor, reason]
+      required: [file, line, suppressed_event_type, suppression_category, reason]
       properties:
         file: { type: string }
         line: { type: integer }
         handler: { type: string }
+        workflow_id: { type: string }
         suppressed_event_type:
           type: string
           description: The event_type that WOULD have been emitted as a usage event.
+        suppression_category:
+          type: string
+          enum: [vendor_cogs_only, internal_only_product, no_billable_unit]
+          description: |
+            vendor_cogs_only      — CFO classified the matching unit as vendor passthrough.
+            internal_only_product — CPO marked the product internal_only; no customer-billable surface.
+            no_billable_unit      — finance declares zero billable_units whose scope covers this product/service.
         unit_id:
           type: string
-          description: The billable_units[].unit_id from finance YAML that triggered suppression.
+          description: vendor_cogs_only only — the billable_units[].unit_id that triggered it. Omit otherwise.
         vendor:
           type: string
-          description: Vendor name from billable_units[].vendor_when_cogs.
+          description: vendor_cogs_only only — vendor name. Omit otherwise.
         reason:
           type: string
-          description: CFO's vendor_when_cogs text — e.g. "AWS SES; these are internal operational alerts, not customer-facing."
+          description: Human-readable rationale recorded for reviewer verification.
         cfo_signoff:
           type: string
           enum: [pending, accepted, rejected]
           description: |
-            accepted = CFO confirms suppression is correct.
-            rejected = CFO wants this emitted as usage; chain must cycle back to Stage 1 to reclassify the unit.
+            accepted = reviewer confirms the suppression is correct.
+            rejected = reviewer wants this emitted as usage; chain cycles back to reclassify.
 
 example:
   version: "0.1.0"

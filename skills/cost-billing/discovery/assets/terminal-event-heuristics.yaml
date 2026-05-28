@@ -1,6 +1,19 @@
 # Terminal-event heuristics for the refund test
 # Used by /cost-billing-discovery Phase 4 (refund_test.py).
 # Each signal adds to a confidence score in [0, 1]. Final candidates need ≥ 0.50.
+#
+# ──────────────────────────────────────────────────────────────────────────
+# GATE (necessary-but-not-sufficient): the signals below identify what LOOKS
+# like a terminal event. They NEVER, on their own, classify a candidate as
+# billable. The authoritative billing model gates emission — if the product is
+# CPO `internal_only`, OR finance declares zero `billable_units` covering the
+# product/service, then ALL its terminal-event candidates are suppressed
+# (suppression_category: internal_only_product / no_billable_unit) REGARDLESS of
+# score. This exists because verb patterns like _ingested/_generated/
+# _aggregated/_delivered fire on internal-infrastructure operations that have no
+# customer-billable surface. See discovery/SKILL.md Phase 4 "Billing-surface
+# gate" and scripts/billing_gate.py.
+# ──────────────────────────────────────────────────────────────────────────
 
 version: "0.1.0"
 
