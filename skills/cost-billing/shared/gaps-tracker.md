@@ -136,3 +136,11 @@ These remain unresolved and should drive HLD's agenda:
 - **§6.4 #23** Idempotency-key derivation policy — platform-level.
 
 These seven items are the natural HLD agenda. The rest are either resolved, deferred, or out of scope.
+
+---
+
+## Dogfood-surfaced gaps (post-v1, no requirements-doc §)
+
+| Gap | Status | Path |
+|-----|--------|------|
+| **Worker / consumer / scheduler scan coverage** | **OPEN — design ready.** The discovery + instrument pipeline is HTTP-request-shaped at all 5 layers (detect / cost-match / refund-test / attribute / emit); non-HTTP emission sites (queue workers, stream consumers like moo-meter's Kafka sink, cron, CLI batch) are invisible. Surfaced 2026-05-28 by a moo-meter dogfood run. | See `worker-coverage-design.md` (cost-call-anchored discovery + execution-context classification; phased task list W0-W7). |
