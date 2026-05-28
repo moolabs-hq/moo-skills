@@ -139,8 +139,8 @@ These seven items are the natural HLD agenda. The rest are either resolved, defe
 
 ---
 
-## Dogfood-surfaced gaps (post-v1, no requirements-doc §)
+## Field-surfaced gaps (post-v1, no requirements-doc §)
 
 | Gap | Status | Path |
 |-----|--------|------|
-| **Worker / consumer / scheduler scan coverage** | **OPEN — design ready.** The discovery + instrument pipeline is HTTP-request-shaped at all 5 layers (detect / cost-match / refund-test / attribute / emit); non-HTTP emission sites (queue workers, stream consumers like moo-meter's Kafka sink, cron, CLI batch) are invisible. Surfaced 2026-05-28 by a moo-meter dogfood run. | See `worker-coverage-design.md` (cost-call-anchored discovery + execution-context classification; phased task list W0-W7). |
+| **Worker / consumer / scheduler scan coverage** | **OPEN — design ready.** The discovery + instrument pipeline is HTTP-request-shaped at all 5 layers (detect / cost-match / refund-test / attribute / emit); non-HTTP emission sites (queue workers, stream consumers, cron, CLI batch) are invisible. Surfaced 2026-05-28 by an integration run on a streaming/metering service whose Kafka ingest consumer was skipped. | See `worker-coverage-design.md` (cost-call-anchored discovery + execution-context classification; phased task list W0-W7). |

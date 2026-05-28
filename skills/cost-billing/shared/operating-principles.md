@@ -9,7 +9,7 @@ Every default is a *proposal*, not a silent fact. When you'd otherwise pick "thi
 - **Interactive mode** (human is present): surface the default as a question — "I'm about to default to OpenTelemetry for the tracer. Override?"
 - **Unattended / CI mode** (no human): refuse-to-run rather than silent-default. Log the ambiguity clearly. The customer's CI logs will surface the question on the next interactive run.
 
-Customers contradict their "context" all the time. The Moolabs dogfood run produced a 17 KB pricing-model.yaml exactly because bootstrap NEVER assumed: it asked "you said Hybrid; let's confirm what that decomposes into" rather than picking the most common interpretation.
+Customers contradict their "context" all the time. Bootstrap NEVER assumes: it asks "you said Hybrid; let's confirm what that decomposes into" rather than picking the most common interpretation — that discipline is what turns a vague one-line answer into a complete, signed pricing model.
 
 ## 2. When in doubt, ASK (interactive); FAIL LOUDLY (unattended)
 
@@ -73,4 +73,4 @@ The `bootstrap-log.yaml` for each chain stage MUST log:
 - `defaults_accepted_with_proposal` — defaults the human OK'd as the proposal
 - `defaults_silent` — should always be `0` (any non-zero is a bug)
 
-The Moolabs dogfood run logged `defaults_silent: 0` across all 7 categories. That's the bar.
+The bar: `defaults_silent: 0` across all categories — every default surfaced as a question, none applied silently.

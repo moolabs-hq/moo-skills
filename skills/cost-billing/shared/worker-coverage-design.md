@@ -1,7 +1,8 @@
 # Design — comprehensive scan coverage: workers, consumers, schedulers
 
-**Status:** DESIGN (no code). Authored 2026-05-28 after a moo-meter dogfood run
-surfaced that the discovery scan ignored the Kafka ingest consumer entirely.
+**Status:** DESIGN (no code). Authored 2026-05-28 after an integration run on a
+streaming/metering service surfaced that the discovery scan ignored its Kafka
+ingest consumer entirely.
 **Owner decision pending:** approve the cost-call-anchored pivot before any
 implementation (see "Phased task list" + "Open questions").
 
@@ -29,10 +30,10 @@ never-drop contract with "background workers without trace-context propagation
 drop all of theirs." The skill built the safety net *for* workers but never built
 the on-ramp that routes worker call sites onto it.
 
-**Concrete moo-meter miss:** moo-meter is an ingest → transform → store → query
-pipeline. The scan would report the HTTP query API's framework and silently skip
-the Kafka ingest sink (`kafkaingest` / `sink_to_storage`), a stream consumer —
-which is where every ingested event (the densest cost/usage signal) flows.
+**Concrete miss:** a metering/ingest service (ingest → transform → store → query
+pipeline). The scan would report the HTTP query API's framework and silently skip
+the Kafka ingest sink — a stream consumer — which is where every ingested event
+(the densest cost/usage signal) flows.
 
 ---
 
@@ -98,8 +99,8 @@ Context drives two decisions the current design hardcodes to `http_request`:
   library in the manifest does **not** prove the service emits cost/usage events
   (it may only send email / do cleanup). **Instrumentability is decided by the
   Layer-2 cost-call scan finding actual billable sites, never by the runtime hint.**
-  (Over-claiming "worker runtime ⇒ instrumentable" was a moo-meter-shaped assumption —
-  moo-meter's consumer *is* the cost path, but that does not generalize.)
+  (Over-claiming "worker runtime ⇒ instrumentable" is a dangerous assumption — in
+  some services the consumer *is* the cost path, but that does not generalize.)
 
 ### Layer 2 — cost-call scan becomes context-aware (`catalog_match.py`, currently agent-driven/absent)
 - Run the provider-catalog AST patterns over **all** source files (not just files in
@@ -128,9 +129,8 @@ Context drives two decisions the current design hardcodes to `http_request`:
   extractor set per execution context:
   - `queue_worker`: task-fn parameter / `payload["customer_id"]` / `kwargs.get(...)`.
   - `stream_consumer`: `message.headers["customer_id"]` / `message.key` / a field in
-    the deserialized value. (moo-meter carries `tenant_id` as a **Kafka header** — see
-    the global testing-pipeline rule; the consumer's attribution source is that header,
-    not a request.)
+    the deserialized value. (A streaming service may carry the tenant/customer id as a
+    **Kafka header** — the consumer's attribution source is that header, not a request.)
   - `scheduled_job` / `cli_batch`: per-row field in the data being processed; if no
     per-invocation identity exists, mark the site cost-only/internal.
 - The interactive Phase 1.6 confirmation prompt becomes context-specific: instead of
@@ -190,7 +190,7 @@ stopgap (worker library signatures + templates without true call-anchoring).
 
 **Still deferred (carry into W4+ / later W3 hardening):**
 - boto3/bedrock & sendgrid instance-var patterns are low-recall by the import-gate
-  matcher; sufficient for v1, revisit if dogfood shows misses.
+  matcher; sufficient for v1, revisit if field usage shows misses.
 - TS / Go cost-call scanners (Python first).
 - One-hop call-graph propagation so cost calls in helper modules inherit a caller's
   context instead of `unknown` (W3 currently emits `needs_confirmation`).

@@ -15,10 +15,10 @@ sail through as phantom billable usage events.
 CRITICAL — surface, don't silently resolve. A conflict between the CODE evidence
 (a strong usage candidate) and the BILLING MODEL (internal_only / no unit) is
 ambiguous: the op may be genuinely internal, OR the billing model may have missed
-a unit. (A real dogfood incident: a metering product's per-event-ingested billing
-lived in a spec doc the finance stage never ingested; the heuristic correctly
-found the call site, but the billing model said "internal," and the conflict was
-silently resolved toward "internal" — burying a real billable event.) So:
+a unit. (Common failure mode: a product whose per-event billing is defined only in
+a spec doc the finance stage never ingested — the heuristic correctly finds the
+call site, but the billing model says "internal," and silently resolving toward
+"internal" buries a genuinely billable event.) So:
   - LOW-confidence candidate + billing conflict  → suppress (billing model wins).
   - HIGH-confidence candidate + billing conflict → SURFACE for reconciliation —
     never silently suppress; force a source-grounded human decision.
