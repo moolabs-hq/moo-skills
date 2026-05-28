@@ -79,10 +79,12 @@ class ExecutionRuntimeDetection(unittest.TestCase):
         # Present (not skipped), no HTTP framework, worker runtime detected.
         self.assertEqual(svc.frameworks_detected, [])
         self.assertEqual(svc.execution_runtimes, ["queue_worker"])
-        self.assertTrue(
-            any("ARE instrumentable" in n for n in profile.notes),
-            f"expected worker-only instrumentable note, got: {profile.notes}",
-        )
+        # The note must surface the service AND defer the verdict to Phase 3 —
+        # it must NOT assert the service is instrumentable from the runtime hint.
+        note = next((n for n in profile.notes if "no http framework" in n.lower()), None)
+        self.assertIsNotNone(note, f"expected worker-only note, got: {profile.notes}")
+        self.assertIn("Phase 3 cost-call scan", note)
+        self.assertNotIn("ARE instrumentable", note)
 
     # ── HTTP + worker coexist; no false skip ─────────────────────────────
     def test_fastapi_plus_celery_has_both(self):

@@ -441,10 +441,13 @@ def scan(repo_path: Path) -> RepoProfile:
     ]
     if worker_only:
         notes.append(
-            "Worker/consumer/scheduler service(s) with NO HTTP framework detected: "
-            f"{', '.join(worker_only)}. These ARE instrumentable — their cost/usage "
-            "emission sites run outside HTTP handlers (execution_runtimes lists the "
-            "context). Do not skip. Per-call-site classification is authoritative."
+            "Service(s) with a non-HTTP execution runtime and NO HTTP framework: "
+            f"{', '.join(worker_only)}. Any cost/usage emission sites here would run "
+            "outside HTTP handlers, so do NOT skip on 'no HTTP framework' alone. "
+            "NOTE: a worker/queue/stream library in the manifest does NOT by itself "
+            "prove the service emits cost/usage events (it may only send email, do "
+            "cleanup, etc.). Instrumentability is decided by the Phase 3 cost-call "
+            "scan finding actual billable call sites — not by this runtime hint."
         )
 
     return RepoProfile(

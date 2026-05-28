@@ -91,10 +91,15 @@ Context drives two decisions the current design hardcodes to `http_request`:
   worker/queue/scheduler/stream library signatures (celery, rq, dramatiq, huey, arq,
   kombu; bullmq, bee-queue, agenda, node-cron, kafkajs, @nestjs/microservices;
   asynq, machinery, sarama/segmentio-kafka, robfig/cron).
-- A service with **no HTTP framework but a worker runtime** must be flagged
-  instrumentable, not skipped. The `ServiceScan` dataclass (`repo_scan.py:106`) gains
+- A service with **no HTTP framework but a worker runtime** must **not be skipped**
+  on the "no framework" check. The `ServiceScan` dataclass (`repo_scan.py:106`) gains
   `execution_runtimes: list[str]` alongside `frameworks_detected`.
-- Signatures are a *hint*, not the gate — Layer 2 is the real detector.
+- Signatures are a *hint*, not the gate — Layer 2 is the real detector. A worker
+  library in the manifest does **not** prove the service emits cost/usage events
+  (it may only send email / do cleanup). **Instrumentability is decided by the
+  Layer-2 cost-call scan finding actual billable sites, never by the runtime hint.**
+  (Over-claiming "worker runtime ⇒ instrumentable" was a moo-meter-shaped assumption —
+  moo-meter's consumer *is* the cost path, but that does not generalize.)
 
 ### Layer 2 — cost-call scan becomes context-aware (`catalog_match.py`, currently agent-driven/absent)
 - Run the provider-catalog AST patterns over **all** source files (not just files in
