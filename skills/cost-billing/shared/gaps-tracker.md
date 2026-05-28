@@ -23,8 +23,8 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 | §5.5 | Phase 5 convergence guarantee | **RESOLVED for v1** (5-round cap + human escalation). | |
 | §5.6 | Review spec location vs. customer IP policy | **RESOLVED for v1** (default `docs/superpowers/reviews/` in customer repo; `--review-spec-out=<external-path>` flag for opt-out). | |
 | §6.1 | SDK blocking → codemod insert default | **RESOLVED for v1** (Option B = blocking + documented). | |
-| §6.3 | Unified SDK does not yet expose a cost-event endpoint | **RESOLVED** for v1 via dual-transport contract (OTel span + structured log; never-drop). The unified SDK is one client with multiple namespaces — no separate "acute SDK". Cost-event endpoint will land on the same `Moolabs` client when platform team ships it. | See `sdk-surface-reference.md` §"Direct cost-event emission". |
-| §7.2 | Subscription-customer cost-only emission path | **RESOLVED** via the same dual-transport helper — `emit_cost_event_safe()` works for cost-only call sites too. v1 codemod annotates `# TODO (§10 #3): cost-event endpoint not yet exposed on unified SDK` in those blocks so the swap point is auditable. | |
+| §6.3 | Unified SDK cost-event endpoint | **RESOLVED — endpoint shipped.** `client.cost.ingest_events_batch` (CostEventsApi + SdkIngestApi on the `acute` backend per `_dx_routing.CAPABILITY_MAP`), verified at source 2026-05-28. The dual-transport helper uses the direct SDK call as primary transport when the Phase 1.5 snapshot reports `cost_event_direct_emit=true`; OTel span + structured log are the recovery rail (never-drop). One unified client — no separate "acute SDK". | See `sdk-surface-reference.md` §"Direct cost-event emission". |
+| §7.2 | Subscription-customer cost-only emission path | **RESOLVED** via the same dual-transport helper — `emit_cost_event_safe()` works for cost-only call sites too. With the cost endpoint shipped, cost-only sites emit the direct `client.cost.ingest_events_batch` call when `cost_event_direct_emit=true`; the `# TODO` annotation remains only when a customer's pinned SDK predates the endpoint. | |
 
 ---
 
@@ -105,7 +105,7 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 
 | # | Question | v1 status | Path |
 |---|---|---|---|
-| 25 | Cost-event endpoint missing from unified SDK | **RESOLVED for v1** via dual-transport `emit_cost_event_safe()` helper (OTel span + structured log; never-drop). When the unified SDK adds its cost-event method, helper swaps primary branch on same `get_client()` singleton — call sites unchanged. | Track platform team's cost-event endpoint landing on the unified `Moolabs` client. |
+| 25 | Cost-event endpoint on unified SDK | **RESOLVED — shipped.** `client.cost.ingest_events_batch` verified at source 2026-05-28; the helper's primary cost transport is the direct SDK call when `cost_event_direct_emit=true`, OTel span + structured log as the recovery rail. Call sites unchanged. | — |
 | 26 | Catalog miss | **RESOLVED for v1** (surface for review as cell ④ findings; never silent skip). | Per `v1-decisions-log.md` #6. |
 | 27 | Skill R applies to B and C? | **RESOLVED for v1** (Skill R applies to Skill B's first-export scan; Skill R does NOT apply to Skill C — Skill C is itself a validation skill). | |
 | 28 | Versioning of chargeability map | **RESOLVED for v1** (match by `workflow_id`; rename = stable ID; split/merge = parent retire + child reference). | |
@@ -134,6 +134,5 @@ These remain unresolved and should drive HLD's agenda:
 - **§6.3 #15** Algorithm versioning + historical re-attribution — post-GA.
 - **§6.3 #17** Phase 3 customer-onboarding-gate UX — v2.
 - **§6.4 #23** Idempotency-key derivation policy — platform-level.
-- **§7.2** Direct cost-event SDK emission on the unified `Moolabs` client — pending platform team landing the cost-event endpoint; helper auto-upgrades when it does.
 
-These eight items are the natural HLD agenda. The rest are either resolved, deferred, or out of scope.
+These seven items are the natural HLD agenda. The rest are either resolved, deferred, or out of scope.

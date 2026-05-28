@@ -23,7 +23,7 @@ The framework instruments **two** flavors of ingest event. They typically origin
 One unit of **vendor/infra spend** the customer incurred to serve one transaction. Examples: OpenAI tokens consumed, GPU seconds, S3 PUT count, bandwidth used.
 
 - **How the codemod emits it today:** as OTel span attributes (`moolabs.cost.kind`, `moolabs.request.id`, etc.) on the call site's existing span. The Moolabs platform reads these spans on the backend.
-- **Direct cost-event SDK call:** not yet exposed (see `sdk-surface-reference.md`). The OTel path is the supported v1 mechanism.
+- **Direct cost-event SDK call:** `client.cost.ingest_events_batch` (CostEventsApi, ACUTE backend), shipped and verified at source 2026-05-28. Primary transport when the snapshot reports `cost_event_direct_emit=true`; the OTel-span path is the recovery rail.
 
 ### Usage (ingest) event
 One unit of **product output** the customer charges their end-user for. Examples: chat completion delivered, image rendered, video transcribed.
@@ -94,7 +94,7 @@ The codemod (Skill 2) reads all three; the drift-lint (Skill 3) checks all three
 
 - **Sibling-pair** — one SDK call at one site emits both events (usage + cost). Default for AI/SaaS code paths.
 - **Usage-only** — terminal event with no upstream cost-bearing call (e.g., billing on `seat.assigned`). Single emission.
-- **Cost-only** — cost-bearing call with no usage event (subscription customers; non-AI infra hot paths). **v1 uses dual-transport `emit_cost_event_safe()` helper (OTel span + structured log fallback, never-drop).** Swaps to direct SDK emission when the unified `Moolabs` client gains a cost-event endpoint.
+- **Cost-only** — cost-bearing call with no usage event (subscription customers; non-AI infra hot paths). **v1 uses dual-transport `emit_cost_event_safe()` helper (OTel span + structured log fallback, never-drop).** Uses direct `client.cost.ingest_events_batch` emission when the snapshot reports `cost_event_direct_emit=true`; OTel span + structured log is the recovery rail.
 
 ---
 

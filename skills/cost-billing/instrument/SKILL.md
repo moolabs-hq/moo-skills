@@ -1,7 +1,7 @@
 ---
 name: cost-billing-instrument
 description: >-
-  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires cost ingest events (OTel spans with moolabs.* attributes) and usage ingest events (client.meter.events.ingest_events) into customer code, based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency keys derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js — Go v1.5), and PII guards. Implements three patterns — sibling-pair (default), usage-only, cost-only (TODO-annotated for v1 since the unified SDK's cost-event endpoint not yet exposed; emit via OTel span + log fallback). Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
+  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires cost ingest events (OTel spans with moolabs.* attributes) and usage ingest events (client.meter.events.ingest_events) into customer code, based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency keys derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js — Go v1.5), and PII guards. Implements three patterns — sibling-pair (default), usage-only, cost-only (direct `client.cost.ingest_events_batch` emit when the Phase 1.5 snapshot reports the cost endpoint, OTel span + structured log as the recovery rail). Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
 license: MIT
 metadata:
   author: Moolabs
@@ -152,7 +152,7 @@ prs_to_emit: 2          # chunked at max 30 files per PR (v1 default)
 patterns:
   sibling_pair: 31
   usage_only: 11
-  cost_only_blocked: 5   # annotated as TODO blocked on unified SDK's cost-event endpoint
+  cost_only: 5           # direct client.cost.ingest_events_batch emit (snapshot cost_event_direct_emit=true)
 chunks:
   - pr: 1
     services: [services/api, services/billing]
@@ -163,7 +163,6 @@ chunks:
     files: 12
     inserts: 19
 warnings:
-  - "5 cost-only inserts are TODO-annotated (blocked on unified SDK's cost-event endpoint per §10 #3)"
   - "2 entries have framework=litestar (no v1 adapter); inserting TODO comments"
 ```
 
@@ -316,7 +315,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 | `emit_usage_event_safe(event_type, subject, data, ...)` | The ONLY surface for SDK emission. Per-call-site templates call this — they NEVER touch `client.meter.events.ingest_events()` directly | SDK errors logged + swallowed; workflow continues |
 | `emit_cost_event_safe(kind, customer_id, cost_micros, attributes, ...)` | The ONLY surface for cost-event emission. Sibling-pair of `emit_usage_event_safe`. **Dual transport (added 2026-05-25 after an early integration run):** prefers OTel span attribute when a recording span exists; falls back to structured log (`logger.info("moolabs.cost.event", ...)`) when no recording span is available. Acute ingests both transports. | Cost events are **never silently dropped** when transport is unavailable. Only true exceptions (during both write AND log fallback) get swallowed. |
 
-**Why dual transport** — the OTel-span-only design silently drops cost data for any code path the tracer doesn't sample. Concrete impact: head-sampling at 10% drops 90% of cost signal; background workers without trace-context propagation drop all of theirs; dev/CI without OTel drops everything. The function arguments carry the truth (kind, customer_id, cost_micros) — span vs log is just transport. Both arrive at the same ClickHouse `acute_analytics` table downstream; trace_id is salvaged from the span context even when the span isn't recording, so log-path events can still join the trace. When the unified Moolabs SDK adds its cost-event endpoint (same `Moolabs` client, exact method path TBD by platform team — there is no separate "acute SDK"), the helper's PRIMARY transport swaps from OTel-span-write to that SDK call on the same `get_client()` singleton. The structured-log path stays as the recovery rail. Call sites do not change.
+**Why dual transport** — the OTel-span-only design silently drops cost data for any code path the tracer doesn't sample. Concrete impact: head-sampling at 10% drops 90% of cost signal; background workers without trace-context propagation drop all of theirs; dev/CI without OTel drops everything. The function arguments carry the truth (kind, customer_id, cost_micros) — span vs log is just transport. Both arrive at the same ClickHouse `acute_analytics` table downstream; trace_id is salvaged from the span context even when the span isn't recording, so log-path events can still join the trace. The unified Moolabs SDK exposes its cost-event endpoint at `client.cost.ingest_events_batch` (CostEventsApi on the ACUTE backend — there is no separate "acute SDK"; the cost capability routes to `acute.{base_url}` internally, verified at source 2026-05-28). When the Phase 1.5 snapshot reports `cost_event_direct_emit=true`, the helper's PRIMARY transport is that direct SDK call on the `get_client()` singleton; the OTel-span write and structured-log path are the recovery rail. Call sites do not change.
 
 **Codemod commit:** First commit on the branch is `feat(moolabs): generate per-service emission helper`. Reviewable in isolation before any business-logic file changes.
 
@@ -472,7 +471,7 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 |---|---|
 | Framework adapter missing (e.g., Litestar) | Insert `// TODO: framework=<x> has no v1 adapter; manual instrumentation required` with the suggested call shape. Do not break compilation. Flag CRITICAL for adversarial review. |
 | Confirmed entry's `file:line` is stale (code moved since Skill A ran) | Flag, do not edit. Surface in PR as "REGENERATE: file:line drift detected". Hand off to drift-lint. |
-| Cost-only pattern (subscription customer; unified SDK's cost-event endpoint not yet exposed) | Insert `emit_cost_event_safe()` call (OTel span preferred, structured log fallback) + `# TODO (§10 #3): unified Moolabs SDK does not yet expose a cost-event endpoint; helper swaps to direct SDK call when it ships`. |
+| Cost-only pattern (subscription customer) | Insert `emit_cost_event_safe()` call. When the snapshot reports `cost_event_direct_emit=true`, the helper's primary transport is the direct `client.cost.ingest_events_batch` call (OTel span + structured log are the recovery rail). **Only** if the pinned SDK snapshot exposes no cost method, fall back to OTel-span-only and annotate `# TODO: pinned SDK exposes no cost endpoint; re-run codemod after upgrading the SDK`. |
 | Existing OpenLLMetry / Helicone / Langfuse span | Extend existing span with `moolabs.*` attributes; do not wrap or duplicate (brownfield branch). |
 | Idempotency key heuristic fails (no path param, no domain identity) | Insert key fallback `{handler}.{epoch_millis}` + comment `// REVIEW: idempotency key derivation — domain identity not detected`. Flag MEDIUM for adversarial review. |
 | PR would exceed 30 files | Chunk by service; emit multiple PRs + an index PR. |
