@@ -147,7 +147,7 @@ $defs:
       model gates emission (see discovery/SKILL.md Phase 4 "Billing-surface gate").
     items:
       type: object
-      required: [file, line, suppressed_event_type, suppression_category, reason]
+      required: [file, line, suppressed_event_type, suppression_category, disposition, reason]
       properties:
         file: { type: string }
         line: { type: integer }
@@ -156,6 +156,17 @@ $defs:
         suppressed_event_type:
           type: string
           description: The event_type that WOULD have been emitted as a usage event.
+        disposition:
+          type: string
+          enum: [suppress, surface_for_reconciliation]
+          description: |
+            suppress — billing model governs (low-confidence candidate); safely dropped.
+            surface_for_reconciliation — the refund-test score is HIGH but the billing
+              model says don't-bill: a DIVERGENCE between code evidence and the billing
+              model. NOT a silent drop — a human MUST adjudicate (genuinely internal, or
+              did the billing model miss a unit?) against the provided spec/doc sources
+              before the inventory is final. `cfo_signoff` MUST NOT be left pending at
+              signoff for these.
         suppression_category:
           type: string
           enum: [vendor_cogs_only, internal_only_product, no_billable_unit]

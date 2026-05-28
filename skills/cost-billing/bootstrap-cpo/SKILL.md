@@ -138,8 +138,8 @@ Load `01-finance.signed.yaml`. Verify hash, signoff, R verdict. **Print a 5-line
 ### Phase 4 — Adversarial review
 `/cost-billing-adversarial-review --phase post-bootstrap-cpo --target .moolabs/chain/02-cpo.draft.yaml`. R-specific risks:
 - **Q3 vs Q2 drift** — customer's 1-paragraph description (Q3) contradicts what their docs (Q2) actually say.
-- **Q4 vs finance billable_units mismatch** — CPO listed features that don't map to any finance unit, OR vice-versa.
-- **Q5 internal-only includes a feature finance flagged as billable** — direct contradiction.
+- **Q4 vs finance billable_units mismatch** — CPO listed features that don't map to any finance unit, OR vice-versa. **Resolution: SURFACE, never collapse by inference** (Skill R operating-principle #6). A CPO feature whose `unit_hint` has no finance unit is recorded as a `source_grounded_conflict`, with BOTH positions — it is NOT dropped, and R does NOT mark the product `internal_only` to make the mismatch go away. Absence in finance is often a finance capture gap (finance derives units from its `sources_of_truth`, which may not include the product spec doc), not proof the feature is non-billable. Adjudicate against the provided source docs or escalate to the human.
+- **Q5 internal-only includes a feature finance flagged as billable** — direct contradiction. NOTE: `internal_only` is set ONLY by the human's Q5 answer — never injected or flipped by adversarial review. If R believes a product is internal but the human didn't list it, R surfaces that as a conflict for the human to decide, it does not set the flag itself.
 - **Q7 billable-output term contradicts finance's CFO words** — finance said "completion priced per token", CPO says "we call it a generation". Surface for harmonization.
 - **Q9 unique concepts that aren't in finance's `billable_units`** — possible undermonetized product feature.
 
