@@ -415,8 +415,12 @@ def introspect_typescript(src: Path) -> list[Namespace]:
 def introspect_go(src: Path) -> list[Namespace]:
     """Run `go doc -all ./...` and parse the public type/method surface.
 
-    v1.5 scope per `v1-decisions-log.md` #2 — keep minimal here. Returns an
-    empty list for v1; the codemod-templates for Go are placeholders today.
+    Go is **P0** (Decision #2 reversed 2026-05-28 — first customer is Go). This
+    introspector must verify the normalized client surface against `dx_client.go`
+    (`client.Usage.IngestEvents`, `client.Cost.IngestEventsBatch`) — NOT the SDK
+    README, which still documents the stale `client.Meter.Events.*` shape. Full
+    implementation tracked with the Go adapter work; returns an empty list until
+    then (callers fall back to the structured-log rail for Go cost emission).
     """
     return []
 

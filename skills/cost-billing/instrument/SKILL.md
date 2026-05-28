@@ -1,7 +1,7 @@
 ---
 name: cost-billing-instrument
 description: >-
-  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires cost ingest events (OTel spans with moolabs.* attributes) and usage ingest events (client.usage.ingest_events) into customer code, based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency keys derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js — Go v1.5), and PII guards. Implements three patterns — sibling-pair (default), usage-only, cost-only (direct `client.cost.ingest_events_batch` emit when the Phase 1.5 snapshot reports the cost endpoint, OTel span + structured log as the recovery rail). Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
+  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires cost ingest events (OTel spans with moolabs.* attributes) and usage ingest events (client.usage.ingest_events) into customer code, based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency keys derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js; Go P0 — adapter in progress), and PII guards. Implements three patterns — sibling-pair (default), usage-only, cost-only (direct `client.cost.ingest_events_batch` emit when the Phase 1.5 snapshot reports the cost endpoint, OTel span + structured log as the recovery rail). Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
 license: MIT
 metadata:
   author: Moolabs
@@ -304,7 +304,7 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 |---|---|
 | Python | `app/services/moolabs_client.py` (or `<package>/services/moolabs_client.py` matching service's existing module layout) |
 | TypeScript | `src/services/moolabs-client.ts` |
-| Go (v1.5) | `internal/moolabsclient/client.go` |
+| Go (P0) | `internal/moolabsclient/client.go` |
 
 **What goes in the helper (generated from `assets/codemod-templates/<lang>-moolabs-client.<ext>.j2`):**
 
@@ -414,7 +414,7 @@ For each insert, pick the right adapter and pattern. Every emission MUST go thro
 | TypeScript | Express | OTel via @opentelemetry/instrumentation-express; request_id from `req.headers['x-request-id']` | `assets/codemod-templates/typescript-express.j2` |
 | TypeScript | NestJS | OTel via @opentelemetry/instrumentation-nestjs-core; request_id from request scope | `assets/codemod-templates/typescript-nestjs.j2` |
 | TypeScript | Next.js | OTel via @vercel/otel; request_id from middleware | `assets/codemod-templates/typescript-nextjs.j2` |
-| Go (v1.5) | net/http stdlib | otel-go; request_id from context | `assets/codemod-templates/go-stdlib.j2` (placeholder for v1) |
+| Go (P0) | net/http stdlib | otel-go; request_id from context | `assets/codemod-templates/go-stdlib.j2` (in progress — helper landed, callsite template pending) |
 | any | Litestar / Tornado / others | **No v1 adapter** | Insert `# TODO: framework=<x> has no v1 adapter; manual instrumentation required` |
 
 **Idempotency-key derivation (v1 heuristic, per `v1-decisions-log.md`):**
@@ -511,5 +511,5 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 - `assets/codemod-templates/typescript-express.j2`
 - `assets/codemod-templates/typescript-nestjs.j2`
 - `assets/codemod-templates/typescript-nextjs.j2`
-- `assets/codemod-templates/go-stdlib.j2` (placeholder until v1.5)
+- `assets/codemod-templates/go-stdlib.j2` (Go P0 — in progress)
 - `assets/pii-patterns.yaml` — the regex set the PII guard uses.

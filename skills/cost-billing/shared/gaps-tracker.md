@@ -64,7 +64,7 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 
 | # | Question | v1 status | Path |
 |---|---|---|---|
-| 19 | Language scope for v1 | **RESOLVED for v1** (Python + TypeScript). Go = v1.5. Java = v2. | Per `v1-decisions-log.md` #2. |
+| 19 | Language scope for v1 | **RESOLVED for v1** (Python + TypeScript + Go — Go is **P0**, first customer is Go). Java = v2. | Per `v1-decisions-log.md` #2 (reversed 2026-05-28). |
 | 20 | Codemod review surface (large diffs) | **RESOLVED for v1** (chunk by service; max 30 files per PR; multi-PR if needed with index PR). | |
 | 21 | Revert / rollback model | **RESOLVED for v1** (`git revert`; no regenerate-removing-feature-X). | Per `v1-decisions-log.md`. |
 | 22 | Coexistence with existing instrumentation | **RESOLVED for v1** (Skill A detects OpenLLMetry / Helicone / Langfuse / OTel; Skill 2 extends existing spans with `moolabs.*` attributes — does not double-wrap). | |

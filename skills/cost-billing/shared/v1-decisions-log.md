@@ -9,7 +9,7 @@
 | # | Topic | v1 default | Rationale (1 line) | Revisit at |
 |---|---|---|---|---|
 | 1 | "Optimal manner" optimization target | **Coverage-first** (instrument every emission site detected with confidence ≥ MEDIUM). Latency secondary. | Framework's stated purpose is "cut dev time" — missing emission sites costs the most time downstream. | HLD; revisit if customer reports >5% latency regression on hot paths. |
-| 2 | Codemod v1 language scope | **Python + TypeScript v1.** Go in v1.5. Java in v2. | All three GitHub SDKs already ship (`moolabs-py`/`-ts`/`-go`); v1 prioritizes the two most-requested. Go is mechanically similar — easy v1.5 add. | After v1 ships to 3 customers. |
+| 2 | Codemod v1 language scope | **Python + TypeScript v1.** Go in v1.5. Java in v2. | All three GitHub SDKs already ship (`moolabs-py`/`-ts`/`-go`); v1 prioritizes the two most-requested. Go is mechanically similar — easy v1.5 add. | ⚠️ **REVERSED 2026-05-28** — Go promoted to v1/P0; see status note below the matrix. |
 | 3 | Cost-event SDK endpoint status | **There is no separate "acute SDK" — the Moolabs SDK is unified.** The unified `Moolabs` client already exposes `client.cls.*` + `client.meter.*`; cost-event ingestion will land on the SAME client when the platform team ships it (final method path TBD — likely `client.meter.cost.ingest_events()` or sibling namespace). v1 emits cost via **dual transport** (REVISED 2026-05-25 after an early integration run): preferred = OTel span attributes (when a recording span exists); recovery rail = structured log line (when no recording span) preserved by the customer's log pipeline. Both events (cost AND usage) follow the same never-drop contract — usage uses SDK-then-log, cost uses span-then-log. Subscription-customer cost-only paths still get `# TODO: blocked on unified SDK's cost-event endpoint` annotations until that endpoint ships, at which point the helper's PRIMARY cost transport swaps to direct SDK emission on the same `get_client()` singleton (call sites unchanged; recovery-rail log stays). | Per `sdk-surface-reference.md` — unified SDK exposes `cls`+`meter` namespaces only today. Original v1 default (span-only) would silently drop ~90% of cost signal under head-sampling (real production default), 100% under non-traced background workers / dev / CI; the never-drop contract makes the attribution engine actually trustworthy. The "acute SDK" framing was wrong — there is one SDK, multiple endpoints. | ✅ **TRIGGERED 2026-05-28** — endpoint shipped; see the Decision 3 status note below the matrix. |
 | 4 | Codemod hot-path insert default | **Option B — blocking insert, document latency in PR.** Per Doc 3 §7.1 lean. | The customer's engineer decides background-wrap policy; codemod stays conservative. | If 3+ customers report needing async. |
 | 5 | Framework invocation surface + permission model | **CLI v1, local-only.** Skill runs on integrator's machine. Customer code never leaves their environment. v1.5: GitHub Action. v2: IDE extension. | Trust-tone — first-impression is "this reads your code on your machine." No SaaS dependency for code reading. | When usage warrants hosted (>10 customers). |
@@ -26,6 +26,24 @@
 >
 > **Namespace-shape correction:** row 3 also states the client exposes `client.cls.*` + `client.meter.*` — that was likewise wrong. The shipped SDK has **11 flat capability namespaces**; usage is `client.usage.*` (capability "usage" → EventsApi), cost is `client.cost.*`. There is no `client.cls.*` or `client.meter.events.*`. (Reconciled across the suite 2026-05-28 — "Error B".)
 >
+
+> **Decision 2 — REVERSED (2026-05-28; supersedes row 2):** Go is promoted from
+> v1.5-deferred to **v1 / P0**. The row-2 rationale ("v1 prioritizes the two
+> most-requested") was an **ungrounded assumption about demand** — and it is
+> refuted by the actual go-to-market fact: **the first customer is Go-based.**
+> There was never a technical reason to defer: `moolabs-go` ships at full parity
+> (`client.Usage`, `client.Cost`, all 11 capability namespaces; verified at source
+> 2026-05-28), min Go 1.18. Java stays v2.
+>
+> **What this requires (in progress):** a Go `internal/moolabsclient` helper
+> (`EmitUsageEventSafe`/`EmitCostEventSafe`, dual-transport, capability-gated cost
+> direct emit) grounded on `client.Usage.IngestEvents(ctx, events)` +
+> `client.Cost.IngestEventsBatch(...)`; Go HTTP framework callsite templates
+> (net/http, gin, echo, fiber, chi); Go worker/stream-consumer templates (the
+> first customer + meter are Go services with non-HTTP cost sites); and a real
+> Phase-1.5 Go introspector (today `introspect_go` is a stub) so the call shape is
+> verified against `dx_client.go`, never the SDK README (which still documents the
+> stale `client.Meter.Events.*` shape — same drift as Error B).
 > The row 3 text above is retained verbatim as the historical record of what was believed pre-2026-05-28.
 
 ---

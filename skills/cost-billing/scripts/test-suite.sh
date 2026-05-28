@@ -232,6 +232,37 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
 
+# Go helper: render BOTH capability branches + gofmt -e syntax gate (skip if no gofmt).
+import shutil, subprocess, tempfile
+gofmt = shutil.which("gofmt")
+go_ctx = {**helper_ctx, "capabilities": {**helper_ctx["capabilities"],
+          "cost_event_method_path": "client.Cost.IngestEventsBatch"}}
+for direct in (True, False):
+    ctx = {**go_ctx, "capabilities": {**go_ctx["capabilities"], "cost_event_direct_emit": direct}}
+    try:
+        r = env.get_template("go-moolabs-client.go.j2").render(**ctx)
+    except Exception as e:
+        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: render error: {e}")
+        fail_count += 1; continue
+    ok = ".Usage.IngestEvents" in r and 'logEvent("moolabs.usage.event"' in r
+    if direct:
+        ok = ok and "IngestEventsBatch" in r and "skipped_no_tenant_id" in r and "usage_event_id" in r
+    if not ok:
+        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: missing SDK call / never-drop rail")
+        fail_count += 1; continue
+    if gofmt:
+        with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
+            tf.write(r); tfp = tf.name
+        res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
+        Path(tfp).unlink()
+        if res.returncode != 0:
+            print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: gofmt -e: {res.stderr.strip()[:200]}")
+            fail_count += 1; continue
+        print(f"  PASS  go-moolabs-client.go.j2[direct={direct}]: gofmt-clean + never-drop rail")
+    else:
+        print(f"  SKIP  gofmt not on PATH; go-moolabs-client.go.j2[direct={direct}] structural-only PASS")
+    pass_count += 1
+
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
     for pat in patterns:

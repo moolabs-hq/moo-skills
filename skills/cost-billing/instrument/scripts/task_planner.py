@@ -36,6 +36,10 @@ from typing import Any
 
 # Template selection per (language, framework). Stays aligned with the
 # helper templates checked into assets/codemod-templates/.
+# Go is P0 (Decision #2 reversed 2026-05-28): the go-stdlib.j2 callsite template
+# is in progress; the Go SDK helper (go-moolabs-client.go.j2) has landed. Until
+# the callsite template exists, the planner's existence check below skips Go
+# files with a clear message rather than emitting a task against a missing file.
 TEMPLATE_MAP: dict[tuple[str, str], str] = {
     ("python", "fastapi"): "assets/codemod-templates/python-fastapi.j2",
     ("python", "django"): "assets/codemod-templates/python-django.j2",
@@ -52,6 +56,10 @@ HELPER_IMPORT: dict[str, str] = {
     "typescript": 'import { emitUsageEventSafe, emitCostEventSafe } from "@/services/moolabs-client";',
     "go": 'import "internal/moolabsclient"',
 }
+
+# Template paths in TEMPLATE_MAP are relative to the instrument skill root; used
+# to existence-check a resolved template before emitting a task against it.
+_SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
@@ -305,6 +313,12 @@ def build_tasks(
         if not template:
             sys.stderr.write(
                 f"WARN: no template for ({primary_lang}, {primary_fw}); skipping {file_path}\n"
+            )
+            continue
+        if not (_SKILL_ROOT / template).exists():
+            sys.stderr.write(
+                f"WARN: template {template} for ({primary_lang}, {primary_fw}) not yet "
+                f"implemented; skipping {file_path} (no broken task emitted)\n"
             )
             continue
         sources_for_file = _resolve_sources_for_file(

@@ -163,7 +163,7 @@ See `cost-billing-shared/anchor-taxonomy.md` for the full out-of-scope list.
 The requirements doc has 11 decisions §10 lists before HLD can proceed. The suite locks defensible v1 defaults for all 11 — see `cost-billing-shared/v1-decisions-log.md`. Headline calls:
 
 - **#1 Optimization target:** coverage-first (instrument every emission site with confidence ≥ MEDIUM).
-- **#2 Language scope:** Python + TypeScript v1; Go v1.5; Java v2.
+- **#2 Language scope:** Python + TypeScript + Go in v1 (Go is **P0** — first customer is Go-based); Java v2. (Decision #2 reversed 2026-05-28.)
 - **#3 Acute SDK:** blocking-dependency for cost-only emission; v1 emits cost via OTel.
 - **#4 Codemod insert default:** Option B (blocking + documented).
 - **#5 Invocation surface:** CLI v1, local-only.
