@@ -74,6 +74,33 @@ FRAMEWORK_SIGNATURES_GO = {
     "chi": ["github.com/go-chi/chi"],
 }
 
+# Execution-runtime signatures — non-HTTP entry-point libraries, keyed by the
+# execution_context they imply (canonical vocabulary lives in
+# shared/assets/execution-context.schema.yaml). These are a SERVICE-LEVEL HINT,
+# not the gate: a service carrying one of these but no HTTP framework is still
+# instrumentable. Per-call-site classification (W2 context classifier) is
+# authoritative. argparse / threading / asyncio are stdlib (no dep to match) and
+# are detected at the call-site layer, not here.
+EXECUTION_RUNTIME_SIGNATURES_PYTHON = {
+    "queue_worker":    ["celery", "rq", "dramatiq", "huey", "arq", "kombu"],
+    "stream_consumer": ["confluent-kafka", "aiokafka", "kafka-python", "google-cloud-pubsub", "nats-py"],
+    "scheduled_job":   ["apscheduler", "schedule"],
+    "cli_batch":       ["click", "typer"],
+}
+
+EXECUTION_RUNTIME_SIGNATURES_TS = {
+    "queue_worker":    ["bullmq", "bee-queue", "agenda", "@nestjs/microservices"],
+    "stream_consumer": ["kafkajs", "@confluentinc/kafka-javascript", "node-rdkafka", "@google-cloud/pubsub"],
+    "scheduled_job":   ["node-cron", "node-schedule", "@nestjs/schedule"],
+    "cli_batch":       ["commander", "yargs", "oclif"],
+}
+
+EXECUTION_RUNTIME_SIGNATURES_GO = {
+    "queue_worker":    ["github.com/hibiken/asynq", "github.com/RichardKnop/machinery"],
+    "stream_consumer": ["github.com/segmentio/kafka-go", "github.com/IBM/sarama", "github.com/confluentinc/confluent-kafka-go"],
+    "scheduled_job":   ["github.com/robfig/cron"],
+}
+
 EXISTING_INSTRUMENTATION_PACKAGES = {
     "opentelemetry-api": ["opentelemetry-api", "@opentelemetry/api"],
     "opentelemetry-sdk": ["opentelemetry-sdk", "@opentelemetry/sdk-node"],
@@ -104,6 +131,11 @@ class ServiceProfile:
     languages: list[str] = field(default_factory=list)
     manifests: list[str] = field(default_factory=list)
     frameworks_detected: list[str] = field(default_factory=list)
+    # Non-HTTP execution contexts detected at service level via dependency
+    # signatures (subset of the execution_context enum). A HINT — the W2
+    # call-site classifier is authoritative. Empty list = no worker/consumer/
+    # scheduler/CLI library found (does NOT mean "not instrumentable").
+    execution_runtimes: list[str] = field(default_factory=list)
     existing_instrumentation: list[str] = field(default_factory=list)
     existing_moolabs_sdk: Optional[str] = None
 
@@ -218,6 +250,23 @@ def detect_frameworks_go(service: Path) -> list[str]:
     return sorted(matched)
 
 
+def _detect_runtimes(deps: set[str], signatures: dict[str, list[str]]) -> list[str]:
+    """Return the execution contexts whose signature packages appear in deps."""
+    return sorted(ctx for ctx, pkgs in signatures.items() if _any_match(deps, pkgs))
+
+
+def detect_execution_runtimes_python(service: Path) -> list[str]:
+    return _detect_runtimes(_read_python_deps(service), EXECUTION_RUNTIME_SIGNATURES_PYTHON)
+
+
+def detect_execution_runtimes_ts(service: Path) -> list[str]:
+    return _detect_runtimes(_read_node_deps(service), EXECUTION_RUNTIME_SIGNATURES_TS)
+
+
+def detect_execution_runtimes_go(service: Path) -> list[str]:
+    return _detect_runtimes(_read_go_deps(service), EXECUTION_RUNTIME_SIGNATURES_GO)
+
+
 def detect_existing_instrumentation(service: Path, languages: list[str]) -> list[str]:
     deps: set[str] = set()
     if "python" in languages:
@@ -301,8 +350,13 @@ def _read_go_deps(service: Path) -> set[str]:
     go_mod = service / "go.mod"
     if go_mod.is_file():
         text = go_mod.read_text(encoding="utf-8", errors="replace")
-        # Pull `require` blocks
-        for match in re.finditer(r"^\s*([a-zA-Z0-9_./-]+)\s+v[\d.]+", text, flags=re.MULTILINE):
+        # Pull both the block form (indented inside `require (...)`) and the
+        # single-line form (`require github.com/x/y v1.2.3`). The optional
+        # `require ` prefix covers the latter; the `(` of `require (` won't match
+        # the module capture, so the opening line is skipped.
+        for match in re.finditer(
+            r"^\s*(?:require\s+)?([a-zA-Z0-9_./-]+)\s+v[\d.]+", text, flags=re.MULTILINE
+        ):
             module = match.group(1)
             if "/" in module:  # actual modules, not directives
                 deps.add(module)
@@ -327,12 +381,16 @@ def scan(repo_path: Path) -> RepoProfile:
             continue
 
         frameworks: list[str] = []
+        runtimes: list[str] = []
         if "python" in languages:
             frameworks.extend(detect_frameworks_python(sr))
+            runtimes.extend(detect_execution_runtimes_python(sr))
         if "typescript" in languages or "javascript" in languages:
             frameworks.extend(detect_frameworks_ts(sr))
+            runtimes.extend(detect_execution_runtimes_ts(sr))
         if "go" in languages:
             frameworks.extend(detect_frameworks_go(sr))
+            runtimes.extend(detect_execution_runtimes_go(sr))
 
         existing_instr = detect_existing_instrumentation(sr, languages)
         existing_sdk = detect_existing_moolabs_sdk(sr, languages)
@@ -350,6 +408,7 @@ def scan(repo_path: Path) -> RepoProfile:
                 languages=languages,
                 manifests=manifests_found,
                 frameworks_detected=sorted(set(frameworks)),
+                execution_runtimes=sorted(set(runtimes)),
                 existing_instrumentation=existing_instr,
                 existing_moolabs_sdk=existing_sdk,
             )
@@ -374,6 +433,18 @@ def scan(repo_path: Path) -> RepoProfile:
         notes.append(
             "OpenTelemetry detected. Codemod will use BROWNFIELD branch — "
             "extends existing spans with moolabs.* attributes rather than wrapping."
+        )
+    worker_only = [
+        s.path or "<root>"
+        for s in services
+        if s.execution_runtimes and not s.frameworks_detected
+    ]
+    if worker_only:
+        notes.append(
+            "Worker/consumer/scheduler service(s) with NO HTTP framework detected: "
+            f"{', '.join(worker_only)}. These ARE instrumentable — their cost/usage "
+            "emission sites run outside HTTP handlers (execution_runtimes lists the "
+            "context). Do not skip. Per-call-site classification is authoritative."
         )
 
     return RepoProfile(

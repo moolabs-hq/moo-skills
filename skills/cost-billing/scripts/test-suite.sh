@@ -41,7 +41,7 @@ echo "Suite root: $SUITE_ROOT"
 echo ""
 
 # ─── SKILL.md frontmatter ──────────────────────────────────────────────
-echo "[1/7] SKILL.md frontmatter present (name + description)"
+echo "[1/8] SKILL.md frontmatter present (name + description)"
 for skill_dir in "$SUITE_ROOT"/*/; do
   name=$(basename "$skill_dir")
   case "$name" in
@@ -69,7 +69,7 @@ done
 echo ""
 
 # ─── YAML schemas parse ─────────────────────────────────────────────────
-echo "[2/7] YAML schemas + assets parse"
+echo "[2/8] YAML schemas + assets parse"
 while IFS= read -r -d '' yaml_file; do
   rel="${yaml_file#$SUITE_ROOT/}"
   if python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]).read())" "$yaml_file" 2>/dev/null; then
@@ -83,7 +83,7 @@ done < <(find "$SUITE_ROOT" -name "*.yaml" -not -path "*/node_modules/*" -not -p
 echo ""
 
 # ─── Python scripts parse ──────────────────────────────────────────────
-echo "[3/7] Python scripts compile"
+echo "[3/8] Python scripts compile"
 while IFS= read -r -d '' py_file; do
   rel="${py_file#$SUITE_ROOT/}"
   if python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$py_file" 2>/dev/null; then
@@ -97,7 +97,7 @@ done < <(find "$SUITE_ROOT" -name "*.py" -not -path "*/__pycache__/*" -print0)
 echo ""
 
 # ─── install.sh syntax ─────────────────────────────────────────────────
-echo "[4/7] install.sh syntax (wrapper + real)"
+echo "[4/8] install.sh syntax (wrapper + real)"
 check "install.sh wrapper"     bash -n "$SUITE_ROOT/install.sh"
 check "shared/install.sh"      bash -n "$SUITE_ROOT/shared/install.sh"
 # Also parse under /bin/bash (macOS ships 3.2.57). Catches array / parameter
@@ -109,7 +109,7 @@ fi
 echo ""
 
 # ─── install.sh dry-run for each persona ───────────────────────────────
-echo "[5/7] install.sh --dry-run per persona"
+echo "[5/8] install.sh --dry-run per persona"
 for persona in finance product team-product engineering all; do
   if bash "$SUITE_ROOT/install.sh" \
        --persona "$persona" \
@@ -128,12 +128,12 @@ for persona in finance product team-product engineering all; do
 done
 echo ""
 
-# ─── [6/7] install.sh dry-run under /bin/bash (macOS bash 3.2 customer env) ─
+# ─── [6/8] install.sh dry-run under /bin/bash (macOS bash 3.2 customer env) ─
 # Phase 5 runs under $PATH bash (typically 5.x on dev boxes). Customers on
 # macOS hit /bin/bash 3.2.57 — different array/expansion semantics under
 # `set -u`. This phase re-runs the same matrix under /bin/bash to catch
 # bash-3.2 regressions before they reach customer dogfood.
-echo "[6/7] install.sh --dry-run per persona under /bin/bash (bash 3.2 customer env)"
+echo "[6/8] install.sh --dry-run per persona under /bin/bash (bash 3.2 customer env)"
 if [[ ! -x /bin/bash ]]; then
   yellow "  SKIP  /bin/bash not present on this host"
 else
@@ -158,9 +158,9 @@ else
 fi
 echo ""
 
-# ─── [7/7] Codemod-template renders + Codex regression assertions ──────
+# ─── [7/8] Codemod-template renders + Codex regression assertions ──────
 # Each assertion guards a class of bug found in cross-model adversarial review.
-echo "[7/7] template renders + adversarial-regression assertions"
+echo "[7/8] template renders + adversarial-regression assertions"
 python3 - "$SUITE_ROOT" <<'PYEOF'
 import sys
 from pathlib import Path
@@ -300,6 +300,25 @@ if [[ $PHASE6 -ne 0 ]]; then
   FAIL=$((FAIL + 1))
 else
   PASS=$((PASS + 1))
+fi
+echo ""
+
+# ─── [8/8] Python unit tests (stdlib unittest, no pytest dependency) ────
+echo "[8/8] python unit tests (test_*.py)"
+_found_tests=0
+while IFS= read -r -d '' test_file; do
+  _found_tests=1
+  rel="${test_file#$SUITE_ROOT/}"
+  if python3 "$test_file" >/dev/null 2>&1; then
+    green "  PASS  $rel"
+    PASS=$((PASS + 1))
+  else
+    red "  FAIL  $rel"
+    FAIL=$((FAIL + 1))
+  fi
+done < <(find "$SUITE_ROOT" -name "test_*.py" -not -path "*/__pycache__/*" -print0)
+if [[ $_found_tests -eq 0 ]]; then
+  yellow "  SKIP  no test_*.py files found"
 fi
 echo ""
 
