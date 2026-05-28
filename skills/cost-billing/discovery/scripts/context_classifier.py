@@ -143,7 +143,11 @@ def _has_consumer_loop(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         if isinstance(node, (ast.For, ast.AsyncFor)):
             it = node.iter.func if isinstance(node.iter, ast.Call) else node.iter
             itername = (_dotted(it) or "").lower()
-            if "consumer" in itername or "subscription" in itername:
+            # Only "consumer" — NOT "subscription": in a cost-billing codebase
+            # `for sub in subscriptions` is a billing loop, not a pub/sub consumer.
+            # Real pub/sub subscriptions are caught via the .poll()/.consume()
+            # method check below + a stream import, which don't collide with billing.
+            if "consumer" in itername:
                 return True
         if isinstance(node, ast.Call):
             fpath = (_dotted(node.func) or "").lower()

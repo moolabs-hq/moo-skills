@@ -31,8 +31,20 @@ execution_context_enum:
 
 # ── Per-context metadata ─────────────────────────────────────────────────────
 # Downstream layers read these to pick the right attribution extractors and the
-# right transport default. `traced_by_default` decides span-vs-log primary
-# transport in the codemod helper.
+# right transport default.
+#
+# IMPORTANT — `traced_by_default` / `transport_default` are EXPECTATIONS for the
+# common case, NOT properties of the context. Do not over-assert "workers are
+# never traced": plenty of customers run OTel auto-instrumentation on their
+# Celery/Kafka workers (opentelemetry-instrumentation-{celery,kafka,...}), so
+# their tasks DO have recording spans. Two consequences:
+#   1. The dual-transport helper is RUNTIME-ADAPTIVE regardless of this field —
+#      it uses a span when one is actually recording and the log rail otherwise.
+#      These values only set which path is documented as primary / tried first.
+#   2. `traced_by_default: false` flips to true for a service when Phase 1
+#      (repo_scan existing_instrumentation) detects worker OTel instrumentation.
+# This is the spirit of Open Question #1 in worker-coverage-design.md — resolved
+# here as "default-when-untraced, override on detection," never a hard verdict.
 contexts:
 
   http_request:
@@ -48,8 +60,8 @@ contexts:
       typescript: [bullmq, bee-queue, agenda, "@nestjs/microservices"]
       go: [github.com/hibiken/asynq, github.com/RichardKnop/machinery]
     attribution_sources: [task_args, job_payload]
-    transport_default: log_rail_primary
-    traced_by_default: false
+    transport_default: log_rail_primary   # expectation when untraced; see note above
+    traced_by_default: false              # flips true if Phase 1 detects worker OTel
 
   stream_consumer:
     description: Long-running consumer of an event stream.
@@ -58,8 +70,8 @@ contexts:
       typescript: [kafkajs, "@confluentinc/kafka-javascript", "node-rdkafka", "@google-cloud/pubsub"]
       go: [github.com/segmentio/kafka-go, github.com/IBM/sarama, github.com/confluentinc/confluent-kafka-go]
     attribution_sources: [message_key, message_headers, message_value_field]
-    transport_default: log_rail_primary
-    traced_by_default: false
+    transport_default: log_rail_primary   # expectation when untraced; see note above
+    traced_by_default: false              # flips true if Phase 1 detects worker OTel
 
   scheduled_job:
     description: Cron / interval-triggered entry point.
@@ -67,9 +79,11 @@ contexts:
       python: [apscheduler, "celery.beat", schedule]
       typescript: [node-cron, node-schedule, "@nestjs/schedule"]
       go: [github.com/robfig/cron]
-    attribution_sources: [data_row_field]   # often no per-invocation identity
-    transport_default: log_rail_primary
-    traced_by_default: false
+    # Often no per-invocation identity. A per-tenant scheduled job may carry it
+    # in config/argv; a multi-tenant batch derives it per row being processed.
+    attribution_sources: [data_row_field, config, argv]
+    transport_default: log_rail_primary   # expectation when untraced; see note above
+    traced_by_default: false              # flips true if Phase 1 detects worker OTel
 
   cli_batch:
     description: One-shot command / script (batch ETL, backfill).

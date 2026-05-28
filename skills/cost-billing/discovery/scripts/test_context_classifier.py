@@ -172,6 +172,18 @@ class ScopeBoundaries(unittest.TestCase):
         """), lineno=5)
         self.assertEqual(c.context, "unknown")
 
+    def test_billing_subscription_loop_is_not_stream_consumer(self):
+        # Domain collision guard: in a cost-billing codebase, `for sub in
+        # subscriptions` is a billing loop, NOT a pub/sub consumer.
+        c = cc.classify_call_site(_src("""
+            from stripe import Subscription
+            def renew_all():
+                for subscription in subscriptions:
+                    charge(subscription)   # line 4
+        """), lineno=4)
+        self.assertNotEqual(c.context, "stream_consumer")
+        self.assertEqual(c.context, "unknown")
+
     def test_consumer_loop_in_own_body_still_detected(self):
         c = cc.classify_call_site(_src("""
             async def run():
