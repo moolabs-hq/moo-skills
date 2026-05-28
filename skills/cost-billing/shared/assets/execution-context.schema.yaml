@@ -1,0 +1,110 @@
+# Execution-context taxonomy — shared contract (W0 of worker-coverage-design.md)
+#
+# The single enum every layer branches on: repo_scan (execution_runtimes hint),
+# the cost-call scanner (per-call-site classification), attribution_discovery
+# (which extractor set), and the codemod templates (which adapter + transport).
+#
+# Historically the suite assumed every emission site was `http_request`, which
+# made workers / consumers / cron / CLI invisible. This file makes the context an
+# explicit, validated field on the usage- and cost-event inventories.
+#
+# Vocabulary definition lives in `anchor-taxonomy.md` § "Execution context".
+# Detection design lives in `worker-coverage-design.md`.
+
+version: "0.1.0"
+schema: "https://moolabs.com/schemas/execution-context/0.1.0"
+last_updated: "2026-05-28"
+
+# ── The enum ────────────────────────────────────────────────────────────────
+# These are the only legal values of `execution_context` on an inventory entry.
+execution_context_enum:
+  - http_request
+  - queue_worker
+  - stream_consumer
+  - scheduled_job
+  - cli_batch
+  - background_task
+
+# ── Per-context metadata ─────────────────────────────────────────────────────
+# Downstream layers read these to pick the right attribution extractors and the
+# right transport default. `traced_by_default` decides span-vs-log primary
+# transport in the codemod helper.
+contexts:
+
+  http_request:
+    description: Synchronous request handler in an HTTP framework.
+    attribution_sources: [request_state, request_headers, request_meta]
+    transport_default: span_preferred
+    traced_by_default: true
+
+  queue_worker:
+    description: Pulls discrete jobs from a task/message queue.
+    runtime_signatures:
+      python: [celery, rq, dramatiq, huey, arq, kombu]
+      typescript: [bullmq, bee-queue, agenda, "@nestjs/microservices"]
+      go: [github.com/hibiken/asynq, github.com/RichardKnop/machinery]
+    attribution_sources: [task_args, job_payload]
+    transport_default: log_rail_primary
+    traced_by_default: false
+
+  stream_consumer:
+    description: Long-running consumer of an event stream.
+    runtime_signatures:
+      python: [confluent-kafka, aiokafka, kafka-python, google-cloud-pubsub, boto3-kinesis, nats-py]
+      typescript: [kafkajs, "@confluentinc/kafka-javascript", "node-rdkafka", "@google-cloud/pubsub"]
+      go: [github.com/segmentio/kafka-go, github.com/IBM/sarama, github.com/confluentinc/confluent-kafka-go]
+    attribution_sources: [message_key, message_headers, message_value_field]
+    transport_default: log_rail_primary
+    traced_by_default: false
+
+  scheduled_job:
+    description: Cron / interval-triggered entry point.
+    runtime_signatures:
+      python: [apscheduler, "celery.beat", schedule]
+      typescript: [node-cron, node-schedule, "@nestjs/schedule"]
+      go: [github.com/robfig/cron]
+    attribution_sources: [data_row_field]   # often no per-invocation identity
+    transport_default: log_rail_primary
+    traced_by_default: false
+
+  cli_batch:
+    description: One-shot command / script (batch ETL, backfill).
+    runtime_signatures:
+      python: [argparse, click, typer]
+      typescript: [commander, yargs, oclif]
+      go: [github.com/spf13/cobra, flag]
+    attribution_sources: [argv, config, data_row_field]
+    transport_default: log_rail_primary
+    traced_by_default: false
+
+  background_task:
+    description: Fire-and-forget within a process.
+    detection_shapes:
+      python: ["asyncio.create_task", "concurrent.futures", "threading.Thread", "fastapi.BackgroundTasks"]
+      typescript: ["setImmediate", "queueMicrotask", "process.nextTick"]
+    attribution_sources: [inherited_request_context, job_payload]
+    transport_default: span_if_propagated_else_log
+    traced_by_default: conditional   # depends on whether trace context is propagated
+
+# ── Attribution-source vocabulary ────────────────────────────────────────────
+# The extractor families attribution_discovery (Layer 4 / W4) implements. Today
+# only the request_* family exists (attribution_discovery.py:62-69).
+attribution_source_families:
+  request_state:            "HTTP: request.state.X / request.scope[X]"
+  request_headers:          "HTTP: req.headers[...] / .headers.get(...)"
+  request_meta:             "HTTP (Django): request.META[...]"
+  task_args:                "Worker: positional/keyword args of the task fn"
+  job_payload:              "Worker: a field in the deserialized job payload dict"
+  message_key:              "Stream: the message key"
+  message_headers:          "Stream: a message header (e.g. Kafka header customer_id)"
+  message_value_field:      "Stream: a field in the deserialized message value"
+  data_row_field:           "Batch/cron: a field on each row being processed"
+  argv:                     "CLI: a command-line argument"
+  config:                   "CLI/job: a config-file / env value"
+  inherited_request_context: "Background: trace/request context propagated from spawner"
+
+# ── Transport-default vocabulary ─────────────────────────────────────────────
+transport_defaults:
+  span_preferred:               "Recording span exists; write span attrs, log is recovery rail."
+  log_rail_primary:             "No recording span expected; structured log is primary, span best-effort."
+  span_if_propagated_else_log:  "Use span when trace context propagated to the task, else log."

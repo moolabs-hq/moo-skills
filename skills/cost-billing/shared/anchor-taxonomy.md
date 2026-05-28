@@ -96,6 +96,32 @@ The codemod (Skill 2) reads all three; the drift-lint (Skill 3) checks all three
 - **Usage-only** — terminal event with no upstream cost-bearing call (e.g., billing on `seat.assigned`). Single emission.
 - **Cost-only** — cost-bearing call with no usage event (subscription customers; non-AI infra hot paths). **v1 uses dual-transport `emit_cost_event_safe()` helper (OTel span + structured log fallback, never-drop).** Uses direct `client.cost.ingest_events_batch` emission when the snapshot reports `cost_event_direct_emit=true`; OTel span + structured log is the recovery rail.
 
+Pipeline pattern (what events fire) is **orthogonal** to execution context (where they fire) — a sibling-pair can occur in an HTTP handler *or* a Kafka consumer.
+
+---
+
+## Execution context
+
+**Where a cost/usage emission site runs.** This is the join key between *where the cost
+happens*, *how to source attribution*, and *which transport is viable*. The scan must
+classify every emission site into exactly one of these — historically the suite assumed
+`http_request` everywhere, which made all non-HTTP sites (workers, consumers, cron, CLI)
+invisible. See `worker-coverage-design.md` for the detection design; enum lives in
+`assets/execution-context.schema.yaml`.
+
+| Context | What it is | Attribution source | Transport default |
+|---------|-----------|--------------------|-------------------|
+| `http_request` | synchronous request handler in an HTTP framework | `request.state` / headers / `META` | span-preferred (usually traced) |
+| `queue_worker` | pulls discrete jobs from a task/message queue (Celery, RQ, Dramatiq, BullMQ, Sidekiq, SQS, asynq) | the task fn args / job payload | **log-rail primary** (rarely traced) |
+| `stream_consumer` | long-running consumer of an event stream (Kafka, Kinesis, Pub/Sub, NATS, Redis streams) | message key / headers / value fields | **log-rail primary** |
+| `scheduled_job` | cron / interval-triggered (Celery beat, node-cron, k8s CronJob entrypoint) | per-row from the data processed; may have no per-invocation identity | log-rail primary |
+| `cli_batch` | one-shot command / script (argparse/click/cobra main, batch ETL) | argv / config / per-row data | log-rail primary |
+| `background_task` | fire-and-forget within a process (`asyncio.create_task`, threadpool, FastAPI `BackgroundTasks`) | inherited from spawning request if capturable, else payload | span if context propagated, else log |
+
+**Two decisions context drives** (both hardcoded to `http_request` historically):
+1. **Attribution model** — which extractor set applies (request vs payload vs message vs data-row).
+2. **Transport default** — workers usually lack a recording span, so the structured-log rail is *primary*, not fallback.
+
 ---
 
 ## Time and intervals
