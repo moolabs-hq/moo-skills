@@ -142,7 +142,7 @@ Plus org-wide: cfo-stage1-signoff.yaml + holistic-r-review.md
 
 ### Phase 1: Plan the PR (no edits yet)
 
-Run `scripts/codemod_driver.py --plan <repo>`. Produces `.moolabs/codemod/plan.yaml`:
+Run `scripts/codemod_driver.py --plan <repo>` **(aspirational — not yet on disk; see the Scripts section. Until built, the agent enacts the plan-step manually from SKILL.md prose.)** Produces `.moolabs/codemod/plan.yaml`:
 
 ```yaml
 plan_version: 0.1.0
@@ -441,7 +441,7 @@ The codemod refuses to write any span attribute that matches `request.headers.au
 
 ### Phase 3: Generate the PR(s)
 
-Run `scripts/pr_writer.py`. Output per chunk:
+Run `scripts/pr_writer.py` **(aspirational — not yet on disk; see the Scripts section. Until built, the agent performs the branch / commit / PR-open steps manually.)** Output per chunk:
 
 - A new branch `moolabs/instrument-<service>-<short-sha>`
 - A commit per file (atomic, reviewable)
@@ -496,12 +496,20 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 
 ## Scripts
 
-- `scripts/codemod_driver.py` — Phase 1 plan; Phase 2 dispatch to per-language driver.
-- `scripts/python_adapter.py` — Python AST rewriter using `libcst`.
-- `scripts/typescript_adapter.py` — TS AST rewriter using `ts-morph`.
-- `scripts/trace_context_detect.py` — pick the right trace-context provider per framework.
-- `scripts/idempotency_derive.py` — the heuristic + fallback.
-- `scripts/pr_writer.py` — branch + commit + PR description.
+**Implemented (executable today):**
+
+- `scripts/task_planner.py` — Phase 2c fan-out planner. Reads inventories + Phase 1.5 snapshot; writes `.moolabs/codemod/tasks.yaml` (one task per file, self-contained context).
+- `scripts/attribution_discovery.py` — Phase 1.6 attribution-source detector. Extracts/confirms `tenant_id`/`customer_id`/`request_id`/`consumer_agent`/`feature_key` source bindings.
+- `scripts/sdk_snapshot.py` — Phase 1.5 SDK introspector. Verifies the pinned SDK surface; writes `.moolabs/customer-context/sdk-surface-snapshot.yaml` with the `cost_event_direct_emit` capability flag.
+
+**Aspirational — NOT YET IMPLEMENTED.** The phases below name these scripts as if runnable, but they don't exist on disk. **The codemod is agent-driven today**: the per-file rewriting + git operations are performed by the agent following SKILL.md prose, not by deterministic scripts. Building these is the path to a real customer-distributable v1 (same input → same diff, auditable, no LLM at execution time):
+
+- `scripts/codemod_driver.py` — TARGET: Phase 1 plan; Phase 2 dispatch to per-language driver.
+- `scripts/python_adapter.py` — TARGET: Python AST rewriter using `libcst` (formatting-preserving).
+- `scripts/typescript_adapter.py` — TARGET: TS AST rewriter using `ts-morph`.
+- `scripts/trace_context_detect.py` — TARGET: pick the right trace-context provider per framework.
+- `scripts/idempotency_derive.py` — TARGET: the `{handler}.{path_param}` heuristic + `{handler}.{epoch_millis}` fallback.
+- `scripts/pr_writer.py` — TARGET: branch + commit + PR description.
 
 ## Assets
 
