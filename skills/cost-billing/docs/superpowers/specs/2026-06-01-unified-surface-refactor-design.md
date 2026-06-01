@@ -525,6 +525,50 @@ Negligible:
 - **bff-ingest-consumer**: Slightly faster post-US-001 (header read avoids ~1 DB query per event when wallet_member lookup was previously needed).
 - **Cross-language parity test**: Adds ~30s to SDK CI per language; runs in parallel.
 
+### Pre-mortem — Six ways this ships and still fails
+
+Walking the "project shipped, customer told us it's broken" scenarios. Each is a failure mode that survives the unit tests, the acceptance criteria, and the dev-environment demo — but bites a real customer post-deploy. Mitigations belong in the implementation plan, not just the open-questions list.
+
+#### Risk PM-1: SDK release coordination — one language ships, others lag
+
+**Failure scenario:** `moolabs-py v0.3.0` lands; `moolabs-ts` is still in rc; `moolabs-go` missed the release window. Customers on Python upgrade and start using the new DX methods. Phase 2 ships the cost-billing skill suite update which requires v0.3.0+ everywhere. Customers running `/cost-billing-instrument` on TS / Go repos get bootstrap-fail errors. Cross-language drift in production. Support tickets.
+
+**Mitigation:** Phase 2 BLOCKS on Phase 1e (three-language v0.3.0 GA — not v0.3.0-rc1 in just one language). `install.sh` reads the customer's actual SDK version and `LANE=<py|ts|go>` and routes to the matching skill-suite version. Add release-coordination smoke test as the final Phase 1e gate: each language emits a fixed envelope from fixed kwargs and the three byte-stream outputs must hash-equal each other. Track as US-008's parity test.
+
+#### Risk PM-2: BFF header-resolution fix breaks non-meter-produced messages
+
+**Failure scenario:** US-001 adds Priority-0 Kafka header read at `bff-ingest-consumer._resolve_tenant_and_pool`. Some legacy producers (the cost-ingest-proxy from PR #359, customer-direct OTel emitters) don't set the `tenant_id` Kafka header. Priority 0 returns None → fallthrough to Priority 1-3 — but a regression in the refactor breaks Priority 1's body-metadata extraction. Cost-ingest-proxy events DLQ in prod.
+
+**Mitigation:** US-001's PR includes a three-case integration test: (a) message WITH `tenant_id` Kafka header → Priority 0 succeeds; (b) message WITHOUT header but WITH body `data.tenant_id` → Priority 0 returns None, Priority 1 succeeds (regression guard); (c) message with neither → DLQ (matches current behavior). Existing Priority 1-3 paths are byte-for-byte preserved in the diff (no opportunistic refactor). Tag the PR `regression-risk:high`.
+
+#### Risk PM-3: Customers fail to re-run codemod, ship broken code
+
+**Failure scenario:** Customer upgrades SDK to v0.3.0 (because their CI auto-bumps deps) but does NOT re-run `/cost-billing-instrument`. Existing `emit_usage_event_safe(quantity=..., unit=..., tenant_id=...)` call sites in their code keep calling the helper. New helper signature is breaking (raises `TypeError: unexpected keyword argument 'quantity'`). Customer's prod traffic 500s on every emission call site.
+
+**Mitigation:** (a) Default migration path documented in the v0.3.0 release notes as "RUN THE CODEMOD" with link to migration runbook. (b) `compat_period: bool` opt-in (US-013) — when bootstrapped with this flag, helper accepts old kwargs for one minor version with deprecation warning. (c) Pre-release SDK customer notification: before v0.3.0 ships, message customers via their bootstrap-captured contact (or the Slack changelog channel). (d) Skill suite's adversarial-review checklist gains a check: "if customer's `helper.py` matches the old kwarg signature, prompt them to re-run codemod before they deploy."
+
+#### Risk PM-4: Compat shim hides silent wrong-mapping bugs
+
+**Failure scenario:** Compat shim accepts old `quantity=724` kwarg and maps to new `value=724` automatically. But for some customer's meter slugs, `quantity` was per-second rate (a sustained measure) while the new `value` is integral count (an event-level measure). Customer events go through with no error; downstream aggregation multiplies them differently; monthly invoice is off by ~30%. Customer doesn't notice until billing reconciliation.
+
+**Mitigation:** Compat shim emits a one-time WARNING log per process at first activation: `"quantity=X kwarg mapped to value=X — verify your meter aggregation semantics expects integral counts; see https://docs.moolabs.com/compat/quantity-vs-value"`. Document the semantic differences for known-divergent meter types in `cost-billing-shared/v1-decisions-log.md`. Compat shim defaults to OFF; only ON when customer explicitly bootstraps with `compat_period: true`. Compat shim removed entirely in Phase 5 (US-017), no exceptions.
+
+#### Risk PM-5: Concurrency cap on meter conflicts with existing rate-limiting
+
+**Failure scenario:** Phase 4 adds per-API-key concurrency cap as Go middleware on meter (US-015). Meter-api already has an existing per-tenant rate limiter at the controller layer (token bucket, ~500 req/s default). Two layers now fire on the same request. One returns 429 (cap), the other returns 503 (rate). Customer SDK's F2 fallback doesn't know which to back off on; treats 503 as transient → retries → bumps the counter → hits the cap → 429 → loop. Customer's emission throughput tanks during traffic spike.
+
+**Mitigation:** Audit existing rate-limit middleware in meter-api BEFORE Phase 4 implementation. If both fire on the same route, define ordering: concurrency cap first (burst signal — fast reject) → rate limiter second (sustained signal). Both return 429 with `Retry-After` header (consistent semantics); 503 is reserved for actual service unavailability. Track as Phase 4 prerequisite check. Document in the meter-api observability runbook.
+
+#### Risk PM-6: Wire-shape change breaks acute mapping engine attribution
+
+**Failure scenario:** Today's wire carries customer attribution under `data.moolabs.feature.key` (flat keys with `moolabs.*` prefix). New wire carries it under nested `data.meta.feature_key`. Acute's mapping engine (`services/moo-acute/app/services/mapping_engine.py`) regex-matches `data.moolabs.*` paths. Customer events flow but `feature_key` attribution silently lands as NULL; cost-by-feature breakdown in acute's analytics goes blank for unified-format events. Discovered when a customer asks "where's my breakdown?"
+
+**Mitigation:** Acute mapping engine update is a STRICT PREREQUISITE for Phase 2 (skill suite shipping new wire shape). File as inter-team blocker US-013a. Acute change: read from BOTH `data.moolabs.*` (legacy flat) AND `data.meta.*` (new nested); prefer nested when both present; deprecate flat after one quarter of soak. Coordinated rollout order: (1) Acute reads both shapes → (2) Skill suite ships new wire format → (3) Soak 4 weeks → (4) Acute removes legacy flat reader in Phase 5 alongside SDK deprecations. Add a dashboard query: `cost-by-feature` NULL rate; should stay flat through the migration.
+
+### Pre-mortem coverage in CI
+
+The risks above map to specific tests (not just docs). Each Phase 1/2 PR's reviewer checklist gains one line per risk: *"PM-N: did your change introduce or surface this failure mode? Test added?"* — `cost-billing-adversarial-review` skill extension. This keeps the pre-mortem live, not archive.
+
 ---
 
 ## 7. Success Metrics
