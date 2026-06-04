@@ -205,32 +205,52 @@ helper_ctx = {
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
     try:
         r = env.get_template(helper).render(**helper_ctx)
-        # CODEX-REGRESSION-1: cost log fallback must carry usage_event_id
-        # CODEX-REGRESSION-1: usage log fallback must carry event_id
-        if helper.startswith("python"):
-            # Usage log fallback adds event_id in the initial dict literal.
-            # Cost log fallback adds usage_event_id as a conditional bracket assignment.
-            usage_id_in_log = '"event_id": resolved_event_id' in r
-            cost_id_in_log = 'log_kwargs["usage_event_id"] = str(usage_event_id)' in r
-            if usage_id_in_log and cost_id_in_log:
-                print(f"  PASS  helper {helper}: sibling-pair ids survive recovery rail")
-                pass_count += 1
-            else:
-                missing = []
-                if not usage_id_in_log: missing.append("usage event_id in log")
-                if not cost_id_in_log: missing.append("cost usage_event_id in log")
-                print(f"  FAIL  helper {helper}: log fallback drops {missing} (Codex Finding #1)")
-                fail_count += 1
-        else:
-            if "logPayload.usage_event_id" in r and "ingestEventsBatch" in r:
-                print(f"  PASS  helper {helper}: SDK direct branch + log fallback ids present")
-                pass_count += 1
-            else:
-                print(f"  FAIL  helper {helper}: TS SDK branch missing OR log drops sibling-pair ids (Codex Finding #1/#3)")
-                fail_count += 1
     except Exception as e:
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
+        continue
+    if helper.startswith("python"):
+        # v0.3.0-rc1 ergonomic-method assertions (parallel to the Go helper checks).
+        # The Codex Finding #1 (usage_event_id / event_id linking via the recovery rail)
+        # is obsolete in v0.3: entity_id replaces usage_event_id, the SDK auto-stamps
+        # event_id, and tenant_id is gone per FR-3.
+        has_usage   = ".usage.ingest_event(" in r
+        has_cost    = ".cost.ingest_event(" in r
+        has_events  = ".events.ingest(" in r
+        has_devgate = "_DEV_ENV_VAR" in r and "SDK_DEVELOPMENT" in r
+        has_rail    = 'logger.warning(' in r and 'log_recovery_rail' in r
+        # FR-3: surgical check — no tenant_id KWARG or field use, allow docstring prose.
+        no_tenant   = ("tenant_id=" not in r and "'tenant_id'" not in r
+                       and '"tenant_id"' not in r)
+        # v0.2 legacy must be gone
+        no_legacy   = ("cost_event_direct_emit" not in r
+                       and "ingest_events_batch" not in r
+                       and "resolved_event_id" not in r
+                       and "skipped_no_tenant_id" not in r
+                       and "log_kwargs[" not in r)
+        failed = []
+        if not has_usage:   failed.append("usage.ingest_event missing")
+        if not has_cost:    failed.append("cost.ingest_event missing")
+        if not has_events:  failed.append("events.ingest missing")
+        if not has_devgate: failed.append("SDK_DEVELOPMENT env gate missing")
+        if not has_rail:    failed.append("never-drop log rail missing")
+        if not no_tenant:   failed.append("tenant_id leaked (FR-3 violation)")
+        if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if failed:
+            print(f"  FAIL  helper {helper}: {', '.join(failed)}")
+            fail_count += 1
+        else:
+            print(f"  PASS  helper {helper}: v0.3.0 ergonomic methods + env-gated rail + FR-3 clean")
+            pass_count += 1
+    else:
+        # TS helper still on v0.2 — followup commit will migrate it. Keep the
+        # existing Codex-Finding-#3 assertion until then.
+        if "logPayload.usage_event_id" in r and "ingestEventsBatch" in r:
+            print(f"  PASS  helper {helper}: SDK direct branch + log fallback ids present (v0.2 — migrate next)")
+            pass_count += 1
+        else:
+            print(f"  FAIL  helper {helper}: TS SDK branch missing OR log drops sibling-pair ids (Codex Finding #1/#3)")
+            fail_count += 1
 
 # Go helper: v0.3.0-rc1 unified-ingest shape — single render (no capability gate),
 # gofmt -e syntax gate, structural checks for the three ergonomic methods + env-gated
