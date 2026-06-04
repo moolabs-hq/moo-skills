@@ -45,7 +45,7 @@ echo "[1/8] SKILL.md frontmatter present (name + description)"
 for skill_dir in "$SUITE_ROOT"/*/; do
   name=$(basename "$skill_dir")
   case "$name" in
-    shared|examples|scripts) continue ;;
+    shared|examples|scripts|docs) continue ;;
   esac
   skill_md="$skill_dir/SKILL.md"
   if [[ ! -f "$skill_md" ]]; then
@@ -232,36 +232,59 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
 
-# Go helper: render BOTH capability branches + gofmt -e syntax gate (skip if no gofmt).
+# Go helper: v0.3.0-rc1 unified-ingest shape — single render (no capability gate),
+# gofmt -e syntax gate, structural checks for the three ergonomic methods + env-gated
+# error handling + the FR-3 tenant-absent guard.
 import shutil, subprocess, tempfile
 gofmt = shutil.which("gofmt")
-go_ctx = {**helper_ctx, "capabilities": {**helper_ctx["capabilities"],
-          "cost_event_method_path": "client.Cost.IngestEventsBatch"}}
-for direct in (True, False):
-    ctx = {**go_ctx, "capabilities": {**go_ctx["capabilities"], "cost_event_direct_emit": direct}}
-    try:
-        r = env.get_template("go-moolabs-client.go.j2").render(**ctx)
-    except Exception as e:
-        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: render error: {e}")
-        fail_count += 1; continue
-    ok = ".Usage.IngestEvents" in r and 'logEvent("moolabs.usage.event"' in r
-    if direct:
-        ok = ok and "IngestEventsBatch" in r and "skipped_no_tenant_id" in r and "usage_event_id" in r
-    if not ok:
-        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: missing SDK call / never-drop rail")
-        fail_count += 1; continue
-    if gofmt:
+try:
+    r = env.get_template("go-moolabs-client.go.j2").render(**helper_ctx)
+except Exception as e:
+    print(f"  FAIL  go-moolabs-client.go.j2: render error: {e}")
+    fail_count += 1
+else:
+    # v0.3.0 ergonomic methods all present
+    has_usage  = "cli.Usage.IngestEvent(ctx, args)" in r
+    has_cost   = "cli.Cost.IngestEvent(ctx, args)" in r
+    has_events = "cli.Events.Ingest(ctx, args)" in r
+    # env-gated strict/lax error handling
+    has_devgate = 'os.Getenv(devEnvVar)' in r and 'SDK_DEVELOPMENT' in r
+    # never-drop log rail still wired
+    has_rail = 'logEvent("moolabs.' in r
+    # FR-3: TenantID must be absent from the helper (server derives from API key).
+    # The docstring explains the absence, so we check for actual *usage* patterns
+    # — struct-field init, field access, or map-key — not bare token mentions.
+    no_tenant = ('TenantID:' not in r and 'TenantId:' not in r
+                 and '.TenantID' not in r and '.TenantId' not in r
+                 and '"tenant_id":' not in r and "'tenant_id':" not in r)
+    # v0.2 legacy shapes must be gone
+    no_legacy = "IngestEventsBatch" not in r and "ObservedTotalCost" not in r \
+                and "BatchIngestRequest" not in r and "cost_event_direct_emit" not in r
+    failed = []
+    if not has_usage:  failed.append("Usage.IngestEvent missing")
+    if not has_cost:   failed.append("Cost.IngestEvent missing")
+    if not has_events: failed.append("Events.Ingest missing")
+    if not has_devgate:failed.append("SDK_DEVELOPMENT env gate missing")
+    if not has_rail:   failed.append("never-drop log rail missing")
+    if not no_tenant:  failed.append("TenantID leaked (FR-3 violation)")
+    if not no_legacy:  failed.append("v0.2 legacy shape leaked")
+    if failed:
+        print(f"  FAIL  go-moolabs-client.go.j2: {', '.join(failed)}")
+        fail_count += 1
+    elif gofmt:
         with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
             tf.write(r); tfp = tf.name
         res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
         Path(tfp).unlink()
         if res.returncode != 0:
-            print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: gofmt -e: {res.stderr.strip()[:200]}")
-            fail_count += 1; continue
-        print(f"  PASS  go-moolabs-client.go.j2[direct={direct}]: gofmt-clean + never-drop rail")
+            print(f"  FAIL  go-moolabs-client.go.j2: gofmt -e: {res.stderr.strip()[:200]}")
+            fail_count += 1
+        else:
+            print(f"  PASS  go-moolabs-client.go.j2: v0.3.0 ergonomic methods + env-gated rail + gofmt-clean")
+            pass_count += 1
     else:
-        print(f"  SKIP  gofmt not on PATH; go-moolabs-client.go.j2[direct={direct}] structural-only PASS")
-    pass_count += 1
+        print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
+        pass_count += 1
 
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
