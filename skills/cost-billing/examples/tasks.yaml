@@ -13,7 +13,7 @@ tasks:
     framework: fastapi
     language: python
     template: assets/codemod-templates/python-fastapi.j2
-    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe"
     snapshot_capabilities:
       unified_ingest_present: true
       usage_ergonomic_ingest: true
@@ -54,7 +54,7 @@ tasks:
     framework: fastapi
     language: python
     template: assets/codemod-templates/python-fastapi.j2
-    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe"
     snapshot_capabilities:
       unified_ingest_present: true
       usage_ergonomic_ingest: true

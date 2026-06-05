@@ -50,10 +50,13 @@ TEMPLATE_MAP: dict[tuple[str, str], str] = {
     ("go", "net-http-stdlib"): "assets/codemod-templates/go-stdlib.j2",
 }
 
-# Per-language helper import that the rendered insert relies on.
+# Per-language helper import that the rendered insert relies on. v0.3.0-rc1
+# exposes three helpers (one per pattern); the framework callsite template
+# emits only the one it needs, so the per-file rendered imports are a subset
+# of these. Listed in full so tasks.yaml documents the complete surface.
 HELPER_IMPORT: dict[str, str] = {
-    "python": "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe",
-    "typescript": 'import { emitUsageEventSafe, emitCostEventSafe } from "@/services/moolabs-client";',
+    "python": "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe",
+    "typescript": 'import { emitUsageEventSafe, emitCostEventSafe, emitEventSafe } from "@/services/moolabs-client";',
     "go": 'import "internal/moolabsclient"',
 }
 

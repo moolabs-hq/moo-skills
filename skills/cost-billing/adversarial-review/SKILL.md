@@ -260,5 +260,4 @@ When in doubt, this skill takes precedence for cost-billing artifacts; `adversar
 
 ## Assets
 
-- `assets/review-spec-template.md` — the markdown skeleton.
-- `assets/severity-examples.yaml` — example findings per severity level.
+No standalone assets ship today (the `assets/` directory is empty). The review-spec markdown skeleton and per-severity finding examples live inline in this SKILL.md — see §"Review-spec output format" and §"Severity rubric". Extracting them into `assets/` is on the roadmap once the format stabilizes.

@@ -514,11 +514,17 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 - `scripts/attribution_discovery.py` — Phase 1.6 attribution-source detector. Extracts/confirms `tenant_id`/`customer_id`/`request_id`/`consumer_agent`/`feature_key` source bindings.
 - `scripts/sdk_snapshot.py` — Phase 1.5 SDK introspector. Verifies the pinned SDK surface against the v0.3.0-rc1 unified-ingest contract; writes `.moolabs/customer-context/sdk-surface-snapshot.yaml` with the `unified_ingest_present` capability gate and per-lane method paths.
 
-**Not yet implemented (roadmap).** The codemod is agent-driven today — per-file rewriting and git operations are performed by the agent following the SKILL.md prose, not by deterministic scripts. Moving to deterministic per-language AST rewriters (Python via `libcst`, TypeScript via `ts-morph`, Go via `goast`) is the path to a customer-distributable v1 with reproducible diffs and no LLM at execution time. Open issue, no committed timeline.
-- `scripts/idempotency_derive.py` — TARGET: the `{handler}.{path_param}` heuristic + `{handler}.{epoch_millis}` fallback.
-- `scripts/pr_writer.py` — TARGET: branch + commit + PR description.
+**Not yet implemented (roadmap).** The codemod is agent-driven today — per-file rewriting and git operations are performed by the agent following the SKILL.md prose, not by deterministic scripts. Moving to deterministic per-language AST rewriters (Python via `libcst`, TypeScript via `ts-morph`, Go via `goast`) is the path to a customer-distributable v1 with reproducible diffs and no LLM at execution time. Idempotency-anchor derivation, branch/commit/PR-write, and the per-language rewriters all live in that same "agent does it inline today" bucket. Open issue, no committed timeline.
 
 ## Assets
+
+**Helper templates** (one per language — shared across every callsite in a service):
+
+- `assets/codemod-templates/python-moolabs-client.py.j2`
+- `assets/codemod-templates/typescript-moolabs-client.ts.j2`
+- `assets/codemod-templates/go-moolabs-client.go.j2`
+
+**Per-framework callsite templates** (rendered once per insert site):
 
 - `assets/codemod-templates/python-fastapi.j2`
 - `assets/codemod-templates/python-django.j2`
@@ -526,5 +532,5 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 - `assets/codemod-templates/typescript-express.j2`
 - `assets/codemod-templates/typescript-nestjs.j2`
 - `assets/codemod-templates/typescript-nextjs.j2`
-- `assets/codemod-templates/go-stdlib.j2` (Go P0 — in progress)
-- `assets/pii-patterns.yaml` — the regex set the PII guard uses.
+
+**Not yet shipped.** Go callsite templates (`go-stdlib.j2`, `go-gin.j2`, `go-echo.j2`, `go-chi.j2`, `go-fiber.j2`) and worker/stream-consumer templates (per `shared/worker-coverage-design.md`) are on the roadmap; `task_planner.py:TEMPLATE_MAP` carries the intended path for `("go", "net-http-stdlib")` and the planner's existence check refuses to emit a task pointing at a missing template. The PII regex set (originally planned at `assets/pii-patterns.yaml`) is currently inline prose in `references/pii-guard.md`.

@@ -215,5 +215,6 @@ cross_stage_drift_findings: []           # populated by Phase 4 adversarial revi
 
 ## Assets
 
-- `assets/03-team-product.schema.yaml`
-- `assets/follow-up-prompts.yaml`
+- `assets/03-team-product.schema.yaml` — JSON-Schema for the signed-doc output.
+
+The per-question follow-up prompts (originally planned as `assets/follow-up-prompts.yaml`) live inline in the question list above.
