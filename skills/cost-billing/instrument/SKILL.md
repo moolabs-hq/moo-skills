@@ -194,12 +194,13 @@ warnings:
 4. Write `.moolabs/customer-context/sdk-surface-snapshot.yaml`:
 
    ```yaml
-   # Real output, verified against moolabs-py@v0.2.0-rc9 (2026-05-25).
-   # The actual SDK exposes 11 FLAT capability namespaces — NO client.cls / client.meter
-   # split (that was the curated reference doc's mistake; the snapshot is ground truth).
-   generated_at: 2026-05-25T12:30:00Z
+   # Real output, verified against moolabs-py@v0.3.0-rc1 (re-verified 2026-06-05).
+   # The actual SDK exposes 11 FLAT capability namespaces (CAPABILITY_MAP-routed)
+   # PLUS one special `client.events` accessor (US-008 — @property on Moolabs,
+   # not in CAPABILITY_MAP). The snapshot is ground truth.
+   generated_at: 2026-06-05T12:30:00Z
    sdk_versions:
-     python:     { repo_url: "...moolabs-py", resolved_tag: v0.2.0-rc9, commit_sha: 7d5b07d771b2, is_prerelease: true }
+     python:     { repo_url: "...moolabs-py", resolved_tag: v0.3.0-rc1, commit_sha: abc123def456, is_prerelease: true }
    namespaces:
      python:
        - path: "client.usage"
@@ -340,7 +341,7 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
   framework: fastapi
   language: python
   template: assets/codemod-templates/python-fastapi.j2
-  helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+  helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe"
   snapshot_capabilities:
     unified_ingest_present:   true
     usage_ergonomic_ingest:   true
@@ -406,7 +407,7 @@ The dispatcher waits for each task to complete, collects the summary, and writes
 
 ### Phase 2b (LEGACY name — superseded by Phase 2c/2d above)
 
-For each insert, pick the right adapter and pattern. Every emission MUST go through the Phase 2 helper — `from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe`. No `Moolabs(api_key=...)` lines outside the helper file. (This section is retained as the per-pattern selection reference that the task planner uses.)
+For each insert, pick the right adapter and pattern. Every emission MUST go through the Phase 2 helper — `from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe`. No `Moolabs(api_key=...)` lines outside the helper file. (This section is retained as the per-pattern selection reference that the task planner uses.)
 
 **Pattern selection (deterministic, from `output-input-map.yaml`):**
 
