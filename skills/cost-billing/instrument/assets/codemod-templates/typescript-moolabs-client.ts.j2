@@ -1,10 +1,10 @@
 {# TypeScript moolabs-client.ts — per-service helper, generated ONCE per service by /cost-billing-instrument.
 
-   Sibling of python-moolabs-client.py.j2. Same contract — one helper module owns
-   all SDK + OTel-span emission. Call-site templates import emit* — they never
-   instantiate Moolabs() inline.
+   Targets SDK v0.3.0-rc1 unified-ingest ergonomic methods. Every per-callsite
+   emission MUST go through emitUsageEventSafe / emitCostEventSafe /
+   emitEventSafe — NEVER instantiate Moolabs(...) inline.
 
-   Variables expected (from 04-final.signed.yaml):
+   Variables expected:
      service_slug, signoff_chain_hashes, sdk_key_location.*, sdk_key_read_pattern,
      sdk_pinned_version, telemetry.mode
 #}
@@ -14,25 +14,46 @@
  * Wired by /cost-billing-instrument codemod on {{ generated_at }} per the signed gates:
 {% for h in signoff_chain_hashes %} *   - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
 {% endfor %} *
- * SDK version: {{ sdk_pinned_version | default("latest stable tag at codemod time") }}
+ * SDK version: {{ sdk_pinned_version | default("v0.3.0-rc1") }}  (unified-ingest ergonomic methods)
+ *
+ * Three emission helpers mapping 1:1 to the v0.3.0 SDK methods:
+ *   emitUsageEventSafe(args) -> client.usage.ingestEvent(args)
+ *   emitCostEventSafe(args)  -> client.cost.ingestEvent(args)
+ *   emitEventSafe(args)      -> client.events.ingest(args)   // sibling-pair, dual-lane
+ *
+ * tenantId is intentionally absent from every helper signature — the server
+ * derives tenant identity from the API key (FR-3 in the SDK unified-ingest PRD).
+ * entityId is the threading key for sibling-pair join downstream.
+ *
+ * Error handling is env-gated (single decision point in handleEmitErr):
+ *   SDK_DEVELOPMENT non-empty -> throw on any SDK error (validation or transport)
+ *                                so the developer sees the failure at the call site.
+ *   SDK_DEVELOPMENT unset     -> structured-log recovery rail; the emission is
+ *                                never silently dropped. Default for prod.
  *
  * THIS IS THE ONLY MODULE THAT INSTANTIATES THE MOOLABS CLIENT.
- * All emission call sites import emitUsageEventSafe / emitCostEventSafe from
- * this module. Do NOT call `new Moolabs(...)` directly anywhere else.
  */
 
-import { Moolabs } from 'moolabs';
-import { trace, type Attributes, type AttributeValue } from '@opentelemetry/api';
+import {
+  Moolabs,
+  type UsageIngestEventArgs,
+  type CostIngestEventArgs,
+  type EventsIngestArgs,
+} from 'moolabs';
 {% if sdk_key_location.strategy == "aws_secrets_manager" %}import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 {% elif sdk_key_location.strategy == "gcp_secret_manager" %}import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 {% elif sdk_key_location.strategy == "vault" %}import vault from 'node-vault';
 {% endif %}
 import { logger } from './logger'; // adapt to {{ service_slug }}'s existing logger import
 
+// Env-gated strict/lax mode — same var name as the Python and Go helpers for
+// cross-language parity. Non-empty -> throw (dev mode); unset -> log-rail
+// swallow (prod).
+const DEV_ENV_VAR = 'SDK_DEVELOPMENT';
+
 {% if telemetry.mode == "brownfield" %}
 // Brownfield directive: {{ service_slug }} already has a live TracerProvider.
-// Do NOT register a second provider — use `trace.getActiveSpan()` from
-// @opentelemetry/api directly.
+// Do NOT register a second provider.
 {% endif %}
 
 let _cachedApiKey: string | null = null;
@@ -50,6 +71,32 @@ async function resolveApiKey(): Promise<string> {
     return _cachedApiKey;
   } catch (exc) {
     logger.error({ secretId, error: String(exc), policy: 'fail_open_silent_swallow' },
+                 'moolabs.sdk_key.resolution_failed');
+    _cachedApiKey = '';
+    return '';
+  }
+{% elif sdk_key_location.strategy == "gcp_secret_manager" %}
+  const secretId = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
+  try {
+    const sm = new SecretManagerServiceClient();
+    const [resp] = await sm.accessSecretVersion({ name: secretId });
+    _cachedApiKey = resp.payload?.data?.toString('utf-8') ?? '';
+    return _cachedApiKey;
+  } catch (exc) {
+    logger.error({ secretId, error: String(exc), policy: 'fail_open_silent_swallow' },
+                 'moolabs.sdk_key.resolution_failed');
+    _cachedApiKey = '';
+    return '';
+  }
+{% elif sdk_key_location.strategy == "vault" %}
+  const secretPath = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
+  try {
+    const v = vault({});
+    const resp = await v.read(`secret/data/${secretPath}`);
+    _cachedApiKey = resp?.data?.data?.api_key ?? '';
+    return _cachedApiKey;
+  } catch (exc) {
+    logger.error({ secretPath, error: String(exc), policy: 'fail_open_silent_swallow' },
                  'moolabs.sdk_key.resolution_failed');
     _cachedApiKey = '';
     return '';
@@ -75,239 +122,101 @@ async function getClient(): Promise<Moolabs> {
   return _cachedClient;
 }
 
-/**
- * Shared envelope — identical fields on both emit*EventSafe options.
- * Lets downstream consumers join usage and cost events from the same call site
- * by customer or correlation id without per-event reconstruction.
- */
-export interface EventEnvelope {
-  tenantId?: string;       // SDK CostEventIngest requires this on the wire — the customer's multi-tenancy key (NOT Moolabs's internal tenant concept)
-  customerId?: string;     // end-user customer in the customer's SaaS (optional on wire)
-  featureKey?: string;     // human-readable slug (e.g. "ai_chat") — rides in tags/data dict so ACUTE's mapping engine extracts it
-  featureId?: string;      // catalog-assigned UUID — top-level CostEventIngest field; usually unknown at emit time
-  requestId?: string;
-  consumerAgent?: string;
-  source?: string;
-  correlationId?: string;
+// Single env-gated decision point. Strict (SDK_DEVELOPMENT non-empty) -> throw
+// so the developer fixes the call site. Lax (default / prod) -> structured-log
+// recovery rail; never silently drop.
+function handleEmitErr(eventClass: string, fields: Record<string, unknown>, err: unknown): void {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  if (process.env[DEV_ENV_VAR]) {
+    throw new Error(
+      `moolabsclient: ${eventClass} emission failed (SDK_DEVELOPMENT mode — unset to swallow): ${errMsg}`,
+    );
+  }
+  logger.warn({ ...fields, error: errMsg }, `moolabs.${eventClass}.event`);
 }
 
-export interface EmitUsageEventOptions extends EventEnvelope {
-  // Event-specific (required)
-  eventType: string;
-  subject: string;
-  // Event-specific (usage)
-  quantity?: number;
-  unit?: string;
-  data?: Record<string, unknown>;
-  eventId?: string;  // CloudEvents id; if missing, helper generates a UUID. For sibling-pair, pass the same id to emitCostEventSafe.usageEventId.
-}
+// ── emit helpers (v0.3.0-rc1 ergonomic methods) ─────────────────────────────
 
-/**
- * Persist a usage event. Never drops — uses SDK when reachable, structured
- * log as recovery rail when not. Matches emit_cost_event_safe's contract.
- *
- * Path 1 (preferred): SDK HTTP → client.usage.ingestEvents (verified by Phase 1.5 snapshot).
- * Path 2 (recovery rail): SDK error → log line `moolabs.usage.event` with
- *   the full payload flattened. Customer's log pipeline retains it; whether
- *   platform auto-ingests is a separate concern. The point is the event is
- *   preserved, not lost.
- */
-export async function emitUsageEventSafe(opts: EmitUsageEventOptions): Promise<void> {
-  // Merge envelope into the wire payload's `data` field — SDK schema is
-  // open-shape on data but strict on top-level CloudEvents fields.
-  const mergedData: Record<string, unknown> = { ...(opts.data ?? {}) };
-  if (opts.tenantId)       mergedData['moolabs.tenant.id']     = String(opts.tenantId);
-  if (opts.customerId)     mergedData['moolabs.customer.id']   = String(opts.customerId);
-  if (opts.featureKey)     mergedData['moolabs.feature.key']   = String(opts.featureKey);
-  if (opts.featureId)      mergedData['moolabs.feature.id']    = String(opts.featureId);
-  if (opts.requestId)      mergedData['moolabs.request.id']    = String(opts.requestId);
-  if (opts.consumerAgent)  mergedData['moolabs.consumer_agent']= String(opts.consumerAgent);
-  if (opts.correlationId)  mergedData['moolabs.correlation.id']= String(opts.correlationId);
-  if (opts.quantity !== undefined) mergedData['quantity'] = opts.quantity;
-  if (opts.unit !== undefined)     mergedData['unit'] = opts.unit;
-
-  // CloudEvents requires `id` + `specversion`. For sibling-pair linkage, the
-  // caller passes a shared eventId; otherwise generate one.
-  const resolvedEventId = opts.eventId ?? (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2));
-  const payload = {
-    id: resolvedEventId,
-    specversion: '1.0',
-    type: opts.eventType,
-    subject: opts.subject,
-    source: opts.source ?? '{{ service_slug }}',
-    data: mergedData,
-  };
+export async function emitUsageEventSafe(args: UsageIngestEventArgs): Promise<void> {
+  const fullArgs: UsageIngestEventArgs = { ...args, source: args.source ?? '{{ service_slug }}' };
   try {
     const client = await getClient();
-    await client.usage.ingestEvents([payload]);
-    return;
-  } catch (exc) {
-    const logPayload: Record<string, unknown> = {
-      transport: 'log_recovery_rail',
-      policy: 'never_drop_usage_event',
-      event_type: opts.eventType,
-      subject: opts.subject,
-      source: payload.source,
-      sdk_error: String(exc),
-    };
-    if (opts.tenantId)      logPayload.tenant_id      = String(opts.tenantId);
-    if (opts.customerId)    logPayload.customer_id    = String(opts.customerId);
-    if (opts.featureKey)    logPayload.feature_key    = String(opts.featureKey);
-    if (opts.featureId)     logPayload.feature_id     = String(opts.featureId);
-    if (opts.requestId)     logPayload.request_id     = String(opts.requestId);
-    if (opts.consumerAgent) logPayload.consumer_agent = String(opts.consumerAgent);
-    if (opts.correlationId) logPayload.correlation_id = String(opts.correlationId);
-    if (opts.quantity !== undefined) logPayload.quantity = opts.quantity;
-    if (opts.unit !== undefined)     logPayload.unit = opts.unit;
-    for (const [k, v] of Object.entries(opts.data ?? {})) logPayload[`data.${k}`] = v;
-    // Salvage trace context for cross-rail correlation
-    try {
-      const span = trace.getActiveSpan();
-      const ctx = span?.spanContext();
-      if (ctx && ctx.traceId !== '00000000000000000000000000000000') {
-        logPayload.trace_id = ctx.traceId;
-        logPayload.span_id  = ctx.spanId;
-      }
-    } catch { /* ignore */ }
-    logger.warn(logPayload, 'moolabs.usage.event');
+    await client.usage.ingestEvent(fullArgs);
+  } catch (err) {
+    handleEmitErr('usage', usageFallback(fullArgs), err);
   }
 }
 
-export interface EmitCostEventOptions extends EventEnvelope {
-  // Event-specific (required)
-  kind: string;
-  // Event-specific (cost)
-  costMicros?: number;
-  attributes?: Record<string, AttributeValue>;
-  usageEventId?: string;  // for sibling-pair: pass the eventId from the paired emitUsageEventSafe call
-}
-
-/**
- * Persist a cost event. Never drops — capability-gated transport mirrors
- * the Python sibling (`python-moolabs-client.py.j2`).
- *
- * When the Phase 1.5 snapshot reports `capabilities.cost_event_direct_emit=true`
- * (verified against moolabs-ts at codemod time):
- *   Path 1 (preferred): SDK direct → `client.cost.ingestEventsBatch([payload])`
- *     with the wire CostEventIngest shape (tenant_id + idempotency_key required;
- *     feature_key in tags so ACUTE's mapping engine extracts it; feature_id
- *     top-level only when caller passes a UUID).
- *   Path 2 (fallback): SDK exception → structured log with full envelope.
- *
- * When `capabilities.cost_event_direct_emit=false` (SDK doesn't yet expose
- * the cost-event method on this customer's pinned version):
- *   Path 1 (preferred): active recording span → set `moolabs.cost.*` attrs;
- *     ACUTE's enricher reads these from OTLP exports.
- *   Path 2 (fallback): no recording span → structured log.
- *
- * Returns a Promise — must be awaited at call sites. Helper itself is
- * fail-open: any internal exception logs `moolabs.cost_emission.failed`
- * and swallows.
- */
-export async function emitCostEventSafe(opts: EmitCostEventOptions): Promise<void> {
-  let _sdkError: unknown = null;
+export async function emitCostEventSafe(args: CostIngestEventArgs): Promise<void> {
+  const fullArgs: CostIngestEventArgs = { ...args, source: args.source ?? '{{ service_slug }}' };
   try {
-{% if capabilities.cost_event_direct_emit %}
-    // Primary transport: unified SDK cost-event endpoint
-    // ({{ capabilities.cost_event_method_path }}) — verified present in the
-    // Phase 1.5 snapshot at SDK version {{ sdk_pinned_version }}.
-    if (opts.tenantId === undefined || opts.tenantId === null) {
-      logger.warn(
-        { kind: opts.kind, reason: 'CostEventIngest requires tenant_id; bind it in Phase 1.6' },
-        'moolabs.cost_emission.skipped_no_tenant_id',
-      );
-      return;
-    }
-    const idempotencyKey = opts.correlationId ?? (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2));
-    const payload: Record<string, unknown> = {
-      tenant_id: String(opts.tenantId),
-      idempotency_key: String(idempotencyKey),
-      kind: opts.kind,
-      source: opts.source ?? '{{ service_slug }}',
-    };
-    if (opts.customerId !== undefined)     payload.customer_id     = String(opts.customerId);
-    if (opts.featureId !== undefined)      payload.feature_id      = String(opts.featureId);  // UUID — ACUTE stores in cost_events.feature_id
-    if (opts.usageEventId !== undefined)   payload.usage_event_id  = String(opts.usageEventId);
-    if (opts.requestId !== undefined)      payload.request_id      = String(opts.requestId);
-    if (opts.consumerAgent !== undefined)  payload.consumer_agent  = opts.consumerAgent;
-    if (opts.correlationId !== undefined)  payload.correlation_id  = String(opts.correlationId);
-    if (opts.costMicros !== undefined)     payload.cost_micros     = Math.trunc(opts.costMicros);
-    if (opts.attributes)                   payload.attributes      = { ...opts.attributes };
-    // feature_key (slug) rides in tags — ACUTE's mapping engine reads it,
-    // lands it in usage_event_log + ClickHouse cost_by_feature_metric MV.
-    if (opts.featureKey !== undefined) {
-      const tags = (payload.tags as Record<string, unknown> | undefined) ?? {};
-      tags.feature_key = String(opts.featureKey);
-      payload.tags = tags;
-    }
-    try {
-      const client = await getClient();
-      // Resolved at codemod time from snapshot:
-      // {{ capabilities.cost_event_method_path }}
-      await client.cost.{{ capabilities.cost_event_method_path | replace("client.cost.", "") }}([payload]);
-      return;
-    } catch (exc) {
-      _sdkError = exc;
-      // fall through to log recovery rail
-    }
-{% endif %}
-
-    const span = trace.getActiveSpan();
-{% if not capabilities.cost_event_direct_emit %}
-    // Primary transport: OTel span attributes (the unified SDK doesn't yet
-    // expose a cost-event method at this pinned version — Phase 1.5 snapshot
-    // reports capabilities.cost_event_direct_emit=false).
-    if (span && span.isRecording()) {
-      span.setAttribute('moolabs.cost.kind', opts.kind);
-      span.setAttribute('moolabs.source', opts.source ?? '{{ service_slug }}');
-      if (opts.tenantId !== undefined)       span.setAttribute('moolabs.tenant.id',         String(opts.tenantId));
-      if (opts.customerId !== undefined)     span.setAttribute('moolabs.customer.id',       String(opts.customerId));
-      if (opts.featureKey !== undefined)     span.setAttribute('moolabs.feature.key',       String(opts.featureKey));
-      if (opts.featureId !== undefined)      span.setAttribute('moolabs.feature.id',        String(opts.featureId));
-      if (opts.usageEventId !== undefined)   span.setAttribute('moolabs.usage_event.id',    String(opts.usageEventId));
-      if (opts.requestId !== undefined)      span.setAttribute('moolabs.request.id',        String(opts.requestId));
-      if (opts.consumerAgent !== undefined)  span.setAttribute('moolabs.cost.consumer_agent', opts.consumerAgent);
-      if (opts.correlationId !== undefined)  span.setAttribute('moolabs.correlation.id',    String(opts.correlationId));
-      if (opts.costMicros !== undefined)     span.setAttribute('moolabs.cost.micros',       Math.trunc(opts.costMicros));
-      for (const [k, v] of Object.entries(opts.attributes ?? {})) {
-        span.setAttribute(`moolabs.cost.${k}`, v);
-      }
-      return;
-    }
-{% endif %}
-
-    // Recovery rail — fires on:
-    //   - SDK exception when direct-emit capable
-    //   - no recording span when not capable
-    // Salvage trace_id when context is valid-but-not-recording (correlation).
-    const ctx = span?.spanContext();
-    const traceId = ctx && ctx.traceId !== '00000000000000000000000000000000' ? ctx.traceId : undefined;
-    const spanId  = ctx && ctx.spanId  !== '0000000000000000'                  ? ctx.spanId  : undefined;
-
-    const logPayload: Record<string, unknown> = {
-      kind: opts.kind,
-      source: opts.source ?? '{{ service_slug }}',
-      transport: 'log_fallback',
-      policy: 'never_drop_cost_event',
-    };
-    if (_sdkError !== null)                logPayload.sdk_error      = String(_sdkError);
-    if (opts.tenantId !== undefined)       logPayload.tenant_id      = String(opts.tenantId);
-    if (opts.customerId !== undefined)     logPayload.customer_id    = String(opts.customerId);
-    if (opts.featureKey !== undefined)     logPayload.feature_key    = String(opts.featureKey);
-    if (opts.featureId !== undefined)      logPayload.feature_id     = String(opts.featureId);
-    if (opts.usageEventId !== undefined)   logPayload.usage_event_id = String(opts.usageEventId);
-    if (opts.requestId !== undefined)      logPayload.request_id     = String(opts.requestId);
-    if (opts.consumerAgent !== undefined)  logPayload.consumer_agent = opts.consumerAgent;
-    if (opts.correlationId !== undefined)  logPayload.correlation_id = String(opts.correlationId);
-    if (opts.costMicros !== undefined)     logPayload.cost_micros    = Math.trunc(opts.costMicros);
-    if (traceId)                           logPayload.trace_id       = traceId;
-    if (spanId)                            logPayload.span_id        = spanId;
-    for (const [k, v] of Object.entries(opts.attributes ?? {})) {
-      logPayload[`cost.${k}`] = v;
-    }
-    logger.info(logPayload, 'moolabs.cost.event');
-  } catch (exc) {
-    logger.warn({ kind: opts.kind, error: String(exc), policy: 'fail_open_silent_swallow' },
-                'moolabs.cost_emission.failed');
+    const client = await getClient();
+    await client.cost.ingestEvent(fullArgs);
+  } catch (err) {
+    handleEmitErr('cost', costFallback(fullArgs), err);
   }
+}
+
+export async function emitEventSafe(args: EventsIngestArgs): Promise<void> {
+  const fullArgs: EventsIngestArgs = { ...args, source: args.source ?? '{{ service_slug }}' };
+  try {
+    const client = await getClient();
+    await client.events.ingest(fullArgs);
+  } catch (err) {
+    handleEmitErr('event', eventFallback(fullArgs), err);
+  }
+}
+
+// ── fallback field builders ────────────────────────────────────────────────
+
+function usageFallback(a: UsageIngestEventArgs): Record<string, unknown> {
+  return {
+    transport: 'log_recovery_rail',
+    policy: 'never_drop_usage_event',
+    eventType: a.eventType,
+    customerId: a.customerId,
+    entityId: a.entityId,
+    meterSlug: a.meterSlug,
+    value: a.value,
+    source: a.source,
+    ...(a.provider !== undefined && { provider: a.provider }),
+    ...(a.model !== undefined && { model: a.model }),
+    ...(a.totalTokens !== undefined && { totalTokens: a.totalTokens }),
+    ...(a.latencyMs !== undefined && { latencyMs: a.latencyMs }),
+    ...(a.status !== undefined && { status: a.status }),
+    ...(a.eventId !== undefined && { eventId: a.eventId }),
+  };
+}
+
+function costFallback(a: CostIngestEventArgs): Record<string, unknown> {
+  return {
+    transport: 'log_recovery_rail',
+    policy: 'never_drop_cost_event',
+    eventType: a.eventType,
+    customerId: a.customerId,
+    entityId: a.entityId,
+    spanCount: a.spans.length,
+    source: a.source,
+    ...(a.provider !== undefined && { provider: a.provider }),
+    ...(a.model !== undefined && { model: a.model }),
+    ...(a.totalTokens !== undefined && { totalTokens: a.totalTokens }),
+    ...(a.latencyMs !== undefined && { latencyMs: a.latencyMs }),
+    ...(a.status !== undefined && { status: a.status }),
+    ...(a.eventId !== undefined && { eventId: a.eventId }),
+  };
+}
+
+function eventFallback(a: EventsIngestArgs): Record<string, unknown> {
+  return {
+    transport: 'log_recovery_rail',
+    policy: 'never_drop_event',
+    eventType: a.eventType,
+    customerId: a.customerId,
+    entityId: a.entityId,
+    source: a.source,
+    ...(a.meterSlug !== undefined && { meterSlug: a.meterSlug }),
+    ...(a.value !== undefined && { value: a.value }),
+    ...(a.spans !== undefined && { spanCount: a.spans.length }),
+    ...(a.eventId !== undefined && { eventId: a.eventId }),
+  };
 }

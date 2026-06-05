@@ -243,14 +243,35 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
             print(f"  PASS  helper {helper}: v0.3.0 ergonomic methods + env-gated rail + FR-3 clean")
             pass_count += 1
     else:
-        # TS helper still on v0.2 — followup commit will migrate it. Keep the
-        # existing Codex-Finding-#3 assertion until then.
-        if "logPayload.usage_event_id" in r and "ingestEventsBatch" in r:
-            print(f"  PASS  helper {helper}: SDK direct branch + log fallback ids present (v0.2 — migrate next)")
-            pass_count += 1
-        else:
-            print(f"  FAIL  helper {helper}: TS SDK branch missing OR log drops sibling-pair ids (Codex Finding #1/#3)")
+        # v0.3.0 TS ergonomic-method assertions (parallel to Python).
+        has_usage   = ".usage.ingestEvent(" in r
+        has_cost    = ".cost.ingestEvent(" in r
+        has_events  = ".events.ingest(" in r
+        has_devgate = "DEV_ENV_VAR" in r and "SDK_DEVELOPMENT" in r
+        has_rail    = "logger.warn(" in r and "log_recovery_rail" in r
+        no_tenant   = ('tenantId:' not in r and '.tenantId' not in r
+                       and "'tenantId'" not in r and '"tenantId"' not in r)
+        no_legacy   = ("ingestEventsBatch" not in r
+                       and "cost_event_direct_emit" not in r
+                       and "EmitUsageEventOptions" not in r
+                       and "EmitCostEventOptions" not in r
+                       and "EventEnvelope" not in r
+                       and "usageEventId" not in r
+                       and "logPayload" not in r)
+        failed = []
+        if not has_usage:   failed.append("usage.ingestEvent missing")
+        if not has_cost:    failed.append("cost.ingestEvent missing")
+        if not has_events:  failed.append("events.ingest missing")
+        if not has_devgate: failed.append("SDK_DEVELOPMENT env gate missing")
+        if not has_rail:    failed.append("never-drop log rail missing")
+        if not no_tenant:   failed.append("tenantId leaked (FR-3 violation)")
+        if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if failed:
+            print(f"  FAIL  helper {helper}: {', '.join(failed)}")
             fail_count += 1
+        else:
+            print(f"  PASS  helper {helper}: v0.3.0 ergonomic methods + env-gated rail + FR-3 clean")
+            pass_count += 1
 
 # Go helper: v0.3.0-rc1 unified-ingest shape — single render (no capability gate),
 # gofmt -e syntax gate, structural checks for the three ergonomic methods + env-gated
@@ -317,11 +338,9 @@ for tpl in templates:
             fail_count += 1
             continue
 
-        # CODEX-REGRESSION-2: TS usage-only / cost-only must NOT reference _moolabsEventId (undefined in those branches)
-        if tpl.startswith("typescript-") and pat in ("usage-only", "cost-only"):
-            if "_moolabsEventId" in r:
-                print(f"  FAIL  {tpl}[{pat}]: references undefined _moolabsEventId (Codex Finding #2)")
-                fail_count += 1; continue
+        # Codex Finding #2 ("TS usage-only / cost-only must NOT reference _moolabsEventId")
+        # is obsolete in v0.3: _moolabsEventId is now declared in any branch that needs
+        # it as an entityId fallback (when no request_id binding) and is correctly scoped.
 
         # Per-pattern method-presence checks.
         if tpl.startswith("python-"):
@@ -359,13 +378,37 @@ for tpl in templates:
                 print(f"  FAIL  {tpl}[{pat}]: v0.2 top-level kwarg leaked (tenant_id/usage_event_id/subject/quantity/unit/feature_key=/attributes/kind=/data=)")
                 fail_count += 1; continue
         else:
-            # TS callsites still on v0.2 — followup will migrate them. Keep the
-            # existing Codex Finding shared-id check.
+            # v0.3.0 TS framework callsite assertions (parallel to Python).
             if pat == "sibling-pair":
-                ok = "_moolabsEventId" in r and "eventId: _moolabsEventId" in r and "usageEventId: _moolabsEventId" in r
-                if not ok:
-                    print(f"  FAIL  {tpl}[{pat}]: sibling-pair missing shared event_id wiring (v0.2)")
-                    fail_count += 1; continue
+                ok = ("emitEventSafe(" in r
+                      and "eventType:" in r and "customerId:" in r and "entityId:" in r
+                      and "meterSlug:" in r and "value:" in r and "spans: [" in r)
+                if "emitUsageEventSafe(" in r or "emitCostEventSafe(" in r:
+                    ok = False
+                reason = "sibling-pair must use emitEventSafe (single dual-lane call)"
+            elif pat == "usage-only":
+                ok = ("emitUsageEventSafe(" in r
+                      and "meterSlug:" in r and "value:" in r
+                      and "emitEventSafe(" not in r and "emitCostEventSafe(" not in r
+                      and "spans: [" not in r)
+                reason = "usage-only must call emitUsageEventSafe only (no spans, no other emit)"
+            else:  # cost-only
+                ok = ("emitCostEventSafe(" in r and "spans: [" in r
+                      and "emitEventSafe(" not in r and "emitUsageEventSafe(" not in r
+                      and "meterSlug:" not in r and "value:" not in r)
+                reason = "cost-only must call emitCostEventSafe only (no meterSlug/value, no other emit)"
+            # v0.2 top-level kwargs must NOT appear (FR-3 + helper-signature contract).
+            # kind/costMicros are allowed inside spans (4-space indented); we check by
+            # specific v0.2 patterns that are unique to the old shape.
+            no_v2 = ("tenantId:" not in r and "usageEventId:" not in r
+                     and "subject:" not in r and "quantity:" not in r and " unit:" not in r
+                     and "featureKey:" not in r and "attributes:" not in r)
+            if not ok:
+                print(f"  FAIL  {tpl}[{pat}]: {reason}")
+                fail_count += 1; continue
+            if not no_v2:
+                print(f"  FAIL  {tpl}[{pat}]: v0.2 top-level kwarg leaked (tenantId/usageEventId/subject/quantity/unit/featureKey/attributes)")
+                fail_count += 1; continue
 
         # Python: ast-compile rendered output
         if tpl.startswith("python-"):
