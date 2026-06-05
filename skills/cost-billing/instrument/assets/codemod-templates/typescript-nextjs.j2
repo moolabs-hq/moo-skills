@@ -1,105 +1,93 @@
 {# TypeScript + Next.js (App Router) codemod template for /cost-billing-instrument.
 
-   Attribution sources come from attribution-bindings.yaml (Phase 1.6).
-   For Server Actions / Server Components, the developer may have a different
-   source (e.g. `headers().get('x-request-id')` from `next/headers`) — Phase 1.6
-   captures that per-file via overrides[].
-
-   PREREQ: callsite is in a route handler with `request: NextRequest` in scope
-   OR the binding's source expression resolves cleanly in the file's context.
+   Targets SDK v0.3.0-rc1 unified-ingest ergonomic helpers (same shape as
+   typescript-express.j2). Attribution sources come from attribution-bindings.yaml
+   (Phase 1.6). For Server Actions / Server Components, the developer may have
+   a different source (e.g. `headers().get('x-request-id')` from `next/headers`) —
+   Phase 1.6 captures whichever the developer uses; the template substitutes it
+   verbatim.
 
    Variables: same shape as python-fastapi.j2.
 #}
 {% if entry.pattern == "sibling-pair" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs SDK inserts (sibling-pair pattern). Helper-routed.
-// Attribution sources confirmed in Phase 1.6.
-// PREREQ: source expressions resolve in scope at this insert site.
+// moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
+// emitEventSafe -> client.events.ingest(...).
 // ─────────────────────────────────────────────────────────────────────────
-import { emitUsageEventSafe, emitCostEventSafe } from '@/services/moolabs-client';
+import { emitEventSafe } from '@/services/moolabs-client';
 
-// Shared id for sibling-pair linking — cost event's usageEventId references this
-const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-
-await emitCostEventSafe({
-  // Event-specific
-  kind: '{{ entry.cost_kind | default("unknown") }}',
-  usageEventId: _moolabsEventId,
-  {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
-  {% endif %}attributes: {
-    'workflow_id': '{{ entry.workflow_id }}',
-    'event_type': '{{ entry.event_type }}',
-    {% for cost_wf in entry.cost_workflow_ids %}'upstream.{{ loop.index }}.workflow_id': '{{ cost_wf }}',
-    {% endfor %}
-  },
-  // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
-  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}
-});
-
-// REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
-await emitUsageEventSafe({
-  // Event-specific
-  eventId: _moolabsEventId,
+const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
+{% if not attribution_sources.request_id %}const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
+{% endif %}
+// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
+await emitEventSafe({
   eventType: '{{ entry.event_type }}',
-  subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
-  quantity: {{ entry.refund_unit.derivation }},
-  unit: '{{ entry.refund_unit.unit }}',
-  // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
-  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}
+  customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
+  entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
+  meterSlug: '{{ entry.workflow_id }}',
+  value: {{ entry.refund_unit.derivation }},
+  spans: [{
+    spanId: _moolabsSpanId,
+    {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
+    {% endif %}{% if entry.cost_kind %}kind: '{{ entry.cost_kind }}',
+    {% endif %}
+  }],
+  meta: {
+    workflow_id: '{{ entry.workflow_id }}',
+    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
+    {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
+    {% endif %}
+  },
 });
 {% elif entry.pattern == "usage-only" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs SDK insert (usage-only pattern). Helper-routed.
-// PREREQ: source expressions resolve in scope at this insert site.
+// moolabs SDK insert (usage-only, v0.3.0-rc1) — emitUsageEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitUsageEventSafe } from '@/services/moolabs-client';
-
-// REVIEW: idempotency key derivation (confidence={{ entry.idempotency_anchor.confidence }})
+{% if not attribution_sources.request_id %}
+const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
+{% endif %}
+// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
-  // Event-specific
   eventType: '{{ entry.event_type }}',
-  subject: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
-  quantity: {{ entry.refund_unit.derivation }},
-  unit: '{{ entry.refund_unit.unit }}',
-  // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
-  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}{% if attribution_sources.request_id %}correlationId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}
+  customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
+  entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
+  meterSlug: '{{ entry.workflow_id }}',
+  value: {{ entry.refund_unit.derivation }},
+  meta: {
+    workflow_id: '{{ entry.workflow_id }}',
+    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
+    {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
+    {% endif %}
+  },
 });
 {% elif entry.pattern == "cost-only" %}
 // ─────────────────────────────────────────────────────────────────────────
-// moolabs cost-only emission (helper-routed). Attribution sources from Phase 1.6.
+// moolabs SDK insert (cost-only, v0.3.0-rc1) — emitCostEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitCostEventSafe } from '@/services/moolabs-client';
 
+const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
+{% if not attribution_sources.request_id %}const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
+{% endif %}
 await emitCostEventSafe({
-  // Event-specific
-  kind: '{{ entry.cost_kind | default(entry.workflow_id.split(".")[-1]) }}',
-  {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
-  {% endif %}attributes: {
-    'workflow_id': '{{ entry.workflow_id }}',
+  eventType: '{{ entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id) }}',
+  customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
+  entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
+  spans: [{
+    spanId: _moolabsSpanId,
+    {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
+    {% endif %}{% if entry.cost_kind %}kind: '{{ entry.cost_kind }}',
+    {% endif %}
+  }],
+  meta: {
+    workflow_id: '{{ entry.workflow_id }}',
+    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
+    {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
+    {% endif %}
   },
-  // Shared envelope
-  {% if attribution_sources.tenant_id %}tenantId: {{ attribution_sources.tenant_id }},
-  {% endif %}featureKey: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
-  {% if attribution_sources.request_id %}requestId: String({{ attribution_sources.request_id }} ?? ''),
-  {% endif %}{% if attribution_sources.customer_id %}customerId: String({{ attribution_sources.customer_id }} ?? ''),
-  {% endif %}{% if attribution_sources.consumer_agent %}consumerAgent: {{ attribution_sources.consumer_agent }},
-  {% endif %}
 });
 {% endif %}

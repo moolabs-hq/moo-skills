@@ -105,13 +105,13 @@ Moolabs platform team plans to publish to public registries (PyPI / npm / Go van
 
 **This section was wrong in the 2026-05-19 draft of this doc.** The earlier claim was a `client.cls.*` + `client.meter.*` split; the actual SDK ships **11 flat capability namespaces** directly on the `Moolabs` client. Each capability dispatches dynamically via `_Namespace.__getattr__` to one or more backing API classes routed by `_dx_routing.CAPABILITY_MAP`.
 
-The codemod must NOT read this section as authoritative at runtime — Phase 1.5 (`scripts/sdk_snapshot.py`) introspects the actual SDK at the pinned version and writes `.moolabs/customer-context/sdk-surface-snapshot.yaml`. This section exists as a human-readable summary verified against `moolabs-py@v0.2.0-rc9` (2026-05-25).
+The codemod must NOT read this section as authoritative at runtime — Phase 1.5 (`scripts/sdk_snapshot.py`) introspects the actual SDK at the pinned version and writes `.moolabs/customer-context/sdk-surface-snapshot.yaml`. This section exists as a human-readable summary verified against `moolabs-py@v0.3.0-rc1` and `moolabs-ts@v0.3.0-rc1` (re-verified 2026-06-05).
 
 ```python
 from moolabs import Moolabs
 client = Moolabs(api_key="moo_live_...")
 
-# The 11 capability namespaces (flat on `client`):
+# 11 capability namespaces routed via _dx_routing.CAPABILITY_MAP:
 client.usage          # event ingest + meter querying       → EventsApi, MetersApi (meter backend)
 client.cost           # cost-event ingest                   → CostEventsApi, SdkIngestApi (acute backend)
 client.customers      # customers + subjects                → CustomersApi, SubjectsApi (meter)
@@ -123,14 +123,21 @@ client.credits        # grants, ledger, auto-topup          → GrantsApi, Ledge
 client.billing        # invoicing + rating + FX             → MeterBillingApi (meter) + RatingApi, FxRatesApi (bff)
 client.collections    # AR / dunning / arc resources        → 17 Arc API classes
 client.notifications  # channels + rules + alerts           → NotificationsApi (meter) + AlertsApi (bff)
+
+# PLUS one special unified-ingest namespace (US-008) — NOT in CAPABILITY_MAP,
+# mounted via @property on Moolabs:
+client.events         # sibling-pair ingest (usage + cost in one envelope) → EventsNamespace wrapper
 ```
 
-**The two emission entry points** the codemod cares about:
+**The three emission entry points** the codemod cares about (v0.3.0-rc1):
 
-| Event | Capability | Method | Verified at v0.2.0-rc9 |
+| Lane | Capability | Primary method (singular ergonomic) | Verified at v0.3.0-rc1 |
 |---|---|---|---|
-| Usage | `client.usage` | `ingest_events([...])` | ✓ |
-| Cost  | `client.cost`  | `ingest_events_batch([...])`, `ingest_event(...)`, `ingest_sdk_spans(...)`, `submit_adjustment(...)` | ✓ |
+| Usage | `client.usage` | `ingest_event(args)` — on `_UsageNamespace` wrapper | ✓ |
+| Cost | `client.cost` | `ingest_event(args)` — on `_CostNamespace` wrapper | ✓ |
+| Sibling-pair | `client.events` | `ingest(args)` — on `_EventsNamespace` wrapper | ✓ |
+
+The customer-facing ergonomic methods (singular `ingest_event`, `ingest`) live on the **wrapper layer** in `_dx_namespaces.{py,ts}` — NOT on the openapi-generated backing classes (`EventsApi.ingest_events`, `CostEventsApi.ingest_event[s_batch]`, etc.). Phase 1.5's introspector reads both layers and merges them into the snapshot.
 
 **The SDK handles ALL URL routing internally.** Customer code constructs `Moolabs(api_key=...)` — nothing else. The SDK:
 
@@ -142,32 +149,37 @@ client.notifications  # channels + rules + alerts           → NotificationsApi
 
 ---
 
-## Direct cost-event emission — already exposed on the unified SDK
+## Unified ingest surface (v0.3.0-rc1)
 
-**The Moolabs SDK is unified — one client, multiple namespaces.** Verified against `moolabs-py@v0.2.0-rc9` (Phase 1.5 snapshot, 2026-05-25): the unified client exposes 11 flat capability namespaces, including BOTH `client.usage` (capability "usage" → EventsApi + MetersApi) AND `client.cost` (capability "cost" → CostEventsApi + SdkIngestApi on the acute backend). There is no separate "acute SDK" and there is no nested `client.cls.*` / `client.meter.events.*` shape — those were drafts from an earlier curation of this doc that did NOT match the shipped SDK.
+**The Moolabs SDK is unified — one client, multiple namespaces.** Verified against `moolabs-py@v0.3.0-rc1` and `moolabs-ts@v0.3.0-rc1` (Phase 1.5 introspection re-verified 2026-06-05). The client exposes 11 flat capability namespaces routed via `CAPABILITY_MAP`, plus a special **`client.events`** namespace mounted via `@property` on `Moolabs` (US-008 — not in `CAPABILITY_MAP`). The customer-facing ergonomic methods live on the `_dx_namespaces.{py,ts}` wrapper layer — NOT on the openapi-generated backing classes (`EventsApi`, `CostEventsApi`).
 
-| Event | Namespace | Method | Verified at v0.2.0-rc9 |
-|---|---|---|---|
-| Usage | `client.usage` | `ingest_events([...])` | ✓ |
-| Cost  | `client.cost`  | `ingest_events_batch([...])`, `ingest_event(...)`, `ingest_sdk_spans(...)`, `submit_adjustment(...)` | ✓ |
+| Lane | Namespace | Primary method (v0.3) | Wire | Notes |
+|---|---|---|---|---|
+| Usage | `client.usage` | `ingest_event(args)` | meter | Singular ergonomic surface (US-006). Plural `ingest_events([...])` is deprecated. |
+| Cost | `client.cost` | `ingest_event(args)` | acute | Singular ergonomic surface (US-007). Routes to CostEventsApi + SdkIngestApi on acute backend. |
+| Sibling-pair | `client.events` | `ingest(args)` | meter→fanout | Single call emits BOTH usage + cost lanes in one envelope (US-008). Per-span cost breakdowns replace the v0.2 single-row CostEventIngest. |
 
 ### v1 codemod patterns
 
-Three patterns the codemod (Skill 2) chooses between. ALL three route through the per-service helper (`moolabs_client.py`) — call sites never instantiate `Moolabs()` inline or touch SDK namespaces directly. The helper's primary transport per event is gated on the Phase 1.5 snapshot.
+Three patterns the codemod chooses between. ALL three route through the per-service helper (`moolabs_client.{py,ts,go}`) — call sites never instantiate `Moolabs()` inline or touch SDK namespaces directly. The helper unconditionally calls the v0.3 ergonomic method for its lane; Phase 1.5's `unified_ingest_present` flag is the go/no-go gate.
 
-| Pattern | Helper call | Helper transport (based on snapshot) |
+| Pattern | Helper call | Transport |
 |---|---|---|
-| **Sibling-pair** (one site, both events) | `emit_usage_event_safe(...)` + `emit_cost_event_safe(...)` | Usage: SDK call → log recovery rail. Cost: SDK call when `capabilities.cost_event_direct_emit=true` (today, v0.2.0-rc9: TRUE); OTel-span preferred + log recovery rail otherwise. |
-| **Usage-only** (terminal-only event) | `emit_usage_event_safe(...)` | Same usage transport as above. |
-| **Cost-only** (subscription customers, infra hot paths) | `emit_cost_event_safe(...)` | Same cost transport as above — the snapshot decides at codemod time whether the SDK branch fires. |
+| **Sibling-pair** (one site, both lanes) | `emit_event_safe(...)` | `client.events.ingest(args)` — one SDK call. SDK buffer + structured-log rail handles never-drop internally. |
+| **Usage-only** (terminal event) | `emit_usage_event_safe(...)` | `client.usage.ingest_event(args)`. |
+| **Cost-only** (subscription customers, infra hot paths) | `emit_cost_event_safe(...)` | `client.cost.ingest_event(args)`. |
 
-Cost-only inserts are NOT blocked in v1 — they go through the same helper as sibling-pair's cost branch.
+Error handling is env-gated by `SDK_DEVELOPMENT` (single decision point in `handleEmitErr`):
+- `SDK_DEVELOPMENT` non-empty → throw/raise so the developer fixes the call site at integration time.
+- `SDK_DEVELOPMENT` unset (prod default) → structured-log recovery rail; emission is never silently dropped.
+
+There is no v0.2-style `cost_event_direct_emit` branch — Phase 1.5 already refused-to-run if the ergonomic method is absent.
 
 ---
 
 ## Future SDK surface (not in scope for the codemod today)
 
-When the unified SDK adds new capability namespaces (e.g. a future `client.span_ingest.*` for OTLP-format spans), the Phase 1.5 snapshot picks them up automatically. The helper template's `capabilities.cost_event_method_path` resolves at codemod time — no skill update is needed when the SDK adds same-shape endpoints. Call sites stay unchanged.
+When the unified SDK adds new capability namespaces (e.g. a future `client.span_ingest.*` for OTLP-format spans), the Phase 1.5 snapshot picks them up automatically. The helper templates hard-call the three known v0.3 ergonomic methods; adding a new lane requires a template change. Call sites that already use the existing three lanes stay unchanged.
 
 ---
 
@@ -179,8 +191,8 @@ Both moolabs-py and moolabs-ts use synchronous transports (`urllib3.PoolManager`
 
 ```python
 # moolabs SDK blocks (~35ms typical); see PR for latency profile
-# Helper routes to client.usage.ingest_events() — verified per Phase 1.5 snapshot
-emit_usage_event_safe(...)
+# Helper routes to client.usage.ingest_event(args) — verified per Phase 1.5 snapshot
+emit_usage_event_safe(args)
 ```
 
 The decision to swap to background-wrap is per-customer, not per-codemod. See `requirements §10 #4`.
@@ -212,8 +224,8 @@ If a customer reports an ingest failure during PR review, check these first befo
 ## What the codemod must never assume
 
 - **Do NOT trust this doc at codemod runtime.** This section is a human-readable summary. The Phase 1.5 snapshot (`scripts/sdk_snapshot.py` → `.moolabs/customer-context/sdk-surface-snapshot.yaml`) is the runtime source of truth, verified against the SDK source at the customer-pinned version. If this doc and the snapshot disagree, the snapshot wins.
-- **Do NOT instantiate `Moolabs()` inline at call sites.** Every emission goes through the per-service helper (`moolabs_client.py`) which owns the singleton, secret resolution, and fail-open + never-drop recovery rails. Helper API: `emit_usage_event_safe(...)`, `emit_cost_event_safe(...)`.
-- **Do NOT call the underlying `*_Api` classes directly.** They're internal generated classes — call through the unified namespace path (`client.usage.ingest_events`, `client.cost.ingest_events_batch`). Direct `EventsApi.*` / `CostEventsApi.*` calls bypass the namespace router and break on SDK shape changes.
+- **Do NOT instantiate `Moolabs()` inline at call sites.** Every emission goes through the per-service helper (`moolabs_client.{py,ts,go}`) which owns the singleton, secret resolution, and the env-gated never-drop recovery rail. Helper API: `emit_usage_event_safe(args)`, `emit_cost_event_safe(args)`, `emit_event_safe(args)`.
+- **Do NOT call the underlying `*_Api` classes directly.** They're openapi-generated backing classes — call through the customer-facing wrapper layer (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`). Direct `EventsApi.*` / `CostEventsApi.*` calls bypass the wrapper's buffer/F2-fallback and break on SDK shape changes.
 - **Do NOT assume an async variant.** There is none in v1. Background-wrapping is the caller's responsibility.
 
 ---
@@ -230,7 +242,7 @@ All three SDKs (`moolabs-py`, `moolabs-go`, `moolabs-ts`) are auto-generated fro
 
 | Skill | What this reference gives it |
 |---|---|
-| `/cost-billing-discovery` | Knows what surface to wire — for the FLAT capabilities verified by the Phase 1.5 snapshot (`client.usage.ingest_events` for usage; `client.cost.ingest_events_batch` for cost). |
+| `/cost-billing-discovery` | Knows what surface to wire — for the three v0.3.0-rc1 ergonomic lanes verified by the Phase 1.5 snapshot (`client.usage.ingest_event` for usage; `client.cost.ingest_event` for cost; `client.events.ingest` for sibling-pair). |
 | `/cost-billing-instrument` | Template selector reads `{language, framework} → template file`; templates render helper calls only. The Phase 1.5 snapshot is the runtime source of truth. |
 | `/cost-billing-drift-lint` | Scans customer code for helper-routed calls (`emit_usage_event_safe`, `emit_cost_event_safe`) — positive match. Flags direct `Moolabs(...)` instantiation OR direct `*_Api` calls as anti-patterns. |
 | `/cost-billing-adversarial-review` | Risk class "wrong namespace" — must flag any insert that bypasses the helper, instantiates `Moolabs()` inline, or calls `*_Api` classes directly. Namespace shape itself is verified by the Phase 1.5 snapshot, not by this doc. |

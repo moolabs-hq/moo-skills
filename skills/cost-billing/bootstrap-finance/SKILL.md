@@ -291,4 +291,5 @@ deployment:
 ## Assets
 
 - `assets/01-finance.schema.yaml` — JSON-Schema for the signed-doc output.
-- `assets/follow-up-prompts.yaml` — common follow-ups per question (e.g., "you said Hybrid; can you give me an example month's invoice line items?").
+
+The per-question follow-up prompts (originally planned as `assets/follow-up-prompts.yaml`) live inline in the question list above — the agent reads the SKILL.md prose at run time.

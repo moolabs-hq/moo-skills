@@ -2,33 +2,43 @@
 # customer-pinned version. Drives helper-template rendering. Refuses-to-emit
 # if expected methods are missing.
 
-generated_at: "2026-05-26T15:00:00Z"
+generated_at: "2026-06-05T14:00:00Z"
 
 sdk_versions:
   python:
     repo_url: "https://github.com/moolabs-hq/moolabs-py.git"
-    resolved_tag: "v0.2.0-rc9"
-    commit_sha: "7d5b07d771b2"
+    resolved_tag: "v0.3.0-rc1"
+    commit_sha: "abc123def456"
     is_prerelease: true
 
-# 11 flat capabilities on the unified Moolabs() client.
+# Unified-ingest namespaces on the v0.3.0-rc1 Moolabs() client. Three
+# ergonomic singular methods (one per lane) are what the codemod helpers
+# hard-call: usage.ingest_event, cost.ingest_event, events.ingest.
 namespaces:
   python:
     - path: "client.usage"
-      methods: [ingest_events, list_events, query_meter, create_meter, get_usage_summary]
+      methods: [ingest_event, ingest_events, list_events, query_meter, create_meter, get_usage_summary]
     - path: "client.cost"
       methods: [ingest_event, ingest_events_batch, ingest_sdk_spans, submit_adjustment]
+    - path: "client.events"
+      methods: [ingest]
     - path: "client.billing"
       methods: [create_billing_profile, simulate_invoice, list_invoices_get, get_invoice]
     - path: "client.customers"
       methods: [create_customer, get_customer, list_customers_get, update_customer]
-    # ... 7 more capabilities (catalog, subscriptions, entitlements, wallets,
+    # ... remaining capabilities (catalog, subscriptions, entitlements, wallets,
     # credits, collections, notifications)
 
+# v0.3.0-rc1 capability flags. unified_ingest_present is the codemod's
+# go/no-go gate — every lane must be present, no fallback rendering exists.
 capabilities:
-  usage_event_emit: true
-  cost_event_direct_emit: true
-  cost_event_method_path: "client.cost.ingest_events_batch"
+  unified_ingest_present: true
+  usage_ergonomic_ingest: true
+  cost_ergonomic_ingest: true
+  events_unified_namespace: true
+  usage_method_path: "client.usage.ingest_event"
+  cost_method_path: "client.cost.ingest_event"
+  events_method_path: "client.events.ingest"
 
 contract_drift:
   missing_expected_methods: []

@@ -79,7 +79,7 @@ If `customer-context/` is missing, refuse with: "customer-context/ not found at 
 Before scanning a repo, load these from `cost-billing-shared/`:
 
 - `anchor-taxonomy.md` — vocabulary (cost vs usage event, refund test, attribution keys, chargeability map, cells ③/④)
-- `sdk-surface-reference.md` — what to emit (`client.usage.ingest_events` for usage; cost via `client.cost.ingest_events_batch` when the snapshot reports it, OTel spans as the recovery rail)
+- `sdk-surface-reference.md` — what to emit (v0.3.0-rc1 unified ergonomic methods: `client.usage.ingest_event` for usage, `client.cost.ingest_event` for cost, `client.events.ingest` for sibling-pair; SDK buffer + structured-log rail handles never-drop internally)
 - `three-role-review.md` — CFO/PM/engineer projection model — your outputs feed this surface
 - `v1-decisions-log.md` — the §10 v1 calls that shape your defaults (coverage-first, Python+TS, OTel-for-cost, etc.)
 - `gaps-tracker.md` — the §6 open questions you may hit in customer code
@@ -157,7 +157,7 @@ Run `scripts/catalog_match.py` against each detected service. It performs:
 
 **Goal:** identify *terminal events* — the unit at which the customer would issue a refund.
 
-Run `scripts/refund_test.py` which applies auxiliary signals from `assets/terminal-event-heuristics.yaml`:
+Run `scripts/refund_test.py` **(aspirational — not yet on disk; see the Scripts section. Until built, the agent applies the heuristic from `assets/terminal-event-heuristics.yaml` directly.)** It applies auxiliary signals from `assets/terminal-event-heuristics.yaml`:
 
 - **Verb pattern** in handler name: `_completed`, `_delivered`, `_returned`, `_generated`, `_finished`
 - **OpenTelemetry span.kind = server** at the parent of the call site (vs span.kind = client/internal)
@@ -178,7 +178,7 @@ Each candidate gets a confidence ∈ [0, 1] and a `refund_unit` (per-token, per-
 
 **Goal:** propose the linkage graph and emit the three inventories.
 
-Run `scripts/inventory_build.py` which produces three files under `.moolabs/inventory/`:
+Run `scripts/inventory_build.py` **(aspirational — not yet on disk; see the Scripts section. Until built, the agent writes the three inventory YAMLs directly.)** It produces three files under `.moolabs/inventory/`:
 
 ```
 cost-events-inventory.yaml      # inputs (engineer-ordered: by file path)
@@ -203,7 +203,7 @@ edges:
         rationale: "co-located in handler; OTel trace co-occurrence 0.97"
 ```
 
-Then run `scripts/three_role_views.py` to project the role views. Per `customer-context > products[]` + fan-out architecture, views split per product (PM) and per service (engineer):
+Then run `scripts/three_role_views.py` **(aspirational — not yet on disk; see the Scripts section. Until built, the agent emits the three HTML projections directly.)** to project the role views. Per `customer-context > products[]` + fan-out architecture, views split per product (PM) and per service (engineer):
 
 - `reviews/cfo-view.html` — usage-events with billed unit, price, projected revenue (1, ORG-WIDE — CFO sees everything). **Also includes a "Vendor-COGS suppressions" section listing every terminal-event candidate the CFO's `vendor_cogs_only` classification blocked** (unit_id, vendor, handler `file:line`, the would-be usage event). Lets the CFO verify the suppression was correct — if a handler shows up here that should have been billable, the CFO either reclassifies the unit in finance.signed.yaml (cycle the chain) or accepts the suppression.
 - `reviews/pm-view-<product>.html` — output→inputs graph filtered to entries whose service path is in `products[<product>].services` (N, ONE PER PRODUCT — PM Alice for `analytics` sees only acute features; PM Bob for `metering` sees only meter features).
@@ -271,11 +271,18 @@ The workflow is **sequential with two PM-centered loops** (CFO ⇄ PM upstream; 
 
 ## Scripts
 
-- `scripts/repo_scan.py` — Phase 1 repo-shape + language detection.
-- `scripts/catalog_match.py` — Phase 3 AST scan + catalog matching.
-- `scripts/refund_test.py` — Phase 4 terminal-event heuristic.
-- `scripts/inventory_build.py` — Phase 5 inventory emission.
-- `scripts/three_role_views.py` — render CFO/PM/engineer HTML previews.
+**Implemented (executable today):**
+
+- `scripts/repo_scan.py` — Phase 1 repo-shape + language detection + `execution_runtimes` axis for non-HTTP services.
+- `scripts/catalog_match.py` — Phase 3 cost-call scanner: provider-catalog AST suffix-match + vendor-import gate + W2 execution-context tagging.
+- `scripts/context_classifier.py` — W2 AST classifier (Python). Walks up from a call site to classify the enclosing `execution_context`.
+- `scripts/billing_gate.py` — Phase 4 billing-surface gate. Per the authoritative finance + CPO model, returns `emit` / `suppress` / `surface_for_reconciliation` for terminal-event candidates.
+
+**Aspirational — NOT YET IMPLEMENTED.** Referenced in the phases above as if runnable, but absent on disk. **Agent-driven today**: the refund-test scoring, inventory emission, and HTML projection are performed by the agent following SKILL.md prose, not by deterministic scripts. Building these makes the discovery output reproducible per run:
+
+- `scripts/refund_test.py` — TARGET: terminal-event scoring runner (heuristic data lives in `assets/terminal-event-heuristics.yaml`).
+- `scripts/inventory_build.py` — TARGET: Phase 5 inventory emission (writes the three inventory YAMLs).
+- `scripts/three_role_views.py` — TARGET: render CFO / PM / engineer HTML previews.
 
 ## Assets
 

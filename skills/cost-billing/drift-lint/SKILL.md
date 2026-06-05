@@ -49,7 +49,7 @@ See `cost-billing-shared/operating-principles.md`. Drift-lint runs UNATTENDED (C
 ## Read first (shared/)
 
 - `anchor-taxonomy.md` — what entries / events / linkage are; workflow_id matching strategy.
-- `sdk-surface-reference.md` — what SDK calls to detect (`client.usage.*` / `client.cost.*` positive; raw `EventsApi`/`CostEventsApi` + the dead `client.meter.events.*` / `client.cls.*` shapes are anti-patterns).
+- `sdk-surface-reference.md` — what SDK calls to detect (v0.3.0-rc1 positive shapes: `client.usage.ingest_event` / `client.cost.ingest_event` / `client.events.ingest`. Anti-patterns: raw `EventsApi`/`CostEventsApi` direct calls, inline `Moolabs(...)` instantiation, and the dead `client.meter.events.*` / `client.cls.*` shapes that never shipped.)
 - `v1-decisions-log.md` — drift severity rubric (CRITICAL/HIGH/MEDIUM/LOW).
 
 ## Workflow — 3 phases
@@ -203,6 +203,4 @@ The `--format github-action` mode emits inline PR annotations at `file:line`.
 
 ## Assets
 
-- `assets/github-action.yml` — drop-in CI step.
-- `assets/gitlab-ci.yml` — drop-in for GitLab.
-- `assets/drift-policy.schema.yaml` — JSON-Schema for `.moolabs/drift-policy.yaml`.
+No standalone assets ship today (the `assets/` directory is empty). Drop-in CI snippets for GitHub Actions / GitLab CI and the `.moolabs/drift-policy.yaml` schema are documented inline in this SKILL.md; the customer authors them by hand from the prose. Extracting them into copyable `assets/github-action.yml` / `assets/gitlab-ci.yml` / `assets/drift-policy.schema.yaml` is on the roadmap.

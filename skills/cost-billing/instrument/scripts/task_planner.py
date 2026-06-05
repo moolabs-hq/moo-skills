@@ -50,10 +50,13 @@ TEMPLATE_MAP: dict[tuple[str, str], str] = {
     ("go", "net-http-stdlib"): "assets/codemod-templates/go-stdlib.j2",
 }
 
-# Per-language helper import that the rendered insert relies on.
+# Per-language helper import that the rendered insert relies on. v0.3.0-rc1
+# exposes three helpers (one per pattern); the framework callsite template
+# emits only the one it needs, so the per-file rendered imports are a subset
+# of these. Listed in full so tasks.yaml documents the complete surface.
 HELPER_IMPORT: dict[str, str] = {
-    "python": "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe",
-    "typescript": 'import { emitUsageEventSafe, emitCostEventSafe } from "@/services/moolabs-client";',
+    "python": "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe",
+    "typescript": 'import { emitUsageEventSafe, emitCostEventSafe, emitEventSafe } from "@/services/moolabs-client";',
     "go": 'import "internal/moolabsclient"',
 }
 
@@ -212,13 +215,20 @@ def _attribution_keys_for(framework: str) -> list[str]:
     """Default attribution-key allowlist per framework (legacy — kept for
     back-compat). Real source of truth is `.moolabs/customer-context/
     attribution-bindings.yaml` from Phase 1.6.
+
+    FR-3 (2026-06-05): `tenant_id` removed from every framework's default list.
+    The v0.3.0-rc1 SDK derives tenant identity server-side from the API key;
+    the helpers do not pass it on the wire and the templates do not render it.
+    Carrying it in this legacy list created a spurious "valid attribution key"
+    that callers downstream might surface as required. Dropped to keep the
+    legacy defaults consistent with the v0.3 helper contract.
     """
     if framework == "fastapi":
-        return ["tenant_id", "customer_id", "feature_key", "request_id", "consumer_agent"]
+        return ["customer_id", "feature_key", "request_id", "consumer_agent"]
     if framework in ("express", "nestjs", "nextjs"):
-        return ["tenant_id", "customer_id", "feature_key", "request_id"]
+        return ["customer_id", "feature_key", "request_id"]
     if framework == "django":
-        return ["tenant_id", "customer_id", "feature_key", "request_id"]
+        return ["customer_id", "feature_key", "request_id"]
     return ["request_id", "customer_id"]
 
 
@@ -350,10 +360,18 @@ def build_tasks(
                 language=primary_lang,
                 template=template,
                 helper_import=HELPER_IMPORT.get(primary_lang, ""),
+                # v0.3.0-rc1 capability flags. Helpers no longer branch on
+                # these (they unconditionally call the ergonomic methods);
+                # carried into tasks.yaml as a forensic record so downstream
+                # audit / debugging can confirm which SDK shape was pinned.
                 snapshot_capabilities={
-                    "cost_event_direct_emit": capabilities.get("cost_event_direct_emit", False),
-                    "cost_event_method_path": capabilities.get("cost_event_method_path"),
-                    "usage_event_emit": capabilities.get("usage_event_emit", True),
+                    "unified_ingest_present": capabilities.get("unified_ingest_present", False),
+                    "usage_ergonomic_ingest": capabilities.get("usage_ergonomic_ingest", False),
+                    "cost_ergonomic_ingest": capabilities.get("cost_ergonomic_ingest", False),
+                    "events_unified_namespace": capabilities.get("events_unified_namespace", False),
+                    "usage_method_path": capabilities.get("usage_method_path"),
+                    "cost_method_path": capabilities.get("cost_method_path"),
+                    "events_method_path": capabilities.get("events_method_path"),
                 },
                 inserts=sorted(inserts, key=lambda i: i.line),
                 audit={
@@ -447,12 +465,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # NOTE: feature_key is NOT required — per-callsite templates derive it from
     # entry.workflow_id at render time. Customers don't need a middleware-set source.
-    required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
-    missing = [k for k in required if k not in attribution_defaults]
-    if missing:
+    #
+    # FR-3: tenant_id is NOT required. The v0.3.0-rc1 SDK derives tenant identity
+    # server-side from the API key; the helpers do not pass it on the wire and the
+    # planner doesn't need it bound to render correctly. Discovery may still emit
+    # the tenant_id binding for forensic / audit purposes — accepted but optional.
+    #
+    # consumer_agent is OPTIONAL metadata — a customer may legitimately have no
+    # binding for it (the example fixture sets source: null with confidence n_a).
+    # It is not required.
+    #
+    # Two keys are required AND must be bound to a non-null source expression:
+    # customer_id (billing identity) and request_id (entity_id threading key).
+    # A null binding for either silently degrades downstream data quality —
+    # customer_id null buckets every emission under a literal "unknown" customer;
+    # request_id null defeats sibling-pair cross-lane joins. The gate must catch
+    # both "key absent" AND "key present but source is null" cases.
+    required = ["customer_id", "request_id"]
+    missing_or_null = [
+        k for k in required
+        if attribution_defaults.get(k) is None  # covers both missing-key and source: null
+    ]
+    if missing_or_null:
         sys.stderr.write(
-            f"REFUSING TO RUN: attribution-bindings.yaml is missing required keys: {missing}\n"
-            f"  Run Phase 1.6 again to confirm them (use --reconfirm if needed).\n"
+            f"REFUSING TO RUN: attribution-bindings.yaml is missing or null for required keys: {missing_or_null}\n"
+            f"  Each key must be bound to a non-null source expression (e.g. 'request.state.customer_id').\n"
+            f"  A source: null binding is treated as 'not bound' — re-run Phase 1.6 to confirm.\n"
         )
         return 2
 

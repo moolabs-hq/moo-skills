@@ -273,5 +273,6 @@ NEXT — downstream skills are now unblocked:
 
 ## Assets
 
-- `assets/04-final.schema.yaml`
-- `assets/follow-up-prompts.yaml`
+- `assets/04-final.schema.yaml` — JSON-Schema for the signed-doc output.
+
+The per-question follow-up prompts (originally planned as `assets/follow-up-prompts.yaml`) live inline in the question list above.

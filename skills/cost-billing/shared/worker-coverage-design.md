@@ -243,7 +243,8 @@ stopgap (worker library signatures + templates without true call-anchoring).
 The usage-namespace prose was inverted across the suite (docs said
 `client.meter.events.*` was live and `client.usage.*` was the anti-pattern; source
 proves the opposite). **Reconciled 2026-05-28** against the oracle
-`sdk-surface-reference.md:147` — all guidance now points to `client.usage.*`, and
+`sdk-surface-reference.md` — all guidance now points to `client.usage.*`, and
 drift-lint's anti-pattern list is flipped. W5 worker templates therefore use the
-correct `client.usage.ingest_events` / `client.usage.ingestEvents` shape; no longer
-a blocker.
+correct v0.3.0-rc1 unified-ingest shape: `client.usage.ingest_event` (Python) /
+`client.usage.ingestEvent` (TypeScript) / `client.Usage.IngestEvent` (Go); no
+longer a blocker.

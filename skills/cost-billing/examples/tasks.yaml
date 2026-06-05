@@ -13,11 +13,15 @@ tasks:
     framework: fastapi
     language: python
     template: assets/codemod-templates/python-fastapi.j2
-    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe"
     snapshot_capabilities:
-      cost_event_direct_emit: true
-      cost_event_method_path: "client.cost.ingest_events_batch"
-      usage_event_emit: true
+      unified_ingest_present: true
+      usage_ergonomic_ingest: true
+      cost_ergonomic_ingest: true
+      events_unified_namespace: true
+      usage_method_path: "client.usage.ingest_event"
+      cost_method_path: "client.cost.ingest_event"
+      events_method_path: "client.events.ingest"
     inserts:
       - line: 142
         pattern: sibling-pair
@@ -50,11 +54,15 @@ tasks:
     framework: fastapi
     language: python
     template: assets/codemod-templates/python-fastapi.j2
-    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe"
+    helper_import: "from app.services.moolabs_client import emit_usage_event_safe, emit_cost_event_safe, emit_event_safe"
     snapshot_capabilities:
-      cost_event_direct_emit: true
-      cost_event_method_path: "client.cost.ingest_events_batch"
-      usage_event_emit: true
+      unified_ingest_present: true
+      usage_ergonomic_ingest: true
+      cost_ergonomic_ingest: true
+      events_unified_namespace: true
+      usage_method_path: "client.usage.ingest_event"
+      cost_method_path: "client.cost.ingest_event"
+      events_method_path: "client.events.ingest"
     inserts:
       - line: 67
         pattern: cost-only

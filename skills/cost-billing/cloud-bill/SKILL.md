@@ -238,5 +238,4 @@ After the first-export scan completes, invoke `/cost-billing-adversarial-review 
 
 ## Assets
 
-- `assets/connector-config.schema.yaml` — JSON-Schema for the per-cloud connector configs (the Moolabs platform's cloud-bill ingestion contract).
-- `assets/aws-untaggable-services.yaml` — known AWS services that don't propagate tags to child resources.
+No standalone assets ship today (the `assets/` directory is empty). The per-cloud connector-config shape and the AWS untaggable-services catalog live inline in this SKILL.md prose. Extracting them into `assets/connector-config.schema.yaml` / `assets/aws-untaggable-services.yaml` is on the roadmap once the connector contract stabilizes upstream.

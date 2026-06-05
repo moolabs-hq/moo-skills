@@ -45,7 +45,7 @@ echo "[1/8] SKILL.md frontmatter present (name + description)"
 for skill_dir in "$SUITE_ROOT"/*/; do
   name=$(basename "$skill_dir")
   case "$name" in
-    shared|examples|scripts) continue ;;
+    shared|examples|scripts|docs) continue ;;
   esac
   skill_md="$skill_dir/SKILL.md"
   if [[ ! -f "$skill_md" ]]; then
@@ -189,79 +189,152 @@ patterns = ["sibling-pair","usage-only","cost-only"]
 
 pass_count, fail_count = 0, 0
 
-# Helper-template renders (per-service, capability-true)
+# Helper-template renders. v0.3.0-rc1 helpers no longer branch on capability
+# flags — they unconditionally call client.{usage,cost}.ingest_event /
+# client.events.ingest. The capability dict is kept here only because some
+# legacy includes may still read it during transition; the `no_legacy`
+# rendered-output assertions below verify the OLD flag names cannot leak.
 helper_ctx = {
     "service_slug": "test-svc",
     "signoff_chain_hashes": [],
     "sdk_key_location": {"strategy": "env_var"},
     "sdk_key_read_pattern": "",
-    "sdk_pinned_version": "v0.2.0-rc9",
+    "sdk_pinned_version": "v0.3.0-rc1",
     "telemetry": {"mode": "brownfield"},
     "capabilities": {
-        "cost_event_direct_emit": True,
-        "cost_event_method_path": "client.cost.ingest_events_batch",
+        "unified_ingest_present": True,
+        "usage_ergonomic_ingest": True,
+        "cost_ergonomic_ingest": True,
+        "events_unified_namespace": True,
+        "usage_method_path": "client.usage.ingest_event",
+        "cost_method_path": "client.cost.ingest_event",
+        "events_method_path": "client.events.ingest",
     },
 }
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
     try:
         r = env.get_template(helper).render(**helper_ctx)
-        # CODEX-REGRESSION-1: cost log fallback must carry usage_event_id
-        # CODEX-REGRESSION-1: usage log fallback must carry event_id
-        if helper.startswith("python"):
-            # Usage log fallback adds event_id in the initial dict literal.
-            # Cost log fallback adds usage_event_id as a conditional bracket assignment.
-            usage_id_in_log = '"event_id": resolved_event_id' in r
-            cost_id_in_log = 'log_kwargs["usage_event_id"] = str(usage_event_id)' in r
-            if usage_id_in_log and cost_id_in_log:
-                print(f"  PASS  helper {helper}: sibling-pair ids survive recovery rail")
-                pass_count += 1
-            else:
-                missing = []
-                if not usage_id_in_log: missing.append("usage event_id in log")
-                if not cost_id_in_log: missing.append("cost usage_event_id in log")
-                print(f"  FAIL  helper {helper}: log fallback drops {missing} (Codex Finding #1)")
-                fail_count += 1
-        else:
-            if "logPayload.usage_event_id" in r and "ingestEventsBatch" in r:
-                print(f"  PASS  helper {helper}: SDK direct branch + log fallback ids present")
-                pass_count += 1
-            else:
-                print(f"  FAIL  helper {helper}: TS SDK branch missing OR log drops sibling-pair ids (Codex Finding #1/#3)")
-                fail_count += 1
     except Exception as e:
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
+        continue
+    if helper.startswith("python"):
+        # v0.3.0-rc1 ergonomic-method assertions (parallel to the Go helper checks).
+        # The Codex Finding #1 (usage_event_id / event_id linking via the recovery rail)
+        # is obsolete in v0.3: entity_id replaces usage_event_id, the SDK auto-stamps
+        # event_id, and tenant_id is gone per FR-3.
+        has_usage   = ".usage.ingest_event(" in r
+        has_cost    = ".cost.ingest_event(" in r
+        has_events  = ".events.ingest(" in r
+        has_devgate = "_DEV_ENV_VAR" in r and "SDK_DEVELOPMENT" in r
+        has_rail    = 'logger.warning(' in r and 'log_recovery_rail' in r
+        # FR-3: surgical check — no tenant_id KWARG or field use, allow docstring prose.
+        no_tenant   = ("tenant_id=" not in r and "'tenant_id'" not in r
+                       and '"tenant_id"' not in r)
+        # v0.2 legacy must be gone
+        no_legacy   = ("cost_event_direct_emit" not in r
+                       and "ingest_events_batch" not in r
+                       and "resolved_event_id" not in r
+                       and "skipped_no_tenant_id" not in r
+                       and "log_kwargs[" not in r)
+        failed = []
+        if not has_usage:   failed.append("usage.ingest_event missing")
+        if not has_cost:    failed.append("cost.ingest_event missing")
+        if not has_events:  failed.append("events.ingest missing")
+        if not has_devgate: failed.append("SDK_DEVELOPMENT env gate missing")
+        if not has_rail:    failed.append("never-drop log rail missing")
+        if not no_tenant:   failed.append("tenant_id leaked (FR-3 violation)")
+        if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if failed:
+            print(f"  FAIL  helper {helper}: {', '.join(failed)}")
+            fail_count += 1
+        else:
+            print(f"  PASS  helper {helper}: v0.3.0 ergonomic methods + env-gated rail + FR-3 clean")
+            pass_count += 1
+    else:
+        # v0.3.0 TS ergonomic-method assertions (parallel to Python).
+        has_usage   = ".usage.ingestEvent(" in r
+        has_cost    = ".cost.ingestEvent(" in r
+        has_events  = ".events.ingest(" in r
+        has_devgate = "DEV_ENV_VAR" in r and "SDK_DEVELOPMENT" in r
+        has_rail    = "logger.warn(" in r and "log_recovery_rail" in r
+        no_tenant   = ('tenantId:' not in r and '.tenantId' not in r
+                       and "'tenantId'" not in r and '"tenantId"' not in r)
+        no_legacy   = ("ingestEventsBatch" not in r
+                       and "cost_event_direct_emit" not in r
+                       and "EmitUsageEventOptions" not in r
+                       and "EmitCostEventOptions" not in r
+                       and "EventEnvelope" not in r
+                       and "usageEventId" not in r
+                       and "logPayload" not in r)
+        failed = []
+        if not has_usage:   failed.append("usage.ingestEvent missing")
+        if not has_cost:    failed.append("cost.ingestEvent missing")
+        if not has_events:  failed.append("events.ingest missing")
+        if not has_devgate: failed.append("SDK_DEVELOPMENT env gate missing")
+        if not has_rail:    failed.append("never-drop log rail missing")
+        if not no_tenant:   failed.append("tenantId leaked (FR-3 violation)")
+        if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if failed:
+            print(f"  FAIL  helper {helper}: {', '.join(failed)}")
+            fail_count += 1
+        else:
+            print(f"  PASS  helper {helper}: v0.3.0 ergonomic methods + env-gated rail + FR-3 clean")
+            pass_count += 1
 
-# Go helper: render BOTH capability branches + gofmt -e syntax gate (skip if no gofmt).
+# Go helper: v0.3.0-rc1 unified-ingest shape — single render (no capability gate),
+# gofmt -e syntax gate, structural checks for the three ergonomic methods + env-gated
+# error handling + the FR-3 tenant-absent guard.
 import shutil, subprocess, tempfile
 gofmt = shutil.which("gofmt")
-go_ctx = {**helper_ctx, "capabilities": {**helper_ctx["capabilities"],
-          "cost_event_method_path": "client.Cost.IngestEventsBatch"}}
-for direct in (True, False):
-    ctx = {**go_ctx, "capabilities": {**go_ctx["capabilities"], "cost_event_direct_emit": direct}}
-    try:
-        r = env.get_template("go-moolabs-client.go.j2").render(**ctx)
-    except Exception as e:
-        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: render error: {e}")
-        fail_count += 1; continue
-    ok = ".Usage.IngestEvents" in r and 'logEvent("moolabs.usage.event"' in r
-    if direct:
-        ok = ok and "IngestEventsBatch" in r and "skipped_no_tenant_id" in r and "usage_event_id" in r
-    if not ok:
-        print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: missing SDK call / never-drop rail")
-        fail_count += 1; continue
-    if gofmt:
+try:
+    r = env.get_template("go-moolabs-client.go.j2").render(**helper_ctx)
+except Exception as e:
+    print(f"  FAIL  go-moolabs-client.go.j2: render error: {e}")
+    fail_count += 1
+else:
+    # v0.3.0 ergonomic methods all present
+    has_usage  = "cli.Usage.IngestEvent(ctx, args)" in r
+    has_cost   = "cli.Cost.IngestEvent(ctx, args)" in r
+    has_events = "cli.Events.Ingest(ctx, args)" in r
+    # env-gated strict/lax error handling
+    has_devgate = 'os.Getenv(devEnvVar)' in r and 'SDK_DEVELOPMENT' in r
+    # never-drop log rail still wired
+    has_rail = 'logEvent("moolabs.' in r
+    # FR-3: TenantID must be absent from the helper (server derives from API key).
+    # The docstring explains the absence, so we check for actual *usage* patterns
+    # — struct-field init, field access, or map-key — not bare token mentions.
+    no_tenant = ('TenantID:' not in r and 'TenantId:' not in r
+                 and '.TenantID' not in r and '.TenantId' not in r
+                 and '"tenant_id":' not in r and "'tenant_id':" not in r)
+    # v0.2 legacy shapes must be gone
+    no_legacy = "IngestEventsBatch" not in r and "ObservedTotalCost" not in r \
+                and "BatchIngestRequest" not in r and "cost_event_direct_emit" not in r
+    failed = []
+    if not has_usage:  failed.append("Usage.IngestEvent missing")
+    if not has_cost:   failed.append("Cost.IngestEvent missing")
+    if not has_events: failed.append("Events.Ingest missing")
+    if not has_devgate:failed.append("SDK_DEVELOPMENT env gate missing")
+    if not has_rail:   failed.append("never-drop log rail missing")
+    if not no_tenant:  failed.append("TenantID leaked (FR-3 violation)")
+    if not no_legacy:  failed.append("v0.2 legacy shape leaked")
+    if failed:
+        print(f"  FAIL  go-moolabs-client.go.j2: {', '.join(failed)}")
+        fail_count += 1
+    elif gofmt:
         with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
             tf.write(r); tfp = tf.name
         res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
         Path(tfp).unlink()
         if res.returncode != 0:
-            print(f"  FAIL  go-moolabs-client.go.j2[direct={direct}]: gofmt -e: {res.stderr.strip()[:200]}")
-            fail_count += 1; continue
-        print(f"  PASS  go-moolabs-client.go.j2[direct={direct}]: gofmt-clean + never-drop rail")
+            print(f"  FAIL  go-moolabs-client.go.j2: gofmt -e: {res.stderr.strip()[:200]}")
+            fail_count += 1
+        else:
+            print(f"  PASS  go-moolabs-client.go.j2: v0.3.0 ergonomic methods + env-gated rail + gofmt-clean")
+            pass_count += 1
     else:
-        print(f"  SKIP  gofmt not on PATH; go-moolabs-client.go.j2[direct={direct}] structural-only PASS")
-    pass_count += 1
+        print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
+        pass_count += 1
 
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
@@ -274,20 +347,76 @@ for tpl in templates:
             fail_count += 1
             continue
 
-        # CODEX-REGRESSION-2: TS usage-only / cost-only must NOT reference _moolabsEventId (undefined in those branches)
-        if tpl.startswith("typescript-") and pat in ("usage-only", "cost-only"):
-            if "_moolabsEventId" in r:
-                print(f"  FAIL  {tpl}[{pat}]: references undefined _moolabsEventId (Codex Finding #2)")
-                fail_count += 1; continue
+        # Codex Finding #2 ("TS usage-only / cost-only must NOT reference _moolabsEventId")
+        # is obsolete in v0.3: _moolabsEventId is now declared in any branch that needs
+        # it as an entityId fallback (when no request_id binding) and is correctly scoped.
 
-        # Sibling-pair must wire both ids
-        if pat == "sibling-pair":
-            if tpl.startswith("python-"):
-                ok = "_moolabs_event_id" in r and "event_id=_moolabs_event_id" in r and "usage_event_id=_moolabs_event_id" in r
-            else:
-                ok = "_moolabsEventId" in r and "eventId: _moolabsEventId" in r and "usageEventId: _moolabsEventId" in r
+        # Per-pattern method-presence checks.
+        if tpl.startswith("python-"):
+            # v0.3.0 ergonomic methods + entity_id linking. The Codex Finding #1
+            # "_moolabs_event_id" shared-id dance is obsolete in v0.3 (Events.Ingest
+            # is a single call; entity_id is the cross-lane key, sourced from the
+            # bound request_id or a local uuid fallback).
+            if pat == "sibling-pair":
+                ok = ("emit_event_safe(" in r
+                      and "event_type=" in r and "customer_id=" in r and "entity_id=" in r
+                      and "meter_slug=" in r and "value=" in r and "spans=[" in r)
+                if "emit_usage_event_safe(" in r or "emit_cost_event_safe(" in r:
+                    ok = False
+                reason = "sibling-pair must use emit_event_safe (single dual-lane call)"
+            elif pat == "usage-only":
+                ok = ("emit_usage_event_safe(" in r
+                      and "meter_slug=" in r and "value=" in r
+                      and "emit_event_safe(" not in r and "emit_cost_event_safe(" not in r
+                      and "spans=[" not in r)
+                reason = "usage-only must call emit_usage_event_safe only (no spans, no other emit)"
+            else:  # cost-only
+                ok = ("emit_cost_event_safe(" in r and "spans=[" in r
+                      and "emit_event_safe(" not in r and "emit_usage_event_safe(" not in r
+                      and "meter_slug=" not in r and "value=" not in r)
+                reason = "cost-only must call emit_cost_event_safe only (no meter_slug/value, no other emit)"
+            # v0.2 top-level kwargs must NOT appear (FR-3 + helper-signature contract).
+            no_v2 = ("tenant_id=" not in r and "usage_event_id=" not in r
+                     and "subject=" not in r and "quantity=" not in r and " unit=" not in r
+                     and "feature_key=" not in r and "attributes=" not in r
+                     and "kind=" not in r and " data=" not in r)
             if not ok:
-                print(f"  FAIL  {tpl}[{pat}]: sibling-pair missing shared event_id wiring")
+                print(f"  FAIL  {tpl}[{pat}]: {reason}")
+                fail_count += 1; continue
+            if not no_v2:
+                print(f"  FAIL  {tpl}[{pat}]: v0.2 top-level kwarg leaked (tenant_id/usage_event_id/subject/quantity/unit/feature_key=/attributes/kind=/data=)")
+                fail_count += 1; continue
+        else:
+            # v0.3.0 TS framework callsite assertions (parallel to Python).
+            if pat == "sibling-pair":
+                ok = ("emitEventSafe(" in r
+                      and "eventType:" in r and "customerId:" in r and "entityId:" in r
+                      and "meterSlug:" in r and "value:" in r and "spans: [" in r)
+                if "emitUsageEventSafe(" in r or "emitCostEventSafe(" in r:
+                    ok = False
+                reason = "sibling-pair must use emitEventSafe (single dual-lane call)"
+            elif pat == "usage-only":
+                ok = ("emitUsageEventSafe(" in r
+                      and "meterSlug:" in r and "value:" in r
+                      and "emitEventSafe(" not in r and "emitCostEventSafe(" not in r
+                      and "spans: [" not in r)
+                reason = "usage-only must call emitUsageEventSafe only (no spans, no other emit)"
+            else:  # cost-only
+                ok = ("emitCostEventSafe(" in r and "spans: [" in r
+                      and "emitEventSafe(" not in r and "emitUsageEventSafe(" not in r
+                      and "meterSlug:" not in r and "value:" not in r)
+                reason = "cost-only must call emitCostEventSafe only (no meterSlug/value, no other emit)"
+            # v0.2 top-level kwargs must NOT appear (FR-3 + helper-signature contract).
+            # kind/costMicros are allowed inside spans (4-space indented); we check by
+            # specific v0.2 patterns that are unique to the old shape.
+            no_v2 = ("tenantId:" not in r and "usageEventId:" not in r
+                     and "subject:" not in r and "quantity:" not in r and " unit:" not in r
+                     and "featureKey:" not in r and "attributes:" not in r)
+            if not ok:
+                print(f"  FAIL  {tpl}[{pat}]: {reason}")
+                fail_count += 1; continue
+            if not no_v2:
+                print(f"  FAIL  {tpl}[{pat}]: v0.2 top-level kwarg leaked (tenantId/usageEventId/subject/quantity/unit/featureKey/attributes)")
                 fail_count += 1; continue
 
         # Python: ast-compile rendered output
@@ -300,27 +429,49 @@ for tpl in templates:
                 print(f"  FAIL  {tpl}[{pat}]: py syntax error: {e.msg}")
                 fail_count += 1; continue
 
-        # TS: cost call must be awaited (post-async helper)
-        if tpl.startswith("typescript-") and pat in ("sibling-pair", "cost-only"):
-            if "emitCostEventSafe(" in r and "await emitCostEventSafe(" not in r:
-                print(f"  FAIL  {tpl}[{pat}]: emitCostEventSafe is async; callsite missing await")
-                fail_count += 1; continue
+        # TS: every async helper call must be awaited at the callsite. All three
+        # helpers are Promise-returning (`emitUsageEventSafe`, `emitCostEventSafe`,
+        # `emitEventSafe`). A missing `await` produces a dangling Promise — the
+        # SDK call still fires but the caller doesn't wait, so any error handling
+        # (env-gated throw OR structured-log rail) races against the next handler
+        # statement. The previous check only covered emitCostEventSafe; extended
+        # to all three so a future template edit that forgets await fails loudly.
+        if tpl.startswith("typescript-"):
+            await_fail = False
+            for fn in ("emitUsageEventSafe", "emitCostEventSafe", "emitEventSafe"):
+                if f"{fn}(" in r and f"await {fn}(" not in r:
+                    print(f"  FAIL  {tpl}[{pat}]: {fn} is async; callsite missing await")
+                    fail_count += 1
+                    await_fail = True
+                    break
+            if await_fail:
+                continue
 
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
 
-# CODEX-REGRESSION-4: example attribution-bindings satisfies planner gate
+# Planner refuse-to-run gate: example attribution-bindings must satisfy it.
+# v0.3.0-rc1 (FR-3): tenant_id is NOT required by the helpers or the planner —
+# the SDK derives tenant identity server-side from the API key. consumer_agent
+# is optional metadata. customer_id and request_id are the only required keys,
+# and they must be bound to non-null source expressions (a `source: null`
+# binding is treated as "not bound" by the planner's gate at
+# task_planner.py:`missing_or_null` check).
 bindings_yaml = suite_root / "examples" / "attribution-bindings.yaml"
 import yaml
 b = yaml.safe_load(bindings_yaml.read_text())
-required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
-declared = list((b.get("bindings") or {}).keys())
-missing = [k for k in required if k not in declared]
-if missing:
-    print(f"  FAIL  examples/attribution-bindings.yaml: missing required keys {missing} (Codex Finding #4)")
+required = ["customer_id", "request_id"]
+bindings = b.get("bindings") or {}
+missing_or_null = [
+    k for k in required
+    if not isinstance(bindings.get(k), dict)
+       or bindings[k].get("source") is None
+]
+if missing_or_null:
+    print(f"  FAIL  examples/attribution-bindings.yaml: missing or null source for required keys {missing_or_null}")
     fail_count += 1
 else:
-    print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate")
+    print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate (v0.3 FR-3)")
     pass_count += 1
 
 print(f"\n  Phase-7 result: {pass_count} pass, {fail_count} fail")

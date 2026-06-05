@@ -23,8 +23,8 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 | §5.5 | Phase 5 convergence guarantee | **RESOLVED for v1** (5-round cap + human escalation). | |
 | §5.6 | Review spec location vs. customer IP policy | **RESOLVED for v1** (default `docs/superpowers/reviews/` in customer repo; `--review-spec-out=<external-path>` flag for opt-out). | |
 | §6.1 | SDK blocking → codemod insert default | **RESOLVED for v1** (Option B = blocking + documented). | |
-| §6.3 | Unified SDK cost-event endpoint | **RESOLVED — endpoint shipped.** `client.cost.ingest_events_batch` (CostEventsApi + SdkIngestApi on the `acute` backend per `_dx_routing.CAPABILITY_MAP`), verified at source 2026-05-28. The dual-transport helper uses the direct SDK call as primary transport when the Phase 1.5 snapshot reports `cost_event_direct_emit=true`; OTel span + structured log are the recovery rail (never-drop). One unified client — no separate "acute SDK". | See `sdk-surface-reference.md` §"Direct cost-event emission". |
-| §7.2 | Subscription-customer cost-only emission path | **RESOLVED** via the same dual-transport helper — `emit_cost_event_safe()` works for cost-only call sites too. With the cost endpoint shipped, cost-only sites emit the direct `client.cost.ingest_events_batch` call when `cost_event_direct_emit=true`; the `# TODO` annotation remains only when a customer's pinned SDK predates the endpoint. | |
+| §6.3 | Unified SDK cost-event endpoint | **RESOLVED — endpoint shipped, ergonomic surface added in v0.3.** The cost lane has been verified at SDK source twice: (a) v0.2.0-rc9 (2026-05-28) shipped the plural `client.cost.ingest_events_batch`; (b) v0.3.0-rc1 (2026-06-05) added the singular ergonomic `client.cost.ingest_event(args)` on the `_CostNamespace` wrapper (US-007). Both route to ACUTE via CostEventsApi + SdkIngestApi. The v0.3 helpers call the singular method unconditionally; Phase 1.5's `unified_ingest_present` flag refuses-to-run if it's absent. | See `sdk-surface-reference.md` §"Unified ingest surface". |
+| §7.2 | Subscription-customer cost-only emission path | **RESOLVED.** `emit_cost_event_safe()` routes unconditionally to `client.cost.ingest_event(args)` in v0.3. There is no `# TODO` fallback annotation in v0.3 helpers; Phase 1.5 already refused-to-run if the method is absent. | |
 
 ---
 
@@ -105,7 +105,7 @@ Every gap from requirements doc §6 is here, with v1 status. Mark "RESOLVED" whe
 
 | # | Question | v1 status | Path |
 |---|---|---|---|
-| 25 | Cost-event endpoint on unified SDK | **RESOLVED — shipped.** `client.cost.ingest_events_batch` verified at source 2026-05-28; the helper's primary cost transport is the direct SDK call when `cost_event_direct_emit=true`, OTel span + structured log as the recovery rail. Call sites unchanged. | — |
+| 25 | Cost-event endpoint on unified SDK | **RESOLVED — shipped + ergonomic surface in v0.3.** v0.3.0-rc1 (2026-06-05) exposes `client.cost.ingest_event(args)` (singular) on `_CostNamespace`; helpers call it unconditionally. SDK buffer + structured-log rail handle never-drop internally. | — |
 | 26 | Catalog miss | **RESOLVED for v1** (surface for review as cell ④ findings; never silent skip). | Per `v1-decisions-log.md` #6. |
 | 27 | Skill R applies to B and C? | **RESOLVED for v1** (Skill R applies to Skill B's first-export scan; Skill R does NOT apply to Skill C — Skill C is itself a validation skill). | |
 | 28 | Versioning of chargeability map | **RESOLVED for v1** (match by `workflow_id`; rename = stable ID; split/merge = parent retire + child reference). | |
