@@ -350,10 +350,18 @@ def build_tasks(
                 language=primary_lang,
                 template=template,
                 helper_import=HELPER_IMPORT.get(primary_lang, ""),
+                # v0.3.0-rc1 capability flags. Helpers no longer branch on
+                # these (they unconditionally call the ergonomic methods);
+                # carried into tasks.yaml as a forensic record so downstream
+                # audit / debugging can confirm which SDK shape was pinned.
                 snapshot_capabilities={
-                    "cost_event_direct_emit": capabilities.get("cost_event_direct_emit", False),
-                    "cost_event_method_path": capabilities.get("cost_event_method_path"),
-                    "usage_event_emit": capabilities.get("usage_event_emit", True),
+                    "unified_ingest_present": capabilities.get("unified_ingest_present", False),
+                    "usage_ergonomic_ingest": capabilities.get("usage_ergonomic_ingest", False),
+                    "cost_ergonomic_ingest": capabilities.get("cost_ergonomic_ingest", False),
+                    "events_unified_namespace": capabilities.get("events_unified_namespace", False),
+                    "usage_method_path": capabilities.get("usage_method_path"),
+                    "cost_method_path": capabilities.get("cost_method_path"),
+                    "events_method_path": capabilities.get("events_method_path"),
                 },
                 inserts=sorted(inserts, key=lambda i: i.line),
                 audit={

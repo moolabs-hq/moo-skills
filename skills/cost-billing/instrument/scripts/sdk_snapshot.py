@@ -35,29 +35,34 @@ from typing import Any
 
 # Expected method paths that gate the codemod — every Phase 1.5 snapshot
 # is checked against these. Missing entry → CRITICAL drift, abort.
-EXPECTED_METHODS = {
-    "python": [
-        "client.usage.ingest_events",
-    ],
-    "typescript": [
-        "client.usage.ingestEvents",
-    ],
-    "go": [],
-}
-
-# Cost-event endpoint candidates. The unified SDK exposes `client.cost.*`
-# today (capability "cost" in CAPABILITY_MAP routes to CostEventsApi +
-# SdkIngestApi on the acute backend — verified against moolabs-py@v0.2.0-rc9).
-COST_EVENT_CANDIDATES = {
-    "python": [
-        "client.cost.ingest_events",
-        "client.cost.ingest_events_batch",
-    ],
-    "typescript": [
-        "client.cost.ingestEvents",
-        "client.cost.ingestEventsBatch",
-    ],
-    "go": [],
+#
+# v0.3.0-rc1 unified-ingest contract: helpers (moolabs-client.{py,ts,go})
+# hard-call three singular ergonomic methods, one per lane. The codemod
+# MUST NOT proceed if any of them are missing — fallback rendering was
+# removed when the helpers stopped gating on capability flags.
+#
+#   usage lane     → client.usage.ingest_event   (py) / ingestEvent (ts)
+#   cost lane      → client.cost.ingest_event    (py) / ingestEvent (ts)
+#   sibling-pair   → client.events.ingest        (py / ts identical)
+#
+# Go (P0 since 2026-05-28): the introspector is still a stub returning [];
+# expected methods are listed here for documentation and future activation.
+EXPECTED_METHODS: dict[str, dict[str, str]] = {
+    "python": {
+        "usage":  "client.usage.ingest_event",
+        "cost":   "client.cost.ingest_event",
+        "events": "client.events.ingest",
+    },
+    "typescript": {
+        "usage":  "client.usage.ingestEvent",
+        "cost":   "client.cost.ingestEvent",
+        "events": "client.events.ingest",
+    },
+    "go": {
+        "usage":  "client.Usage.IngestEvent",
+        "cost":   "client.Cost.IngestEvent",
+        "events": "client.Events.Ingest",
+    },
 }
 
 # Methods to EXCLUDE — generated openapi variants that customers should not call.
@@ -227,6 +232,56 @@ def _api_class_methods(src: Path, class_name: str) -> list[str]:
     return sorted(set(methods))
 
 
+def _dx_namespace_methods(src: Path) -> dict[str, list[str]]:
+    """Read `_dx_namespaces.py` and return wrapper-class methods keyed by class.
+
+    v0.3.0-rc1 ergonomic methods (US-006 / US-007 / US-008) live on the
+    customer-facing wrapper classes — NOT on the openapi-generated backing
+    classes in `moolabs/api/`. The wrappers are:
+
+      _UsageNamespace.ingest_event   — singular usage ingest
+      _CostNamespace.ingest_event    — singular cost ingest
+      _EventsNamespace.ingest        — unified sibling-pair ingest
+
+    Returns `{class_name: [public method, ...]}`. Empty dict when the file
+    is absent (older SDK predating the wrapper layer).
+    """
+    namespaces_file = _find_pkg_root(src) / "_dx_namespaces.py"
+    if not namespaces_file.exists():
+        return {}
+    try:
+        mod = ast.parse(namespaces_file.read_text())
+    except SyntaxError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for node in mod.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if not node.name.startswith("_") or not node.name.endswith("Namespace"):
+            continue
+        methods: list[str] = []
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name = item.name
+            if name.startswith("_"):
+                continue
+            if any(name.endswith(suf) for suf in _PYTHON_INTERNAL_SUFFIXES):
+                continue
+            methods.append(name)
+        if methods:
+            out[node.name] = sorted(set(methods))
+    return out
+
+
+# Capability name -> wrapper class name. Convention: `_<Capitalized>Namespace`.
+# Driven from CAPABILITY_MAP keys at runtime so this stays correct as the SDK
+# evolves; the special `events` capability is handled separately because it
+# is NOT in CAPABILITY_MAP (US-004 / US-008).
+def _wrapper_class_for(capability: str) -> str:
+    return f"_{capability.capitalize()}Namespace"
+
+
 def introspect_python(src: Path) -> list[Namespace]:
     """Extract the Moolabs client namespace tree from moolabs-py source.
 
@@ -238,17 +293,37 @@ def introspect_python(src: Path) -> list[Namespace]:
         resource class; recurse into that class's public defs.
       Mode C (legacy): walk `self.x = X(...)` assignments in `__init__`.
     """
-    # MODE A — capability map (current SDK shape)
+    # MODE A — capability map (current SDK shape, v0.2+).
+    #
+    # v0.3.0-rc1 added the wrapper layer (`_dx_namespaces.py`): customer-facing
+    # classes (`_UsageNamespace`, `_CostNamespace`, ...) wrap the openapi-
+    # generated backing classes and expose ergonomic methods like
+    # `ingest_event` (singular) that aren't on the backing layer. We MUST
+    # merge wrapper methods into the discovered surface — otherwise the
+    # introspector reports only the openapi shape and misses the customer
+    # API (`client.usage.ingest_event` etc.).
+    #
+    # Also: `events` is a top-level capability via @property on Moolabs but
+    # is NOT in CAPABILITY_MAP (US-004 / US-008). We add it explicitly from
+    # `_EventsNamespace`.
     cap_map = _extract_capability_map(src)
     if cap_map is not None:
+        wrapper_methods = _dx_namespace_methods(src)  # {class_name: [methods]}
         out: list[Namespace] = []
         for capability, backing_classes in cap_map.items():
             methods: list[str] = []
             for cls in backing_classes:
                 methods.extend(_api_class_methods(src, cls))
+            # Merge customer-facing wrapper methods (v0.3+ ergonomic surface).
+            wrapper_cls = _wrapper_class_for(capability)
+            methods.extend(wrapper_methods.get(wrapper_cls, []))
             methods = sorted(set(methods))
             if methods:
                 out.append(Namespace(path=f"client.{capability}", methods=methods))
+        # Special: `events` namespace (US-008) — not in CAPABILITY_MAP.
+        events_methods = wrapper_methods.get("_EventsNamespace", [])
+        if events_methods:
+            out.append(Namespace(path="client.events", methods=events_methods))
         return out
 
     # MODE B / C fallback — older SDK without _dx_routing
@@ -349,19 +424,38 @@ def introspect_python(src: Path) -> list[Namespace]:
     return namespaces
 
 
-def introspect_typescript(src: Path) -> list[Namespace]:
-    """Parse .d.ts to extract the Moolabs client surface.
+def _ts_extract_class_block(text: str, class_name: str) -> str | None:
+    """Return the body of `class <class_name>` declaration with balanced braces.
 
-    v1 implementation: shells out to `tsc --declaration --emitDeclarationOnly`
-    when source is present, then parses the generated .d.ts with a regex-based
-    extractor. If TS toolchain isn't available, falls back to reading the
-    shipped `dist/**/*.d.ts` directly.
-
-    For v1 we keep this minimal — the goal is to verify `client.meter.events.ingestEvents`
-    exists and detect any new cost-event method. Full type-level introspection
-    is deferred.
+    Handles nested braces (TS class bodies contain method signatures, generic
+    constraint clauses, and option-object types — all with their own braces).
+    Returns None when the class isn't found.
     """
-    # Look for the entry .d.ts file
+    pat = re.compile(rf"\b(?:export\s+(?:declare\s+)?)?class\s+{re.escape(class_name)}\b[^{{]*\{{")
+    m = pat.search(text)
+    if not m:
+        return None
+    start = m.end()  # right after the opening brace
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return text[start:i - 1] if depth == 0 else None
+
+
+def _ts_collect_dts_text(src: Path) -> str:
+    """Concatenate every .d.ts file under the SDK root into one searchable blob.
+
+    Methods of `UsageNamespace` may live in a different .d.ts file than the
+    Moolabs class itself; concatenating sidesteps cross-file lookup. Safe
+    because TS .d.ts files have unique top-level class names (compiler errors
+    on conflict).
+    """
     pkg_json = src / "package.json"
     if not pkg_json.exists():
         raise SystemExit(f"package.json not found at {pkg_json}")
@@ -370,73 +464,152 @@ def introspect_typescript(src: Path) -> list[Namespace]:
     except json.JSONDecodeError as e:
         raise SystemExit(f"could not parse package.json: {e}")
 
-    dts_candidates: list[Path] = []
-    if "types" in pkg_meta:
-        dts_candidates.append(src / pkg_meta["types"])
-    if "typings" in pkg_meta:
-        dts_candidates.append(src / pkg_meta["typings"])
-    dts_candidates.extend(src.glob("**/index.d.ts"))
+    entry_dts: list[Path] = []
+    for k in ("types", "typings"):
+        if k in pkg_meta:
+            entry_dts.append(src / pkg_meta[k])
 
-    namespaces: list[Namespace] = []
-    seen: set[str] = set()
-    # Conservative regex parse — looks for `<name>: <ResourceClass>;` in the Moolabs class
-    # and for `<method>(...): ...` inside each resource class block.
-    moolabs_block = re.compile(r"class\s+Moolabs[^{]*\{([^}]+)\}", re.DOTALL)
-    method_pat = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9]*)\s*\(", re.MULTILINE)
-    for dts in dts_candidates:
-        if not dts.exists():
+    # Walk every .d.ts in the same directory tree as the entry (and rglob as
+    # fallback). De-duplicate by resolved path.
+    all_dts: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            rp = p.resolve()
+        except OSError:
+            return
+        if rp in seen or not p.exists():
+            return
+        seen.add(rp)
+        all_dts.append(p)
+
+    for p in entry_dts:
+        _add(p)
+        if p.exists():
+            for sib in p.parent.glob("*.d.ts"):
+                _add(sib)
+    for p in src.rglob("*.d.ts"):
+        _add(p)
+
+    return "\n".join(p.read_text(errors="ignore") for p in all_dts)
+
+
+def introspect_typescript(src: Path) -> list[Namespace]:
+    """Parse .d.ts to extract the Moolabs client surface for v0.3.0-rc1.
+
+    Two-pass strategy:
+      1. Find Moolabs class, extract top-level accessors (fields + getters).
+         v0.3 uses getters (`get usage(): Namespace;`); v0.2 used fields
+         (`usage: UsageApi;`) — both are supported.
+      2. For each accessor's return type, find the corresponding class
+         declaration and read its public method signatures.
+         When the return type is the generic `Namespace` (a Proxy alias
+         that doesn't itself declare the ergonomic methods), fall back to
+         the `<Capitalized>Namespace` subclass — convention matching
+         `_dx_namespaces.ts` (UsageNamespace, CostNamespace, EventsNamespace).
+    """
+    text = _ts_collect_dts_text(src)
+
+    moolabs_body = _ts_extract_class_block(text, "Moolabs")
+    if moolabs_body is None:
+        return []
+
+    # Accessors on Moolabs:
+    #   v0.2: `usage: UsageApi;`           — field
+    #   v0.3: `get usage(): Namespace;`    — getter
+    field_re  = re.compile(r"^\s*(?:public\s+|readonly\s+)?(\w+)\s*:\s*(\w+)\s*;", re.MULTILINE)
+    getter_re = re.compile(r"^\s*(?:public\s+)?get\s+(\w+)\s*\(\s*\)\s*:\s*(\w+)\s*;", re.MULTILINE)
+
+    accessors: list[tuple[str, str]] = []
+    for m in field_re.finditer(moolabs_body):
+        accessors.append((m.group(1), m.group(2)))
+    for m in getter_re.finditer(moolabs_body):
+        accessors.append((m.group(1), m.group(2)))
+
+    method_pat = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9]*)\s*[<(]", re.MULTILINE)
+    out: list[Namespace] = []
+    seen_paths: set[str] = set()
+
+    for attr_name, declared_type in accessors:
+        if attr_name.startswith("_"):
             continue
-        text = dts.read_text(errors="ignore")
-        m = moolabs_block.search(text)
-        if not m:
+
+        # Resolve which class to extract methods from. Generic `Namespace`
+        # (v0.3 Proxy alias) doesn't declare ergonomic methods — fall back
+        # to convention `<Capitalized>Namespace`.
+        candidates: list[str] = [declared_type]
+        if declared_type == "Namespace":
+            candidates.append(f"{attr_name.capitalize()}Namespace")
+
+        methods: list[str] = []
+        for cls in candidates:
+            body = _ts_extract_class_block(text, cls)
+            if body is None:
+                continue
+            for m in method_pat.finditer(body):
+                name = m.group(1)
+                if name.startswith("_") or name == "constructor":
+                    continue
+                methods.append(name)
+
+        path = f"client.{attr_name}"
+        if path in seen_paths:
             continue
-        body = m.group(1)
-        # Top-level resources on Moolabs
-        for line in body.splitlines():
-            assign_match = re.match(r"\s*(?:public\s+|readonly\s+)?(\w+):\s*(\w+)\s*;", line)
-            if not assign_match:
-                continue
-            attr_name, resource_cls = assign_match.groups()
-            if attr_name.startswith("_"):
-                continue
-            # Locate the resource class definition and extract its methods
-            res_block = re.search(rf"class\s+{re.escape(resource_cls)}[^{{]*\{{([^}}]+)\}}", text, re.DOTALL)
-            if not res_block:
-                continue
-            methods = method_pat.findall(res_block.group(1))
-            methods = sorted({m for m in methods if not m.startswith("_") and m != "constructor"})
-            path = f"client.{attr_name}"
-            if path not in seen and methods:
-                namespaces.append(Namespace(path=path, methods=methods))
-                seen.add(path)
-    return namespaces
+        methods = sorted(set(methods))
+        if methods:
+            out.append(Namespace(path=path, methods=methods))
+            seen_paths.add(path)
+
+    return out
 
 
 def introspect_go(src: Path) -> list[Namespace]:
     """Run `go doc -all ./...` and parse the public type/method surface.
 
     Go is **P0** (Decision #2 reversed 2026-05-28 — first customer is Go). This
-    introspector must verify the normalized client surface against `dx_client.go`
-    (`client.Usage.IngestEvents`, `client.Cost.IngestEventsBatch`) — NOT the SDK
-    README, which still documents the stale `client.Meter.Events.*` shape. Full
-    implementation tracked with the Go adapter work; returns an empty list until
-    then (callers fall back to the structured-log rail for Go cost emission).
+    introspector must verify the v0.3.0-rc1 unified-ingest surface against
+    `dx_client.go`: `client.Usage.IngestEvent`, `client.Cost.IngestEvent`,
+    `client.Events.Ingest` — NOT the SDK README, which has historically lagged
+    behind the dx_client.go shape. Full implementation tracked with the Go
+    adapter work; returns an empty list until then (the codemod refuses to
+    emit a Go helper while the snapshot is empty — `unified_ingest_present`
+    will be False, which the main loop converts to CRITICAL).
     """
     return []
 
 
 def build_capabilities(lang_snap: LanguageSnapshot, lang: str) -> dict[str, Any]:
-    """Compute capability flags from the introspected namespaces."""
-    usage_present = lang_snap.has_method(EXPECTED_METHODS[lang][0]) if EXPECTED_METHODS[lang] else False
-    cost_method_path: str | None = None
-    for candidate in COST_EVENT_CANDIDATES.get(lang, []):
-        if lang_snap.has_method(candidate):
-            cost_method_path = candidate
-            break
+    """Compute v0.3.0-rc1 capability flags from the introspected namespaces.
+
+    v0.3 unified-ingest contract: helpers hard-call three singular ergonomic
+    methods (one per lane). Each flag answers "does this lane's method exist?"
+    The codemod refuses to proceed unless `unified_ingest_present` is True —
+    there is no fallback rendering path in the v0.3 helpers.
+    """
+    expected = EXPECTED_METHODS.get(lang, {})
+
+    usage_path = expected.get("usage")
+    cost_path = expected.get("cost")
+    events_path = expected.get("events")
+
+    # Empty-namespaces guard: the Go introspector currently returns []. Treat
+    # missing-snapshot as "lane not present" — the main loop converts this
+    # into a CRITICAL drift entry per language.
+    has_namespaces = bool(lang_snap.namespaces)
+
+    usage_present = bool(has_namespaces and usage_path and lang_snap.has_method(usage_path))
+    cost_present = bool(has_namespaces and cost_path and lang_snap.has_method(cost_path))
+    events_present = bool(has_namespaces and events_path and lang_snap.has_method(events_path))
+
     return {
-        "usage_event_emit": usage_present,
-        "cost_event_direct_emit": cost_method_path is not None,
-        "cost_event_method_path": cost_method_path,
+        "unified_ingest_present": usage_present and cost_present and events_present,
+        "usage_ergonomic_ingest": usage_present,
+        "cost_ergonomic_ingest": cost_present,
+        "events_unified_namespace": events_present,
+        "usage_method_path": usage_path if usage_present else None,
+        "cost_method_path": cost_path if cost_present else None,
+        "events_method_path": events_path if events_present else None,
     }
 
 
@@ -519,7 +692,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lang", action="append", choices=["python", "typescript", "go"])
     args = ap.parse_args(argv)
 
-    langs = args.lang or ["python", "typescript"]  # Go deferred per v1 scope
+    # Default to py+ts because the Go introspector is still a stub (returns [])
+    # — passing it here would yield CRITICAL on every run. Once introspect_go
+    # has a real implementation, add "go" to the default. Decision #2 (Go=P0)
+    # was reversed 2026-05-28; the deferral is purely about THIS introspector
+    # being incomplete, not about Go's product priority.
+    langs = args.lang or ["python", "typescript"]
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="moolabs-sdk-"))
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -572,27 +750,36 @@ def main(argv: list[str] | None = None) -> int:
         }
         snapshot.namespaces[lang] = namespaces
 
-        # Compute capabilities per language; the first language to report
-        # cost_event_direct_emit=true wins (they're auto-generated from one
-        # OpenAPI spec, so they should agree — but we record the first match).
+        # Compute v0.3.0-rc1 capabilities per language. Cross-language merge
+        # is strict-AND for every lane: the codemod is cross-platform and only
+        # proceeds when EVERY inspected SDK exposes the unified-ingest surface.
+        # Method paths are language-specific, so we keep the first language's
+        # path for downstream renderer reference (renderers select by `lang`
+        # anyway — this is just for the snapshot YAML).
         caps = build_capabilities(snap, lang)
         if not snapshot.capabilities:
             snapshot.capabilities = caps
         else:
-            # Merge: usage must be true in ALL inspected languages; cost is
-            # true if ANY inspected language has it (defensive).
-            snapshot.capabilities["usage_event_emit"] = (
-                snapshot.capabilities["usage_event_emit"] and caps["usage_event_emit"]
-            )
-            if caps["cost_event_direct_emit"] and not snapshot.capabilities["cost_event_direct_emit"]:
-                snapshot.capabilities["cost_event_direct_emit"] = True
-                snapshot.capabilities["cost_event_method_path"] = caps["cost_event_method_path"]
+            for flag in (
+                "unified_ingest_present",
+                "usage_ergonomic_ingest",
+                "cost_ergonomic_ingest",
+                "events_unified_namespace",
+            ):
+                snapshot.capabilities[flag] = (
+                    snapshot.capabilities[flag] and caps[flag]
+                )
+            # Keep the first non-None method path seen across languages.
+            for path_key in ("usage_method_path", "cost_method_path", "events_method_path"):
+                if snapshot.capabilities.get(path_key) is None and caps.get(path_key):
+                    snapshot.capabilities[path_key] = caps[path_key]
 
-        # Contract drift: expected methods MUST be present
-        for expected in EXPECTED_METHODS.get(lang, []):
+        # Contract drift: every expected method MUST be present. EXPECTED_METHODS
+        # is now keyed by lane ("usage" / "cost" / "events") → dotted path.
+        for lane, expected in EXPECTED_METHODS.get(lang, {}).items():
             if not snap.has_method(expected):
                 snapshot.contract_drift["missing_expected_methods"].append(
-                    f"{lang}: {expected}"
+                    f"{lang}: {expected} (lane={lane})"
                 )
 
     out_dir = Path(args.customer_context_dir)
@@ -608,8 +795,23 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if not snapshot.capabilities.get("usage_event_emit"):
-        print("CRITICAL: usage_event_emit=false; codemod MUST NOT proceed", file=sys.stderr)
+    # v0.3.0-rc1 helpers hard-call client.usage.ingest_event /
+    # client.cost.ingest_event / client.events.ingest. There is no fallback
+    # rendering path — if any lane is missing the codemod must NOT proceed.
+    if not snapshot.capabilities.get("unified_ingest_present"):
+        missing_lanes = [
+            lane for lane, flag in (
+                ("usage",  "usage_ergonomic_ingest"),
+                ("cost",   "cost_ergonomic_ingest"),
+                ("events", "events_unified_namespace"),
+            ) if not snapshot.capabilities.get(flag)
+        ]
+        print(
+            "CRITICAL: unified_ingest_present=false; codemod MUST NOT proceed.\n"
+            f"  Missing ergonomic lane(s): {', '.join(missing_lanes) or 'unknown'}\n"
+            "  v0.3.0-rc1 helpers have no fallback rendering path.",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

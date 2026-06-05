@@ -189,17 +189,26 @@ patterns = ["sibling-pair","usage-only","cost-only"]
 
 pass_count, fail_count = 0, 0
 
-# Helper-template renders (per-service, capability-true)
+# Helper-template renders. v0.3.0-rc1 helpers no longer branch on capability
+# flags — they unconditionally call client.{usage,cost}.ingest_event /
+# client.events.ingest. The capability dict is kept here only because some
+# legacy includes may still read it during transition; the `no_legacy`
+# rendered-output assertions below verify the OLD flag names cannot leak.
 helper_ctx = {
     "service_slug": "test-svc",
     "signoff_chain_hashes": [],
     "sdk_key_location": {"strategy": "env_var"},
     "sdk_key_read_pattern": "",
-    "sdk_pinned_version": "v0.2.0-rc9",
+    "sdk_pinned_version": "v0.3.0-rc1",
     "telemetry": {"mode": "brownfield"},
     "capabilities": {
-        "cost_event_direct_emit": True,
-        "cost_event_method_path": "client.cost.ingest_events_batch",
+        "unified_ingest_present": True,
+        "usage_ergonomic_ingest": True,
+        "cost_ergonomic_ingest": True,
+        "events_unified_namespace": True,
+        "usage_method_path": "client.usage.ingest_event",
+        "cost_method_path": "client.cost.ingest_event",
+        "events_method_path": "client.events.ingest",
     },
 }
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
