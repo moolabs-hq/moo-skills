@@ -429,11 +429,23 @@ for tpl in templates:
                 print(f"  FAIL  {tpl}[{pat}]: py syntax error: {e.msg}")
                 fail_count += 1; continue
 
-        # TS: cost call must be awaited (post-async helper)
-        if tpl.startswith("typescript-") and pat in ("sibling-pair", "cost-only"):
-            if "emitCostEventSafe(" in r and "await emitCostEventSafe(" not in r:
-                print(f"  FAIL  {tpl}[{pat}]: emitCostEventSafe is async; callsite missing await")
-                fail_count += 1; continue
+        # TS: every async helper call must be awaited at the callsite. All three
+        # helpers are Promise-returning (`emitUsageEventSafe`, `emitCostEventSafe`,
+        # `emitEventSafe`). A missing `await` produces a dangling Promise — the
+        # SDK call still fires but the caller doesn't wait, so any error handling
+        # (env-gated throw OR structured-log rail) races against the next handler
+        # statement. The previous check only covered emitCostEventSafe; extended
+        # to all three so a future template edit that forgets await fails loudly.
+        if tpl.startswith("typescript-"):
+            await_fail = False
+            for fn in ("emitUsageEventSafe", "emitCostEventSafe", "emitEventSafe"):
+                if f"{fn}(" in r and f"await {fn}(" not in r:
+                    print(f"  FAIL  {tpl}[{pat}]: {fn} is async; callsite missing await")
+                    fail_count += 1
+                    await_fail = True
+                    break
+            if await_fail:
+                continue
 
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
