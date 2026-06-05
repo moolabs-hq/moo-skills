@@ -410,11 +410,11 @@ For each insert, pick the right adapter and pattern. Every emission MUST go thro
 
 **Pattern selection (deterministic, from `output-input-map.yaml`):**
 
-| Condition | Pattern | Helper calls emitted |
+| Condition | Pattern | Helper call emitted (v0.3.0-rc1) |
 |---|---|---|
-| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_cost_event_safe(...)` + `emit_usage_event_safe(...)` |
+| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_event_safe(...)` — single call carrying BOTH lanes in one envelope (US-008 / `client.events.ingest`); `entity_id` threads the lanes for downstream join |
 | Usage event has no inputs in this handler (terminal-only) | usage-only | `emit_usage_event_safe(...)` only |
-| Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only | `emit_cost_event_safe(...)` only — helper picks SDK or OTel-span transport per Phase 1.5 snapshot |
+| Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only | `emit_cost_event_safe(...)` only — unconditionally routes to `client.cost.ingest_event(args)`; SDK's in-process buffer + structured-log rail handle never-drop. No transport-picking branch (Phase 1.5's `unified_ingest_present` already refused-to-run if the method is missing). |
 
 **Adapter selection (from `repo-profile.yaml`):**
 
