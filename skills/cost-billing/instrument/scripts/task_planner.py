@@ -458,12 +458,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # NOTE: feature_key is NOT required — per-callsite templates derive it from
     # entry.workflow_id at render time. Customers don't need a middleware-set source.
-    required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
-    missing = [k for k in required if k not in attribution_defaults]
-    if missing:
+    #
+    # FR-3: tenant_id is NOT required. The v0.3.0-rc1 SDK derives tenant identity
+    # server-side from the API key; the helpers do not pass it on the wire and the
+    # planner doesn't need it bound to render correctly. Discovery may still emit
+    # the tenant_id binding for forensic / audit purposes — accepted but optional.
+    #
+    # consumer_agent is OPTIONAL metadata — a customer may legitimately have no
+    # binding for it (the example fixture sets source: null with confidence n_a).
+    # It is not required.
+    #
+    # Two keys are required AND must be bound to a non-null source expression:
+    # customer_id (billing identity) and request_id (entity_id threading key).
+    # A null binding for either silently degrades downstream data quality —
+    # customer_id null buckets every emission under a literal "unknown" customer;
+    # request_id null defeats sibling-pair cross-lane joins. The gate must catch
+    # both "key absent" AND "key present but source is null" cases.
+    required = ["customer_id", "request_id"]
+    missing_or_null = [
+        k for k in required
+        if attribution_defaults.get(k) is None  # covers both missing-key and source: null
+    ]
+    if missing_or_null:
         sys.stderr.write(
-            f"REFUSING TO RUN: attribution-bindings.yaml is missing required keys: {missing}\n"
-            f"  Run Phase 1.6 again to confirm them (use --reconfirm if needed).\n"
+            f"REFUSING TO RUN: attribution-bindings.yaml is missing or null for required keys: {missing_or_null}\n"
+            f"  Each key must be bound to a non-null source expression (e.g. 'request.state.customer_id').\n"
+            f"  A source: null binding is treated as 'not bound' — re-run Phase 1.6 to confirm.\n"
         )
         return 2
 

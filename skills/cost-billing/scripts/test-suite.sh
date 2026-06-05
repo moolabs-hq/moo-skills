@@ -438,18 +438,28 @@ for tpl in templates:
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
 
-# CODEX-REGRESSION-4: example attribution-bindings satisfies planner gate
+# Planner refuse-to-run gate: example attribution-bindings must satisfy it.
+# v0.3.0-rc1 (FR-3): tenant_id is NOT required by the helpers or the planner —
+# the SDK derives tenant identity server-side from the API key. consumer_agent
+# is optional metadata. customer_id and request_id are the only required keys,
+# and they must be bound to non-null source expressions (a `source: null`
+# binding is treated as "not bound" by the planner's gate at
+# task_planner.py:`missing_or_null` check).
 bindings_yaml = suite_root / "examples" / "attribution-bindings.yaml"
 import yaml
 b = yaml.safe_load(bindings_yaml.read_text())
-required = ["tenant_id", "customer_id", "request_id", "consumer_agent"]
-declared = list((b.get("bindings") or {}).keys())
-missing = [k for k in required if k not in declared]
-if missing:
-    print(f"  FAIL  examples/attribution-bindings.yaml: missing required keys {missing} (Codex Finding #4)")
+required = ["customer_id", "request_id"]
+bindings = b.get("bindings") or {}
+missing_or_null = [
+    k for k in required
+    if not isinstance(bindings.get(k), dict)
+       or bindings[k].get("source") is None
+]
+if missing_or_null:
+    print(f"  FAIL  examples/attribution-bindings.yaml: missing or null source for required keys {missing_or_null}")
     fail_count += 1
 else:
-    print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate")
+    print(f"  PASS  examples/attribution-bindings.yaml satisfies planner refuse-to-run gate (v0.3 FR-3)")
     pass_count += 1
 
 print(f"\n  Phase-7 result: {pass_count} pass, {fail_count} fail")
