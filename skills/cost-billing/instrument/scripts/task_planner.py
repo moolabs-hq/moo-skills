@@ -215,13 +215,20 @@ def _attribution_keys_for(framework: str) -> list[str]:
     """Default attribution-key allowlist per framework (legacy — kept for
     back-compat). Real source of truth is `.moolabs/customer-context/
     attribution-bindings.yaml` from Phase 1.6.
+
+    FR-3 (2026-06-05): `tenant_id` removed from every framework's default list.
+    The v0.3.0-rc1 SDK derives tenant identity server-side from the API key;
+    the helpers do not pass it on the wire and the templates do not render it.
+    Carrying it in this legacy list created a spurious "valid attribution key"
+    that callers downstream might surface as required. Dropped to keep the
+    legacy defaults consistent with the v0.3 helper contract.
     """
     if framework == "fastapi":
-        return ["tenant_id", "customer_id", "feature_key", "request_id", "consumer_agent"]
+        return ["customer_id", "feature_key", "request_id", "consumer_agent"]
     if framework in ("express", "nestjs", "nextjs"):
-        return ["tenant_id", "customer_id", "feature_key", "request_id"]
+        return ["customer_id", "feature_key", "request_id"]
     if framework == "django":
-        return ["tenant_id", "customer_id", "feature_key", "request_id"]
+        return ["customer_id", "feature_key", "request_id"]
     return ["request_id", "customer_id"]
 
 
