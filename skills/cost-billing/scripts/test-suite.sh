@@ -323,15 +323,49 @@ for tpl in templates:
                 print(f"  FAIL  {tpl}[{pat}]: references undefined _moolabsEventId (Codex Finding #2)")
                 fail_count += 1; continue
 
-        # Sibling-pair must wire both ids
-        if pat == "sibling-pair":
-            if tpl.startswith("python-"):
-                ok = "_moolabs_event_id" in r and "event_id=_moolabs_event_id" in r and "usage_event_id=_moolabs_event_id" in r
-            else:
-                ok = "_moolabsEventId" in r and "eventId: _moolabsEventId" in r and "usageEventId: _moolabsEventId" in r
+        # Per-pattern method-presence checks.
+        if tpl.startswith("python-"):
+            # v0.3.0 ergonomic methods + entity_id linking. The Codex Finding #1
+            # "_moolabs_event_id" shared-id dance is obsolete in v0.3 (Events.Ingest
+            # is a single call; entity_id is the cross-lane key, sourced from the
+            # bound request_id or a local uuid fallback).
+            if pat == "sibling-pair":
+                ok = ("emit_event_safe(" in r
+                      and "event_type=" in r and "customer_id=" in r and "entity_id=" in r
+                      and "meter_slug=" in r and "value=" in r and "spans=[" in r)
+                if "emit_usage_event_safe(" in r or "emit_cost_event_safe(" in r:
+                    ok = False
+                reason = "sibling-pair must use emit_event_safe (single dual-lane call)"
+            elif pat == "usage-only":
+                ok = ("emit_usage_event_safe(" in r
+                      and "meter_slug=" in r and "value=" in r
+                      and "emit_event_safe(" not in r and "emit_cost_event_safe(" not in r
+                      and "spans=[" not in r)
+                reason = "usage-only must call emit_usage_event_safe only (no spans, no other emit)"
+            else:  # cost-only
+                ok = ("emit_cost_event_safe(" in r and "spans=[" in r
+                      and "emit_event_safe(" not in r and "emit_usage_event_safe(" not in r
+                      and "meter_slug=" not in r and "value=" not in r)
+                reason = "cost-only must call emit_cost_event_safe only (no meter_slug/value, no other emit)"
+            # v0.2 top-level kwargs must NOT appear (FR-3 + helper-signature contract).
+            no_v2 = ("tenant_id=" not in r and "usage_event_id=" not in r
+                     and "subject=" not in r and "quantity=" not in r and " unit=" not in r
+                     and "feature_key=" not in r and "attributes=" not in r
+                     and "kind=" not in r and " data=" not in r)
             if not ok:
-                print(f"  FAIL  {tpl}[{pat}]: sibling-pair missing shared event_id wiring")
+                print(f"  FAIL  {tpl}[{pat}]: {reason}")
                 fail_count += 1; continue
+            if not no_v2:
+                print(f"  FAIL  {tpl}[{pat}]: v0.2 top-level kwarg leaked (tenant_id/usage_event_id/subject/quantity/unit/feature_key=/attributes/kind=/data=)")
+                fail_count += 1; continue
+        else:
+            # TS callsites still on v0.2 — followup will migrate them. Keep the
+            # existing Codex Finding shared-id check.
+            if pat == "sibling-pair":
+                ok = "_moolabsEventId" in r and "eventId: _moolabsEventId" in r and "usageEventId: _moolabsEventId" in r
+                if not ok:
+                    print(f"  FAIL  {tpl}[{pat}]: sibling-pair missing shared event_id wiring (v0.2)")
+                    fail_count += 1; continue
 
         # Python: ast-compile rendered output
         if tpl.startswith("python-"):
