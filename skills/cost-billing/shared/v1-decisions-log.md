@@ -22,9 +22,16 @@
 
 > **Decision 3 — status update (2026-05-28; supersedes the v1 default in row 3 above):** The revisit trigger fired. The unified SDK ships the cost-event endpoint **today**: `client.cost.ingest_events_batch` (capability `"cost"` → `CostEventsApi` + `SdkIngestApi` on the `acute` backend per `_dx_routing.CAPABILITY_MAP`), verified against `moolabs-py` source on 2026-05-28. The earlier guess `client.meter.cost.ingest_events()` was wrong — it's a flat capability namespace, `client.cost.*`, routed internally to `acute.{base_url}`.
 >
-> **What changed for the codemod:** Phase 1.5 introspection (`scripts/sdk_snapshot.py`) sets `cost_event_direct_emit=true` when the pinned SDK exposes the cost method. When true, the helper's **PRIMARY** cost transport is the direct `client.cost.ingest_events_batch` call; OTel span + structured log become the recovery rail (the never-drop contract is unchanged). Cost-only call sites are **no longer TODO-blocked** — they emit the direct call. The `# TODO` annotation remains **only** for the genuine case where a customer's pinned SDK predates the cost endpoint (`cost_event_direct_emit=false`).
+> **What changed for the codemod (v0.2.0-rc9 era):** Phase 1.5 introspection emitted a `cost_event_direct_emit` capability flag and the helper used it to branch between a direct SDK call and an OTel-span dual-transport recovery rail.
 >
 > **Namespace-shape correction:** row 3 also states the client exposes `client.cls.*` + `client.meter.*` — that was likewise wrong. The shipped SDK has **11 flat capability namespaces**; usage is `client.usage.*` (capability "usage" → EventsApi), cost is `client.cost.*`. There is no `client.cls.*` or `client.meter.events.*`. (Reconciled across the suite 2026-05-28 — "Error B".)
+>
+> **Decision 3 — second status update (2026-06-05; supersedes the 2026-05-28 update above):** v0.3.0-rc1 ships the **unified-ingest ergonomic surface** (US-006 / US-007 / US-008). Three new singular methods on customer-facing wrappers in `_dx_namespaces.{py,ts}`:
+>   - `client.usage.ingest_event(args)` — replaces v0.2 plural `ingest_events([...])` as primary.
+>   - `client.cost.ingest_event(args)` — replaces v0.2 plural `ingest_events_batch([...])` as primary.
+>   - `client.events.ingest(args)` — new sibling-pair lane; carries usage + cost in one envelope via per-span cost breakdowns. Mounted via `@property` on `Moolabs` (NOT in `CAPABILITY_MAP`).
+>
+> **What this changed for the codemod (current state):** helpers call the three v0.3 ergonomic methods unconditionally. The `cost_event_direct_emit` capability flag was deleted; Phase 1.5 now emits `unified_ingest_present` (AND of all three lanes) and refuses-to-run if any lane is missing — there is no fallback rendering path. `tenant_id` is no longer in the helper envelope (FR-3 — derived server-side from API key). `entity_id` replaced `usage_event_id` as the sibling-pair join key. Error handling is env-gated by `SDK_DEVELOPMENT` (strict-throw in dev, structured-log rail in prod). The OTel-span dual-transport branch was removed — the SDK's in-process buffer handles never-drop internally.
 >
 
 > **Decision 2 — REVERSED (2026-05-28; supersedes row 2):** Go is promoted from
@@ -36,13 +43,15 @@
 > 2026-05-28), min Go 1.18. Java stays v2.
 >
 > **What this requires (in progress):** a Go `internal/moolabsclient` helper
-> (`EmitUsageEventSafe`/`EmitCostEventSafe`, dual-transport, capability-gated cost
-> direct emit) grounded on `client.Usage.IngestEvents(ctx, events)` +
-> `client.Cost.IngestEventsBatch(...)`; Go HTTP framework callsite templates
-> (net/http, gin, echo, fiber, chi); Go worker/stream-consumer templates (the
-> first customer + meter are Go services with non-HTTP cost sites); and a real
-> Phase-1.5 Go introspector (today `introspect_go` is a stub) so the call shape is
-> verified against `dx_client.go`, never the SDK README (which still documents the
+> (`EmitUsageEventSafe`/`EmitCostEventSafe`/`EmitEventSafe`, env-gated error
+> handling via `SDK_DEVELOPMENT`) grounded on the v0.3.0-rc1 unified-ingest
+> ergonomic methods: `client.Usage.IngestEvent(ctx, args)`,
+> `client.Cost.IngestEvent(ctx, args)`, `client.Events.Ingest(ctx, args)`; Go
+> HTTP framework callsite templates (net/http, gin, echo, fiber, chi); Go
+> worker/stream-consumer templates (the first customer + meter are Go services
+> with non-HTTP cost sites); and a real Phase-1.5 Go introspector (today
+> `introspect_go` is a stub) so the call shape is verified against
+> `dx_client.go`, never the SDK README (which still documents the
 > stale `client.Meter.Events.*` shape — same drift as Error B).
 > The row 3 text above is retained verbatim as the historical record of what was believed pre-2026-05-28.
 

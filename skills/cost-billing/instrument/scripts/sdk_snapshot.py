@@ -71,8 +71,8 @@ _PYTHON_INTERNAL_SUFFIXES = ("_with_http_info", "_without_preload_content")
 
 @dataclass
 class Namespace:
-    path: str           # e.g. "client.meter.events"
-    methods: list[str]  # e.g. ["ingest_events"]
+    path: str           # e.g. "client.usage", "client.cost", "client.events"
+    methods: list[str]  # e.g. ["ingest_event", "ingest_events"]
 
 
 @dataclass

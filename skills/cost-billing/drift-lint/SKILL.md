@@ -49,7 +49,7 @@ See `cost-billing-shared/operating-principles.md`. Drift-lint runs UNATTENDED (C
 ## Read first (shared/)
 
 - `anchor-taxonomy.md` — what entries / events / linkage are; workflow_id matching strategy.
-- `sdk-surface-reference.md` — what SDK calls to detect (`client.usage.*` / `client.cost.*` positive; raw `EventsApi`/`CostEventsApi` + the dead `client.meter.events.*` / `client.cls.*` shapes are anti-patterns).
+- `sdk-surface-reference.md` — what SDK calls to detect (v0.3.0-rc1 positive shapes: `client.usage.ingest_event` / `client.cost.ingest_event` / `client.events.ingest`. Anti-patterns: raw `EventsApi`/`CostEventsApi` direct calls, inline `Moolabs(...)` instantiation, and the dead `client.meter.events.*` / `client.cls.*` shapes that never shipped.)
 - `v1-decisions-log.md` — drift severity rubric (CRITICAL/HIGH/MEDIUM/LOW).
 
 ## Workflow — 3 phases

@@ -102,12 +102,18 @@ $defs:
         type: string
         enum: [sdk-direct-cost, otel-span, structured-log]
         description: |
-          How the cost event reaches Acute. `sdk-direct-cost` =
-          client.cost.ingest_events_batch (primary when the Phase 1.5 snapshot
-          reports cost_event_direct_emit=true). `otel-span` / `structured-log` are
-          the dual-transport recovery rails. (The old `sdk-direct-acute-future` /
-          `sdk-cls-billing` values predated the shipped cost endpoint — see Error A
-          reconciliation 2026-05-28.)
+          How the cost event reaches Acute under v0.3.0-rc1 unified-ingest.
+          `sdk-direct-cost` = `client.cost.ingest_event(...)` (the singular
+          ergonomic method on the `_CostNamespace` wrapper, routed to the
+          ACUTE backend via CostEventsApi + SdkIngestApi). This is the
+          PRIMARY and only path for v0.3+ — Phase 1.5's
+          `unified_ingest_present` gate refuses to run if the method is
+          absent. `otel-span` / `structured-log` are SDK-internal recovery
+          rails the buffer falls back to on transport failure; they are
+          not a customer transport choice anymore. (Historical: v0.2
+          shipped a `cost_event_direct_emit` capability flag that
+          conditionally branched between SDK call and OTel span — that
+          branching no longer exists in v0.3 helpers.)
 
       attribution_keys_available:
         type: array
