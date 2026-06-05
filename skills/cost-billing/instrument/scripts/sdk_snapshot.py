@@ -646,28 +646,76 @@ def yaml_dump(snapshot: Snapshot, dest: Path) -> None:
 
 def parse_signed_yaml(path: Path) -> dict[str, dict[str, str]]:
     """Read .moolabs/chain/04-final.signed.yaml > integration.sdk_package_install
-    without requiring PyYAML. Returns per-language config dict."""
-    # Minimal: look for the sdk_package_install block by line markers.
-    # Real implementation would use PyYAML; this avoids the dep for now.
+    without requiring PyYAML. Returns per-language config dict.
+
+    Indent-tolerant: the previous implementation hard-coded the expected
+    indentation (6 spaces for language keys, 8 spaces for config keys). YAML
+    written with any other indentation (2-space being the most common, but
+    also 4-space) silently returned empty config, causing the main loop to
+    fall through to `strategy=latest-tag` for every language — ignoring the
+    customer's pinned version.
+
+    This implementation computes the indent of the language keys dynamically
+    from the first non-blank line under `sdk_package_install:`, then uses
+    that as the baseline. Config keys are expected at a deeper indent.
+
+    Returns an empty dict only when the block genuinely contains no
+    language entries; the main loop emits a warning in that case rather
+    than silently using `latest-tag`.
+    """
     text = path.read_text()
     cfg: dict[str, dict[str, str]] = {}
-    block_re = re.compile(
-        r"sdk_package_install:\s*\n((?:\s{4,}.*\n)+)", re.MULTILINE
-    )
-    m = block_re.search(text)
-    if not m:
+
+    # Find the line `<indent>sdk_package_install:` and capture every subsequent
+    # line that is indented strictly deeper than `<indent>` (i.e. inside the
+    # block). Stop at the first line at or below `<indent>` indentation.
+    lines = text.splitlines()
+    block_lines: list[str] = []
+    block_indent: int | None = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip(" ")
+        if stripped.startswith("sdk_package_install:"):
+            block_indent = len(line) - len(stripped)
+            for j in range(i + 1, len(lines)):
+                next_line = lines[j]
+                if not next_line.strip():
+                    block_lines.append(next_line)
+                    continue
+                next_indent = len(next_line) - len(next_line.lstrip(" "))
+                if next_indent <= block_indent:
+                    break
+                block_lines.append(next_line)
+            break
+    if not block_lines:
         return cfg
-    block = m.group(1)
-    current_lang: str | None = None
-    for line in block.splitlines():
+
+    # Determine the language-key indent from the first non-blank line in the
+    # block — that line is one of `<langindent><lang>:`. All language keys
+    # share that indent; config keys are at a deeper indent.
+    lang_indent: int | None = None
+    for line in block_lines:
         if not line.strip():
             continue
-        if re.match(r"\s{6}(python|typescript|go):", line):
-            current_lang = line.strip().rstrip(":")
+        lang_indent = len(line) - len(line.lstrip(" "))
+        break
+    if lang_indent is None:
+        return cfg
+
+    current_lang: str | None = None
+    lang_re = re.compile(rf"^ {{{lang_indent}}}(python|typescript|go):\s*$")
+    cfg_re = re.compile(rf"^ {{{lang_indent + 1},}}(\w+):\s*(.*)$")
+    for line in block_lines:
+        if not line.strip():
+            continue
+        m_lang = lang_re.match(line)
+        if m_lang:
+            current_lang = m_lang.group(1)
             cfg.setdefault(current_lang, {})
-        elif current_lang and re.match(r"\s{8}\w+:", line):
-            key, _, value = line.strip().partition(":")
-            cfg[current_lang][key] = value.strip()
+            continue
+        if current_lang:
+            m_cfg = cfg_re.match(line)
+            if m_cfg:
+                cfg[current_lang][m_cfg.group(1)] = m_cfg.group(2).strip()
     return cfg
 
 
@@ -702,6 +750,14 @@ def main(argv: list[str] | None = None) -> int:
     workdir.mkdir(parents=True, exist_ok=True)
 
     install_cfg = parse_signed_yaml(Path(args.signed_yaml))
+    if Path(args.signed_yaml).exists() and not install_cfg:
+        print(
+            f"WARNING: {args.signed_yaml} exists but no sdk_package_install entries "
+            "were parsed. Every language will fall through to strategy=latest-tag, "
+            "ignoring any customer-pinned versions. Verify the YAML structure includes "
+            "an `integration.sdk_package_install.<lang>.strategy` block.",
+            file=sys.stderr,
+        )
     snapshot = Snapshot(generated_at=datetime.now(timezone.utc).isoformat())
 
     for lang in langs:
