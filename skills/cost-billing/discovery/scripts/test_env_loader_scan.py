@@ -216,5 +216,94 @@ class TypeScriptInsertLineHeuristic(unittest.TestCase):
             self.assertEqual(result.line_to_insert, 5)
 
 
+class GoViper(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.go_patterns = els.group_patterns_by_language(self.catalog)["go"]
+
+    def test_detects_viper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.go"
+            f.write_text(
+                "package config\n"
+                "\n"
+                "import \"github.com/spf13/viper\"\n"
+                "\n"
+                "func Init() {\n"
+                "    viper.SetEnvPrefix(\"APP\")\n"
+                "    viper.AutomaticEnv()\n"
+                "    viper.BindEnv(\"database_url\")\n"
+                "}\n"
+            )
+            result = els.scan_file(f, self.go_patterns)
+            self.assertEqual(result.pattern_id, "go-viper")
+            self.assertEqual(result.confidence, "high")
+
+
+class GoEnvconfig(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.go_patterns = els.group_patterns_by_language(self.catalog)["go"]
+
+    def test_detects_envconfig(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.go"
+            f.write_text(
+                "package config\n"
+                "\n"
+                "import \"github.com/kelseyhightower/envconfig\"\n"
+                "\n"
+                "type Config struct {\n"
+                "    DatabaseURL string `envconfig:\"DATABASE_URL\" required:\"true\"`\n"
+                "    RedisURL    string `envconfig:\"REDIS_URL\"`\n"
+                "}\n"
+            )
+            result = els.scan_file(f, self.go_patterns)
+            self.assertEqual(result.pattern_id, "go-envconfig")
+
+
+class GoOsGetenv(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.go_patterns = els.group_patterns_by_language(self.catalog)["go"]
+
+    def test_detects_os_getenv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.go"
+            f.write_text(
+                "package config\n"
+                "\n"
+                "import \"os\"\n"
+                "\n"
+                "var DatabaseURL = os.Getenv(\"DATABASE_URL\")\n"
+                "var RedisURL = os.Getenv(\"REDIS_URL\")\n"
+            )
+            result = els.scan_file(f, self.go_patterns)
+            self.assertEqual(result.pattern_id, "go-os-getenv")
+
+
+class GoEnvconfigInsertLine(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.go_patterns = els.group_patterns_by_language(self.catalog)["go"]
+
+    def test_envconfig_insert_line_is_inside_struct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.go"
+            f.write_text(
+                "package config\n"                                                     # 1
+                "\n"                                                                    # 2
+                "import \"github.com/kelseyhightower/envconfig\"\n"                     # 3
+                "\n"                                                                    # 4
+                "type Config struct {\n"                                                # 5
+                "    DatabaseURL string `envconfig:\"DATABASE_URL\"`\n"                # 6
+                "    RedisURL    string `envconfig:\"REDIS_URL\"`\n"                   # 7
+                "}\n"                                                                   # 8
+            )
+            result = els.scan_file(f, self.go_patterns)
+            # Insertion point: last field of the struct → line 7.
+            self.assertEqual(result.line_to_insert, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

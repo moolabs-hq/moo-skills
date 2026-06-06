@@ -216,6 +216,47 @@ def _ts_insert_line(text: str, opening_pattern: str) -> int:
     return 1
 
 
+def _go_insert_line(text: str, opening_pattern: str) -> int:
+    """For Go struct/func patterns: find the last content line inside the
+    first matched balanced-brace block (1-indexed). Same shape as
+    _ts_insert_line but tuned for Go's `type X struct { ... }` and
+    `func X() { ... }` layouts.
+
+    For Go patterns the structural signal often matches individual field/
+    statement lines (e.g. envconfig struct tags, viper.BindEnv calls) rather
+    than the block opener itself.  In that case we return the last matching
+    line — the natural place to append the next field or call.  If the first
+    match opens a brace block we delegate to _ts_insert_line's depth-tracking
+    logic.
+    """
+    lines = text.splitlines()
+    opening_re = re.compile(opening_pattern)
+
+    # Collect all matching line numbers.
+    matching: list[int] = []
+    for i, line in enumerate(lines, start=1):
+        if opening_re.search(line):
+            matching.append(i)
+
+    if not matching:
+        # Fallback: last non-blank line.
+        for i in range(len(lines), 0, -1):
+            if lines[i - 1].strip():
+                return i
+        return 1
+
+    first_match_line = matching[0]
+    first_match_text = lines[first_match_line - 1]
+
+    # If the first match opens a brace block, use TS depth-tracking.
+    if first_match_text.count("{") > first_match_text.count("}"):
+        return _ts_insert_line(text, opening_pattern)
+
+    # Otherwise (field-level or statement-level signal): return the last
+    # matching line — the natural append point for the next field/call.
+    return matching[-1]
+
+
 def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
     """Scan a single file against the patterns. Return the highest-confidence
     match, or None if no pattern reaches the LOW threshold."""
@@ -255,8 +296,9 @@ def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
                     line_to_insert = _python_insert_line(text, p.structural_signals[0])
                 elif p.language == "typescript":
                     line_to_insert = _ts_insert_line(text, p.structural_signals[0])
+                elif p.language == "go":
+                    line_to_insert = _go_insert_line(text, p.structural_signals[0])
                 else:
-                    # Go inserts handled in Task 5
                     line_to_insert = _python_insert_line(text, p.structural_signals[0])
             best = ScanResult(
                 pattern_id=p.id,
