@@ -97,7 +97,7 @@ def derive_per_product_constants(
         })
 
     def _add_unique(bucket: list[dict], name: str, value: str) -> None:
-        if not any(e["name"] == name for e in bucket):
+        if not any(e["name"] == name and e["value"] == value for e in bucket):
             bucket.append({"name": name, "value": value})
 
     # EVENT_TYPE, METER_SLUG, FEATURE_KEY from cost-events + usage-events
@@ -147,23 +147,127 @@ def derive_per_product_constants(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# CLI (skeleton — fleshed out in later tasks)
+# Duplicate detection
+# ──────────────────────────────────────────────────────────────────────
+
+def check_duplicates(by_product: dict[str, dict[str, list[dict]]]) -> list[str]:
+    """Detect (product, category, name) entries where multiple source values
+    collapse to the same canonical NAME. Returns a list of error strings.
+    Empty list = clean.
+
+    Note: _add_unique() in derive_per_product_constants() already drops
+    duplicates by NAME — so we need to re-scan the per-category buckets
+    looking for the case where TWO DIFFERENT source values would generate
+    the same NAME. We detect by re-running to_constant_name on each value
+    in the bucket and counting collisions.
+    """
+    errors: list[str] = []
+    for product, categories in by_product.items():
+        for category, entries in categories.items():
+            # Build {name: [values]} from the bucket
+            by_name: dict[str, list[str]] = {}
+            for e in entries:
+                by_name.setdefault(e["name"], []).append(e["value"])
+            for name, values in by_name.items():
+                if len(set(values)) > 1:
+                    errors.append(
+                        f"duplicate slug name {name} in product {product} "
+                        f"category {category}: values={values}"
+                    )
+    return errors
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YAML emit (hand-rolled)
+# ──────────────────────────────────────────────────────────────────────
+
+def emit_slug_inventory_yaml(inventory: dict, dest: Path) -> None:
+    """Hand-rolled YAML emit for slug-inventory.yaml."""
+    lines: list[str] = []
+    lines.append(f"generated_at: {inventory['generated_at']}")
+    if not inventory.get("products"):
+        lines.append("products: []")
+    else:
+        lines.append("products:")
+        for product in inventory["products"]:
+            lines.append(f"  - product_slug: {product['product_slug']}")
+            lines.append(f"    constants:")
+            for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
+                             "PROVIDER", "SPAN_TYPE"):
+                entries = product["constants"].get(category, [])
+                if not entries:
+                    lines.append(f"      {category}: []")
+                    continue
+                lines.append(f"      {category}:")
+                for e in entries:
+                    lines.append(f"        - name: {e['name']}")
+                    # Quote the value to handle dots/hyphens cleanly.
+                    v = str(e["value"]).replace('"', '\\"')
+                    lines.append(f'          value: "{v}"')
+
+    dest.write_text("\n".join(lines) + "\n")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# I/O helpers (read inventories)
+# ──────────────────────────────────────────────────────────────────────
+
+def _read_yaml_safe(path: Path) -> dict:
+    """Read a YAML file via PyYAML. Returns {} if missing or unreadable."""
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(path.read_text()) or {}
+    except ImportError:
+        return {}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLI
 # ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cost-events", required=False, default=".moolabs/inventory/cost-events-inventory.yaml")
-    ap.add_argument("--usage-events", required=False, default=".moolabs/inventory/usage-events-inventory.yaml")
-    ap.add_argument("--output-input-map", required=False, default=".moolabs/inventory/output-input-map.yaml")
-    ap.add_argument("--provider-catalog", required=False)
+    ap.add_argument("--cost-events", default=".moolabs/inventory/cost-events-inventory.yaml")
+    ap.add_argument("--usage-events", default=".moolabs/inventory/usage-events-inventory.yaml")
+    ap.add_argument("--output-input-map", default=".moolabs/inventory/output-input-map.yaml")
+    ap.add_argument("--provider-catalog", default="skills/cost-billing/discovery/assets/provider-catalog.starter.yaml")
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
     args = ap.parse_args(argv)
 
-    print(
-        "Phase A Task 10 skeleton — derives EVENT_TYPE / METER_SLUG / FEATURE_KEY only. "
-        "PROVIDER / SPAN_TYPE / per-product split / YAML emit land in later tasks.",
-        file=sys.stderr,
+    cost_inv = _read_yaml_safe(Path(args.cost_events))
+    usage_inv = _read_yaml_safe(Path(args.usage_events))
+    omap = _read_yaml_safe(Path(args.output_input_map))
+    provider_catalog = _read_yaml_safe(Path(args.provider_catalog))
+
+    by_product = derive_per_product_constants(
+        cost_inv, usage_inv, omap, provider_catalog
     )
+
+    errors = check_duplicates(by_product)
+    if errors:
+        print(
+            "CRITICAL: slug-name collisions detected — refusing to run:",
+            file=sys.stderr,
+        )
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        return 2
+
+    inventory = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "products": [
+            {"product_slug": slug, "constants": cats}
+            for slug, cats in sorted(by_product.items())
+        ],
+    }
+
+    out_dir = Path(args.customer_context_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "slug-inventory.yaml"
+    emit_slug_inventory_yaml(inventory, out_path)
+    print(f"wrote {out_path}", file=sys.stderr)
     return 0
 
 

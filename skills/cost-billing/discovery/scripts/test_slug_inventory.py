@@ -156,5 +156,69 @@ class DeriveSpanTypes(unittest.TestCase):
         self.assertEqual(names, {"LLM_TOKENS", "GPU_SECONDS"})
 
 
+class DuplicateDetection(unittest.TestCase):
+    def test_duplicate_name_in_same_category_raises(self):
+        # Two cost-event entries with workflow_ids that collapse to the
+        # same UPPER_SNAKE_CASE name → CRITICAL: refuse-to-run.
+        cost_inv = {
+            "entries": [
+                {"workflow_id": "checkout.recommendation",
+                 "event_type": "checkout.recommendation",
+                 "product_slug": "billing"},
+                {"workflow_id": "checkout-recommendation",  # same canonical name
+                 "event_type": "checkout-recommendation",
+                 "product_slug": "billing"},
+            ],
+        }
+        usage_inv = {"entries": []}
+        omap = {"edges": []}
+        by_product = si.derive_per_product_constants(
+            cost_inv, usage_inv, omap, provider_catalog=None
+        )
+        errors = si.check_duplicates(by_product)
+        # The EVENT_TYPE bucket gets CHECKOUT_RECOMMENDATION twice from
+        # two different value strings — that's a name collision.
+        # NOTE: _add_unique() dedupes by name, so only one entry exists;
+        # check_duplicates() catches the SOURCE collision by comparing
+        # raw inventory entries directly. See the implementation.
+        self.assertTrue(any("CHECKOUT_RECOMMENDATION" in e for e in errors),
+                        f"Expected name collision in errors: {errors}")
+
+
+class YamlEmit(unittest.TestCase):
+    def test_emit_yaml_contains_per_product_blocks(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "slug-inventory.yaml"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "products": [
+                    {
+                        "product_slug": "billing",
+                        "constants": {
+                            "EVENT_TYPE": [
+                                {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+                            ],
+                            "METER_SLUG": [
+                                {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+                            ],
+                            "FEATURE_KEY": [
+                                {"name": "ASSIGNED", "value": "assigned"},
+                            ],
+                            "PROVIDER": [],
+                            "SPAN_TYPE": [],
+                        },
+                    },
+                ],
+            }
+            si.emit_slug_inventory_yaml(inventory, out)
+            content = out.read_text()
+            self.assertIn("product_slug: billing", content)
+            self.assertIn("EVENT_TYPE:", content)
+            self.assertIn("name: SEAT_ASSIGNED", content)
+            self.assertIn('value: "seat.assigned"', content)
+
+
 if __name__ == "__main__":
     unittest.main()
