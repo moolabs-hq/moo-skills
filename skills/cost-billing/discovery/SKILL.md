@@ -84,7 +84,7 @@ Before scanning a repo, load these from `cost-billing-shared/`:
 - `v1-decisions-log.md` — the §10 v1 calls that shape your defaults (coverage-first, Python+TS, OTel-for-cost, etc.)
 - `gaps-tracker.md` — the §6 open questions you may hit in customer code
 
-## Workflow — 5 phases
+## Workflow — 7 phases (Phase 6/7 added for v0.3 env-routing + slugs)
 
 ### Phase 1: Repo-shape + language detection
 
@@ -216,6 +216,68 @@ Then run `scripts/three_role_views.py` **(aspirational — not yet on disk; see 
 **Single-product/single-service back-compat**: still uses suffixed file names (`pm-view-<only-product>.html`, `engineer-view-<only-service>.html`) — preserves forward-compat with no retroactive renames when the customer adds a 2nd product.
 
 The HTML previews are static (no server). All reviewers read their respective filtered HTML; engineer also reviews their service's YAML directly. `/cost-billing-signoff` opens the right HTML per persona/scope when it runs.
+
+### Phase 6: Env-loader scan (NEW v0.3 env-routing migration)
+
+Driven by `scripts/env_loader_scan.py`. Walks each declared service and
+detects the customer's env-loading pattern (pydantic-settings v2, pydantic
+v1 BaseSettings, python-decouple, dotenv+os.getenv for Python; zod env
+schema, process.env direct, env-var library for TypeScript; viper,
+kelseyhightower/envconfig, raw os.Getenv for Go). The recognition catalog
+lives at `cost-billing-shared/assets/env-loader-patterns.yaml`.
+
+Granularity is declared by the engineer in bootstrap-team-engineer Q14b:
+- `per-service` — scan each service independently
+- `repo-wide` — scan only the declared `shared_config_path`; every service
+  entry points at the same file
+- `hybrid` — per-service for declared independents, repo-wide for the rest
+- `TBD` — best-effort; the inventory carries `granularity_source:
+  default-fallback` for adversarial-review visibility
+
+The scanner also walks each service's deployment surfaces (Terraform
+`variable {}` blocks, k8s Deployment/StatefulSet manifests with
+`envFrom: secretRef`, docker-compose `environment:` blocks, `.env.example`
+files, Dockerfile `ENV` lines). Each detected surface becomes an entry
+in the per-service `deployment_surfaces` list with an `insert_kind` that
+the instrument-side Phase 1.7 dispatches on.
+
+Output: `.moolabs/customer-context/env-routing-inventory.yaml`. Unrecognized
+patterns and low-confidence matches both flag `stub_required: true`, which
+instrument's Phase 1.7 turns into a generated stub Settings class instead
+of an in-place modification.
+
+### Phase 7: Slug inventory (NEW v0.3 event-slug constants)
+
+Driven by `scripts/slug_inventory.py`. Reads
+`cost-events-inventory.yaml` + `usage-events-inventory.yaml` +
+`output-input-map.yaml` + `provider-catalog.starter.yaml` + the CPO
+bootstrap's product list. Derives per-product canonical slug constants
+across five categories:
+
+- `EVENT_TYPE` — workflow_id / event_type as the canonical name
+- `METER_SLUG` — workflow_id as the routing key
+- `FEATURE_KEY` — second dotted segment of workflow_id (matches the
+  framework callsite template's existing inline derivation)
+- `PROVIDER` — vendor identifiers from provider-catalog (global enum,
+  same per product)
+- `SPAN_TYPE` — canonical span-kind from cost_kind values (per-product,
+  de-duped by name)
+
+Naming convention: `UPPER_SNAKE_CASE` via
+`slug.value.replace(".", "_").replace("-", "_").upper()`.
+
+Duplicate-detection: when two different source values in the same
+(product, category) collapse to the same canonical name (e.g. one entry
+has `checkout.recommendation` and another has `checkout-recommendation`,
+both yielding `CHECKOUT_RECOMMENDATION`), the script refuses-to-run with
+exit code 2 and a CRITICAL message naming every collision. The engineer
+fixes the source data.
+
+Output: `.moolabs/customer-context/slug-inventory.yaml`. Phase B (instrument)
+consumes both inventories: env-routing-inventory drives the helper template's
+`_resolve_api_key()` rewrite + per-service env-wiring tasks; slug-inventory
+drives the per-product slugs module emission + the framework callsite
+template's import-instead-of-literal updates.
 
 ## Degraded modes (recover gracefully)
 
