@@ -612,6 +612,8 @@ else:
 for tpl in templates:
     for pat in patterns:
         entry = {**entry_base, "pattern": pat}
+        if tpl.startswith("typescript-"):
+            entry["slugs_import_path"] = "@/services/moolabs/slugs_billing"
         try:
             r = env.get_template(tpl).render(entry=entry, attribution_sources=sources)
         except Exception as e:
@@ -741,6 +743,32 @@ for tpl in templates:
                 fail_count += 1; continue
             if not no_meter_slug_literal:
                 print(f"  FAIL  {tpl}[{pat}]: meter_slug STRING LITERAL leaked")
+                fail_count += 1; continue
+
+        if tpl.startswith("typescript-"):
+            # Phase C slugs assertions (TS)
+            has_slugs_import = "from '@/services/moolabs/slugs_billing'" in r
+            has_event_type_const = "eventType: EVENT_TYPE_COMPLETION_DELIVERED" in r
+            has_meter_slug_const = ("meterSlug: METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED" in r
+                                    or pat == "cost-only")
+            no_event_type_literal = ("eventType: 'completion.delivered'" not in r
+                                      and 'eventType: "completion.delivered"' not in r)
+            no_meter_slug_literal = ("meterSlug: 'checkout.recommendation.delivered'" not in r
+                                     and 'meterSlug: "checkout.recommendation.delivered"' not in r)
+            if not has_slugs_import:
+                print(f"  FAIL  {tpl}[{pat}]: Phase C TS slugs import missing")
+                fail_count += 1; continue
+            if not has_event_type_const:
+                print(f"  FAIL  {tpl}[{pat}]: TS event_type_const not rendered")
+                fail_count += 1; continue
+            if not has_meter_slug_const:
+                print(f"  FAIL  {tpl}[{pat}]: TS meter_slug_const not rendered")
+                fail_count += 1; continue
+            if not no_event_type_literal:
+                print(f"  FAIL  {tpl}[{pat}]: TS event_type STRING LITERAL leaked")
+                fail_count += 1; continue
+            if not no_meter_slug_literal:
+                print(f"  FAIL  {tpl}[{pat}]: TS meter_slug STRING LITERAL leaked")
                 fail_count += 1; continue
 
         print(f"  PASS  {tpl}[{pat}]")
