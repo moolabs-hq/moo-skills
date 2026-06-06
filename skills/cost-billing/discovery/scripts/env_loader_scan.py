@@ -434,20 +434,38 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                 ))
             continue
 
-        # Kubernetes manifests
+        # Kubernetes manifests — must be a Deployment/StatefulSet/DaemonSet
+        # AND already wire env vars via envFrom: secretRef. A bare workload
+        # manifest that doesn't reference a secret was previously over-detected
+        # (docstring promised envFrom check; implementation didn't). The fix
+        # narrows the recognition so Phase B's checklist hints only fire when
+        # the customer is already using the secret-ref pattern we'd extend.
         if path.suffix in (".yaml", ".yml"):
             text = path.read_text(errors="ignore")
-            if re.search(r'^\s*kind:\s*(Deployment|StatefulSet|DaemonSet)\b',
-                         text, re.MULTILINE):
+            has_workload_kind = bool(re.search(
+                r'^\s*kind:\s*(Deployment|StatefulSet|DaemonSet)\b',
+                text, re.MULTILINE,
+            ))
+            has_envfrom_secretref = bool(re.search(
+                r'envFrom:[\s\S]{0,200}secretRef:', text,
+            ))
+            if has_workload_kind and has_envfrom_secretref:
                 out.append(DeploymentSurface(
                     kind="k8s",
                     path=rel,
                     insert_kind="secret_ref_checklist",
                 ))
                 continue
-            # docker-compose detection by filename
-            if path.name in {"docker-compose.yml", "docker-compose.yaml",
-                             "compose.yml", "compose.yaml"}:
+            # docker-compose detection by filename — accept the standard
+            # filenames PLUS env-/profile-suffix variants like
+            # `docker-compose.prod.yaml`, `compose.staging.yml` that real
+            # repositories ship.
+            name = path.name
+            is_compose = (
+                (name.startswith("docker-compose") or name.startswith("compose"))
+                and name.endswith((".yml", ".yaml"))
+            )
+            if is_compose:
                 if re.search(r'^\s*environment:\s*$', text, re.MULTILINE) or \
                    re.search(r'^\s*environment:\s*\[', text, re.MULTILINE):
                     out.append(DeploymentSurface(

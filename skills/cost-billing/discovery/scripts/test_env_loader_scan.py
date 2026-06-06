@@ -416,6 +416,47 @@ class DeploymentSurfaceScan(unittest.TestCase):
             compose_hits = [s for s in surfaces if s.kind == "docker-compose"]
             self.assertEqual(len(compose_hits), 1)
 
+    def test_detects_env_suffixed_compose_filenames(self):
+        """Real customer repos ship docker-compose.prod.yaml,
+        docker-compose.staging.yml, compose.dev.yaml, etc. The whitelist
+        was previously docker-compose.yml/yaml + compose.yml/yaml only —
+        these variants were silently missed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            for name in ("docker-compose.prod.yaml", "docker-compose.staging.yml",
+                         "compose.dev.yml", "compose.production.yaml"):
+                (repo / name).write_text(
+                    "services:\n  app:\n    image: app:latest\n    environment:\n"
+                    "      - DATABASE_URL=postgres://...\n"
+                )
+            surfaces = els.scan_deployment_surfaces(repo)
+            compose_paths = {s.path for s in surfaces if s.kind == "docker-compose"}
+            self.assertEqual(compose_paths, {
+                "docker-compose.prod.yaml", "docker-compose.staging.yml",
+                "compose.dev.yml", "compose.production.yaml",
+            })
+
+    def test_k8s_deployment_without_envfrom_is_not_flagged(self):
+        """A bare Deployment manifest that doesn't use envFrom: secretRef
+        should NOT produce a k8s deployment-surface entry. Previously the
+        detector fired on ANY Deployment kind, inflating the Phase B
+        checklist with services that have no secret-ref pattern to extend."""
+        with tempfile.TemporaryDirectory() as tmp:
+            k8s = Path(tmp) / "infra" / "k8s"
+            k8s.mkdir(parents=True)
+            (k8s / "deployment.yaml").write_text(
+                "apiVersion: apps/v1\n"
+                "kind: Deployment\n"
+                "metadata:\n  name: payments-api\n"
+                "spec:\n  template:\n    spec:\n      containers:\n"
+                "      - name: app\n"
+                "        env:\n"
+                "        - name: DATABASE_URL\n          value: postgres://...\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            k8s_hits = [s for s in surfaces if s.kind == "k8s"]
+            self.assertEqual(k8s_hits, [])
+
     def test_detects_dotenv_example(self):
         with tempfile.TemporaryDirectory() as tmp:
             svc = Path(tmp) / "services" / "payments-api"
