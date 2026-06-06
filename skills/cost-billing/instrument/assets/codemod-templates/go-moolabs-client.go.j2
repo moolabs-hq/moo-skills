@@ -29,6 +29,8 @@ import (
 	"sync"
 
 	moolabs "github.com/moolabs/moolabs-go"
+
+	config "{{ env_config.settings_import_path }}"
 )
 
 // devEnvVar gates strict-vs-lax error handling. Non-empty -> strict (panic);
@@ -56,15 +58,15 @@ func getClient() (*moolabs.Moolabs, error) {
 	return client, clientErr
 }
 
+// resolveAPIKey reads MOOLABS_API_KEY via the customer's config layer (or
+// the generated stub at
+// {{ env_config.stub_emit_path if env_config.mode == "stub" else env_config.settings_import_path }}).
+// The customer's config struct owns secret resolution.
+//
+// Phase 1.7 env-wire: strategy branches (aws_secrets_manager / gcp_secret_manager /
+// vault / onepassword / custom) are removed. config.Get() is the single read point.
 func resolveAPIKey() (string, error) {
-{% if sdk_key_location.strategy == "env_var" %}
-	key := os.Getenv("{{ sdk_key_location.env_var | default("MOOLABS_API_KEY") }}")
-{% else %}
-	// Non-env strategies (aws_secrets_manager / gcp_secret_manager / vault /
-	// onepassword / custom) mirror the Python helper's _resolve_api_key; wire
-	// the chosen strategy here. Draft resolves from the environment.
-	key := os.Getenv("MOOLABS_API_KEY")
-{% endif %}
+	key := {{ env_config.api_key_accessor }}
 	if key == "" {
 		return "", fmt.Errorf("moolabs: API key not found")
 	}

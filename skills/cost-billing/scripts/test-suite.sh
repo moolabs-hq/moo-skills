@@ -334,8 +334,15 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
 # error handling + the FR-3 tenant-absent guard.
 import shutil, subprocess, tempfile
 gofmt = shutil.which("gofmt")
+# Go uses internal/config import path style; override env_config for Phase 1.7 assertions.
+go_helper_ctx = {**helper_ctx, "env_config": {
+    "mode": "modify",
+    "settings_import_path": "internal/config",
+    "api_key_accessor": "config.Get().MoolabsAPIKey",
+    "stub_emit_path": None,
+}}
 try:
-    r = env.get_template("go-moolabs-client.go.j2").render(**helper_ctx)
+    r = env.get_template("go-moolabs-client.go.j2").render(**go_helper_ctx)
 except Exception as e:
     print(f"  FAIL  go-moolabs-client.go.j2: render error: {e}")
     fail_count += 1
@@ -357,6 +364,14 @@ else:
     # v0.2 legacy shapes must be gone
     no_legacy = "IngestEventsBatch" not in r and "ObservedTotalCost" not in r \
                 and "BatchIngestRequest" not in r and "cost_event_direct_emit" not in r
+    # Phase 1.7 env-wire assertions for Go.
+    has_config_import = 'config "' in r
+    has_config_get = "config.Get()" in r
+    no_aws_imports = (
+        "aws-sdk-go" not in r and
+        "secretsmanager" not in r and
+        "hashicorp/vault" not in r
+    )
     failed = []
     if not has_usage:  failed.append("Usage.IngestEvent missing")
     if not has_cost:   failed.append("Cost.IngestEvent missing")
@@ -365,6 +380,9 @@ else:
     if not has_rail:   failed.append("never-drop log rail missing")
     if not no_tenant:  failed.append("TenantID leaked (FR-3 violation)")
     if not no_legacy:  failed.append("v0.2 legacy shape leaked")
+    if not has_config_import: failed.append("env_config Go import missing")
+    if not has_config_get:    failed.append("config accessor missing")
+    if not no_aws_imports:    failed.append("v0.2 Go strategy import leaked")
     if failed:
         print(f"  FAIL  go-moolabs-client.go.j2: {', '.join(failed)}")
         fail_count += 1
