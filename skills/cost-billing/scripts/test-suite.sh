@@ -402,7 +402,7 @@ else:
         print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
         pass_count += 1
 
-# Stub Settings templates
+# Stub Settings templates (Phase 1.7 — env-wire)
 for stub_tpl in ("python-moolabs-settings.py.j2",
                  "typescript-moolabs-settings.ts.j2",
                  "go-moolabs-settings.go.j2"):
@@ -449,7 +449,7 @@ for stub_tpl in ("python-moolabs-settings.py.j2",
             print(f"  FAIL  stub {stub_tpl}: missing Get function")
             fail_count += 1
 
-# Deployment-surface templates
+# Deployment-surface templates (Phase 1.7 — env-wire)
 deploy_ctx = {"service_slug": "test-svc"}
 for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
             "k8s-secret-moolabs.yaml.j2"):
@@ -476,6 +476,65 @@ for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
             fail_count += 1
     else:
         print(f"  FAIL  deploy {tpl}: expected content missing")
+        fail_count += 1
+
+# Slugs module templates (Phase 1.8 — slugs emission)
+slugs_ctx = {
+    "product_slug": "billing",
+    "generated_at": "2026-06-06T00:00:00+00:00",
+    "constants": {
+        "EVENT_TYPE": [
+            {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+            {"name": "CHECKOUT_RECOMMENDATION_DELIVERED",
+             "value": "checkout.recommendation.delivered"},
+        ],
+        "METER_SLUG": [
+            {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+        ],
+        "FEATURE_KEY": [
+            {"name": "ASSIGNED", "value": "assigned"},
+        ],
+        "PROVIDER": [
+            {"name": "OPENAI", "value": "openai"},
+        ],
+        "SPAN_TYPE": [
+            {"name": "LLM_TOKENS", "value": "llm-tokens"},
+        ],
+    },
+}
+
+slugs_python_tpl = "slugs-python.j2"
+try:
+    r = env.get_template(slugs_python_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_python_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc_header = "DO NOT EDIT" in r and "billing" in r
+    has_event_type_const = "EVENT_TYPE_SEAT_ASSIGNED: str = \"seat.assigned\"" in r
+    has_meter_slug_const = "METER_SLUG_SEAT_ASSIGNED: str = \"seat.assigned\"" in r
+    has_provider_const = "PROVIDER_OPENAI: str = \"openai\"" in r
+    has_span_type_const = "SPAN_TYPE_LLM_TOKENS: str = \"llm-tokens\"" in r
+    # py-compile check
+    try:
+        compile(r, slugs_python_tpl, "exec")
+        py_ok = True
+    except SyntaxError as e:
+        print(f"  FAIL  slugs {slugs_python_tpl}: py syntax: {e.msg}")
+        py_ok = False
+        fail_count += 1
+    if py_ok and has_doc_header and has_event_type_const and has_meter_slug_const \
+            and has_provider_const and has_span_type_const:
+        print(f"  PASS  slugs {slugs_python_tpl}: renders + py-compile + all 5 categories present")
+        pass_count += 1
+    elif py_ok:
+        missing = []
+        if not has_doc_header: missing.append("doc-header/product_slug")
+        if not has_event_type_const: missing.append("EVENT_TYPE constant")
+        if not has_meter_slug_const: missing.append("METER_SLUG constant")
+        if not has_provider_const: missing.append("PROVIDER constant")
+        if not has_span_type_const: missing.append("SPAN_TYPE constant")
+        print(f"  FAIL  slugs {slugs_python_tpl}: missing {', '.join(missing)}")
         fail_count += 1
 
 # Per-callsite template renders × all 3 patterns
