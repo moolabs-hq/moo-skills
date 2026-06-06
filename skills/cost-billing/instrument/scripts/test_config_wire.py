@@ -132,5 +132,125 @@ class PythonWireTargetDispatch(unittest.TestCase):
         self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
 
 
+class TypeScriptWireTargetDispatch(unittest.TestCase):
+    def test_zod_env_schema(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "ts-zod-env-schema",
+                "file": "src/env.ts",
+                "line_to_insert": 5,
+                "confidence": "high",
+                "stub_required": False,
+                "wire_target": {"kind": "add_zod_field",
+                                "field_template": "MOOLABS_API_KEY: z.string().min(1)"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="typescript")
+        self.assertEqual(plan["mode"], "modify")
+        # Convention: TS env modules export via @/-aliased path
+        self.assertEqual(plan["settings_import_path"], "@/env")
+        self.assertEqual(plan["api_key_accessor"], "env.MOOLABS_API_KEY")
+
+    def test_process_env_direct(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "ts-process-env-direct",
+                "file": "src/config.ts",
+                "line_to_insert": 12,
+                "confidence": "medium",
+                "stub_required": False,
+                "wire_target": {"kind": "add_process_env_line",
+                                "line_template": "export const MOOLABS_API_KEY = process.env.MOOLABS_API_KEY ?? \"\";"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="typescript")
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["settings_import_path"], "@/config")
+        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+
+    def test_env_var_library(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "ts-env-var-library",
+                "file": "src/env.ts",
+                "line_to_insert": 8,
+                "confidence": "high",
+                "stub_required": False,
+                "wire_target": {"kind": "add_env_var_line",
+                                "line_template": "export const MOOLABS_API_KEY = env.get(\"MOOLABS_API_KEY\").required().asString();"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="typescript")
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+
+
+class GoWireTargetDispatch(unittest.TestCase):
+    def test_viper(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "go-viper",
+                "file": "internal/config/config.go",
+                "line_to_insert": 14,
+                "confidence": "high",
+                "stub_required": False,
+                "wire_target": {"kind": "add_viper_bindenv",
+                                "line_template": "viper.BindEnv(\"moolabs_api_key\", \"MOOLABS_API_KEY\")"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="go")
+        self.assertEqual(plan["mode"], "modify")
+        # Go convention: import the package containing the config struct
+        self.assertEqual(plan["settings_import_path"], "internal/config")
+        # viper uses GetString("moolabs_api_key")
+        self.assertEqual(plan["api_key_accessor"], 'viper.GetString("moolabs_api_key")')
+
+    def test_envconfig(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "go-envconfig",
+                "file": "internal/config/config.go",
+                "line_to_insert": 6,
+                "confidence": "high",
+                "stub_required": False,
+                "wire_target": {"kind": "add_envconfig_field",
+                                "field_template": "MoolabsAPIKey string `envconfig:\"MOOLABS_API_KEY\"`"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="go")
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["settings_import_path"], "internal/config")
+        # envconfig uses struct field — accessor via config.Get().MoolabsAPIKey
+        self.assertEqual(plan["api_key_accessor"], "config.Get().MoolabsAPIKey")
+
+    def test_go_os_getenv(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "go-os-getenv",
+                "file": "internal/config/config.go",
+                "line_to_insert": 5,
+                "confidence": "medium",
+                "stub_required": False,
+                "wire_target": {"kind": "add_os_getenv_line",
+                                "line_template": "MoolabsAPIKey := os.Getenv(\"MOOLABS_API_KEY\")"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="go")
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["api_key_accessor"], 'os.Getenv("MOOLABS_API_KEY")')
+
+
 if __name__ == "__main__":
     unittest.main()

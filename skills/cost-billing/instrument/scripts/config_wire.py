@@ -87,6 +87,67 @@ def _python_settings_import_path(file_path: str, service_slug: str = "") -> str:
     return ".".join(parts)
 
 
+_TS_PATTERN_ACCESSORS = {
+    "ts-zod-env-schema":      "env.MOOLABS_API_KEY",
+    "ts-process-env-direct":  "MOOLABS_API_KEY",
+    "ts-env-var-library":     "MOOLABS_API_KEY",
+}
+
+_GO_PATTERN_ACCESSORS = {
+    "go-viper":      'viper.GetString("moolabs_api_key")',
+    "go-envconfig":  "config.Get().MoolabsAPIKey",
+    "go-os-getenv":  'os.Getenv("MOOLABS_API_KEY")',
+}
+
+
+def _ts_settings_import_path(file_path: str, service_slug: str = "") -> str:
+    """Derive the TS import path. Convention: `@/<modulepath>` aliased to
+    the source root (matches Next.js / many React app conventions).
+
+      src/env.ts                          → @/env
+      src/config.ts                       → @/config
+      services/<svc>/src/env.ts           → @/env  (service-relative)
+      <svc>/src/env.ts (bare slug prefix) → @/env
+    """
+    parts = file_path.split("/")
+    # Strip leading "services/<svc>/"
+    if len(parts) >= 2 and parts[0] == "services":
+        parts = parts[2:]
+    # Strip bare-slug prefix (matches Task 3 helper convention)
+    elif service_slug and parts and parts[0] == service_slug:
+        parts = parts[1:]
+    # Strip leading "src/" — it's the TS source root
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    # Drop .ts / .tsx / .mts
+    if parts:
+        last = parts[-1]
+        for ext in (".ts", ".tsx", ".mts"):
+            if last.endswith(ext):
+                parts[-1] = last[: -len(ext)]
+                break
+    return "@/" + "/".join(parts) if parts else "@/env"
+
+
+def _go_settings_import_path(file_path: str, service_slug: str = "") -> str:
+    """Derive the Go import path. Convention: drop the filename and emit
+    the remaining package path as-is.
+
+      internal/config/config.go            → internal/config
+      services/<svc>/internal/config/config.go → internal/config
+      <svc>/internal/config/config.go (bare slug) → internal/config
+    """
+    parts = file_path.split("/")
+    if len(parts) >= 2 and parts[0] == "services":
+        parts = parts[2:]
+    elif service_slug and parts and parts[0] == service_slug:
+        parts = parts[1:]
+    # Drop the trailing filename if it ends in .go
+    if parts and parts[-1].endswith(".go"):
+        parts = parts[:-1]
+    return "/".join(parts) if parts else "internal/config"
+
+
 def plan_service_env_wire(service: dict, language: str) -> dict:
     """Derive the per-service env-wiring plan from an inventory entry.
 
@@ -113,34 +174,39 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
             "stub_emit_path": None,
         }
 
-    if language == "python":
-        accessor = _PYTHON_PATTERN_ACCESSORS.get(pattern)
-        if accessor is None:
-            return {
-                "service_slug": service.get("service_slug", ""),
-                "mode": "stub",
-                "settings_import_path": "",
-                "api_key_accessor": "",
-                "stub_emit_path": None,
-            }
-        import_path = _python_settings_import_path(
-            app_config.get("file", ""),
-            service_slug=service.get("service_slug", ""),
-        )
+    accessor_map = {
+        "python": _PYTHON_PATTERN_ACCESSORS,
+        "typescript": _TS_PATTERN_ACCESSORS,
+        "go": _GO_PATTERN_ACCESSORS,
+    }.get(language)
+    if accessor_map is None:
         return {
             "service_slug": service.get("service_slug", ""),
-            "mode": "modify",
-            "settings_import_path": import_path,
-            "api_key_accessor": accessor,
+            "mode": "stub",
+            "settings_import_path": "",
+            "api_key_accessor": "",
             "stub_emit_path": None,
         }
-
-    # Other languages handled in Task 4.
+    accessor = accessor_map.get(pattern)
+    if accessor is None:
+        return {
+            "service_slug": service.get("service_slug", ""),
+            "mode": "stub",
+            "settings_import_path": "",
+            "api_key_accessor": "",
+            "stub_emit_path": None,
+        }
+    service_slug = service.get("service_slug", "")
+    import_path = {
+        "python": _python_settings_import_path,
+        "typescript": _ts_settings_import_path,
+        "go": _go_settings_import_path,
+    }[language](app_config.get("file", ""), service_slug)
     return {
-        "service_slug": service.get("service_slug", ""),
-        "mode": "stub",
-        "settings_import_path": "",
-        "api_key_accessor": "",
+        "service_slug": service_slug,
+        "mode": "modify",
+        "settings_import_path": import_path,
+        "api_key_accessor": accessor,
         "stub_emit_path": None,
     }
 
