@@ -218,8 +218,20 @@ helper_ctx = {
     },
 }
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
+    # TS uses @/-prefixed settings import path; Python uses dotted module path.
+    # Override env_config for TS so that has_get_settings assertion matches.
+    if helper.startswith("typescript"):
+        ts_env_config = {
+            "mode": "modify",
+            "settings_import_path": "@/config",
+            "api_key_accessor": "getSettings().moolabsApiKey",
+            "stub_emit_path": None,
+        }
+        render_ctx = {**helper_ctx, "env_config": ts_env_config}
+    else:
+        render_ctx = helper_ctx
     try:
-        r = env.get_template(helper).render(**helper_ctx)
+        r = env.get_template(helper).render(**render_ctx)
     except Exception as e:
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
@@ -288,6 +300,16 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
                        and "EventEnvelope" not in r
                        and "usageEventId" not in r
                        and "logPayload" not in r)
+        # Phase 1.7 env-wire assertions.
+        has_get_settings = "from '@/" in r or "from \"@/" in r
+        has_settings_import = "getSettings" in r
+        no_strategy_branches = (
+            "@aws-sdk/client-secrets-manager" not in r and
+            "@google-cloud/secret-manager" not in r and
+            "'node-vault'" not in r and
+            'vault.read(' not in r
+        )
+        no_direct_process_env_resolve = "process.env.MOOLABS_API_KEY" not in r
         failed = []
         if not has_usage:   failed.append("usage.ingestEvent missing")
         if not has_cost:    failed.append("cost.ingestEvent missing")
@@ -296,6 +318,10 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         if not has_rail:    failed.append("never-drop log rail missing")
         if not no_tenant:   failed.append("tenantId leaked (FR-3 violation)")
         if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if not has_get_settings:           failed.append("env_config import path missing")
+        if not has_settings_import:        failed.append("getSettings() not referenced")
+        if not no_strategy_branches:       failed.append("v0.2 TS strategy branch leaked")
+        if not no_direct_process_env_resolve: failed.append("process.env direct leaked")
         if failed:
             print(f"  FAIL  helper {helper}: {', '.join(failed)}")
             fail_count += 1
