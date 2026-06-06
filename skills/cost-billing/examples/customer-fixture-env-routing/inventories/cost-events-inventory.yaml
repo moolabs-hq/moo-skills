@@ -1,0 +1,18 @@
+generated_at: "2026-06-06T00:00:00+00:00"
+entries:
+  - file: "app/services/checkout.py"
+    line: 8
+    workflow_id: "checkout.recommendation.delivered"
+    event_type: "checkout.recommendation.delivered"
+    cost_kind: "llm-tokens"
+    cost_micros_source: "1000"
+    product_slug: "billing"
+    pattern: "cost-only"
+    confidence: 0.9
+    idempotency_anchor:
+      handler: "deliver_recommendation"
+      path_param: "customer_id"
+      confidence: 0.9
+    refund_unit:
+      unit: "recommendation"
+      derivation: "value"

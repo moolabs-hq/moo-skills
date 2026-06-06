@@ -1,0 +1,9 @@
+generated_at: "2026-06-06T00:00:00+00:00"
+sdk_version: "0.3.0-rc1"
+helpers:
+  - name: emit_event_safe
+    file: "app/services/moolabs_client.py"
+    confidence: 0.95
+  - name: emit_usage_event_safe
+    file: "app/services/moolabs_client.py"
+    confidence: 0.95

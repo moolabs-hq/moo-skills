@@ -1,0 +1,11 @@
+bindings:
+  customer_id:
+    source: "request.state.customer_id"
+    confidence: 0.95
+  request_id:
+    source: "request.state.request_id"
+    confidence: 0.95
+  consumer_agent:
+    source: null
+    confidence: n_a
+overrides: []

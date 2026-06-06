@@ -1,0 +1,17 @@
+generated_at: "2026-06-06T00:00:00+00:00"
+services:
+  - service_slug: app
+    language: python
+    pattern: python-pydantic-settings-v2
+    confidence: 0.95
+    evidence:
+      settings_class: "Settings"
+      settings_file: "app/settings.py"
+      field_name: "moolabs_api_key"
+      accessor: "get_settings().moolabs_api_key.get_secret_value()"
+    stub_required: false
+    deployment_surfaces:
+      - kind: dotenv
+        path: ".env.example"
+      - kind: terraform
+        path: "infra/terraform/variables.tf"

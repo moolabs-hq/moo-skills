@@ -1,0 +1,6 @@
+integration:
+  services:
+    - service_slug: app
+      language: python
+      framework: fastapi
+  env_loader_granularity: per-service
