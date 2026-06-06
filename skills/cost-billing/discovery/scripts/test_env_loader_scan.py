@@ -457,6 +457,52 @@ class DeploymentSurfaceScan(unittest.TestCase):
             k8s_hits = [s for s in surfaces if s.kind == "k8s"]
             self.assertEqual(k8s_hits, [])
 
+    def test_k8s_envfrom_in_different_container_is_not_a_match(self):
+        """Cross-container false positive guard. If container A has
+        `envFrom: - configMapRef:` and container B has `valueFrom: secretRef:`,
+        the naive `envFrom:[\\s\\S]{0,200}secretRef:` regex matched across
+        the container boundary. The detector must require envFrom and
+        secretRef to belong to the SAME container's envFrom list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            k8s = Path(tmp) / "infra" / "k8s"
+            k8s.mkdir(parents=True)
+            (k8s / "deployment.yaml").write_text(
+                "apiVersion: apps/v1\n"
+                "kind: Deployment\n"
+                "metadata:\n  name: app\n"
+                "spec:\n  template:\n    spec:\n      containers:\n"
+                "      - name: sidecar\n"
+                "        envFrom:\n"
+                "        - configMapRef:\n            name: my-config\n"
+                "      - name: app\n"
+                "        env:\n"
+                "        - name: PASS\n          valueFrom:\n            secretRef:\n              name: secrets\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            k8s_hits = [s for s in surfaces if s.kind == "k8s"]
+            self.assertEqual(k8s_hits, [],
+                             f"Expected no k8s match (cross-container) but got: {k8s_hits}")
+
+    def test_k8s_envfrom_secretref_in_same_container_IS_a_match(self):
+        """Positive case for the tightened detector: envFrom: secretRef:
+        in the same container correctly produces a k8s surface entry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            k8s = Path(tmp) / "infra" / "k8s"
+            k8s.mkdir(parents=True)
+            (k8s / "deployment.yaml").write_text(
+                "apiVersion: apps/v1\n"
+                "kind: Deployment\n"
+                "metadata:\n  name: app\n"
+                "spec:\n  template:\n    spec:\n      containers:\n"
+                "      - name: app\n"
+                "        envFrom:\n"
+                "        - secretRef:\n            name: my-secrets\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            k8s_hits = [s for s in surfaces if s.kind == "k8s"]
+            self.assertEqual(len(k8s_hits), 1)
+            self.assertEqual(k8s_hits[0].insert_kind, "secret_ref_checklist")
+
     def test_detects_dotenv_example(self):
         with tempfile.TemporaryDirectory() as tmp:
             svc = Path(tmp) / "services" / "payments-api"
@@ -569,6 +615,19 @@ class GranularityHandling(unittest.TestCase):
             self.assertEqual(
                 inventory["services"][0]["app_config"]["pattern"],
                 "python-pydantic-settings-v2",
+            )
+
+            # YAML round-trip: the granularity value "hybrid (degraded to
+            # per-service)" contains spaces and parens. emit_inventory_yaml
+            # writes it as a plain scalar. Verify PyYAML reads it back
+            # as the exact string (round-trip stability).
+            import yaml as _yaml
+            out = repo / "hybrid-inventory.yaml"
+            els.emit_inventory_yaml(inventory, out)
+            parsed = _yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["granularity"],
+                "hybrid (degraded to per-service)",
             )
 
     def test_repo_wide_uses_shared_path(self):

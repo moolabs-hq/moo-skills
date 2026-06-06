@@ -404,6 +404,48 @@ class DeploymentSurface:
 _SURFACE_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", "vendor"})
 
 
+def _envfrom_secretref_in_same_container(text: str) -> bool:
+    """True iff `envFrom:` is followed (within the same container block) by
+    `- secretRef:`. The naive `envFrom:[\\s\\S]{0,200}secretRef:` regex was
+    too loose: in multi-container manifests where container A had
+    `envFrom: - configMapRef:` and container B had `valueFrom: secretRef:`
+    a few hundred chars later, the regex matched across the container
+    boundary and produced a false-positive k8s surface entry.
+
+    Approach: walk lines. For each `envFrom:` line, scan subsequent lines
+    looking for `- secretRef:` that belongs to envFrom's list. YAML allows
+    the list items to live at the SAME indent as the key (common k8s
+    style) OR deeper. The envFrom block ends when we see:
+      - any non-list line (no leading dash) at indent <= envfrom_indent
+        (sibling key at the container level, e.g. `volumes:`)
+      - a `- name:` line (next container in the parent list)
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r'^(\s*)envFrom:\s*$', line)
+        if not m:
+            continue
+        envfrom_indent = len(m.group(1))
+        for j in range(i + 1, len(lines)):
+            sub = lines[j]
+            if not sub.strip():
+                continue
+            sub_indent = len(sub) - len(sub.lstrip(" "))
+            stripped = sub.lstrip()
+            # `- name:` at any indent <= envfrom_indent indicates a new
+            # container (the parent list's next item). End envFrom block.
+            if stripped.startswith("- name:") and sub_indent <= envfrom_indent:
+                break
+            # A non-list line at indent <= envfrom_indent is a sibling key
+            # at the container level (or shallower). End envFrom block.
+            if not stripped.startswith("-") and sub_indent <= envfrom_indent:
+                break
+            # Found a `- secretRef:` somewhere inside envFrom's list.
+            if re.match(r'-\s*secretRef:', stripped):
+                return True
+    return False
+
+
 def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
     """Walk the repo for deployment-surface insertion points. Each detected
     surface becomes one entry; the instrument side decides per-entry whether
@@ -449,9 +491,7 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                 r'^\s*kind:\s*(Deployment|StatefulSet|DaemonSet)\b',
                 text, re.MULTILINE,
             ))
-            has_envfrom_secretref = bool(re.search(
-                r'envFrom:[\s\S]{0,200}secretRef:', text,
-            ))
+            has_envfrom_secretref = _envfrom_secretref_in_same_container(text)
             if has_workload_kind and has_envfrom_secretref:
                 out.append(DeploymentSurface(
                     kind="k8s",
