@@ -323,6 +323,45 @@ def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]
     return "usage-only"
 
 
+def load_slug_inventory(path: Path) -> dict:
+    """Read slug-inventory.yaml (Phase A's slug_inventory.py output).
+    Returns {"products": []} on missing file or absent PyYAML.
+    """
+    if not path.exists():
+        return {"products": []}
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text()) or {}
+    except ImportError:
+        return {"products": []}
+    data.setdefault("products", [])
+    return data
+
+
+def build_slug_index(inventory: dict) -> dict[str, dict[str, dict[str, str]]]:
+    """Build a per-product / per-category value-to-constant-name lookup.
+
+    Phase A's slug_inventory.py emits constants with `name` already in
+    canonical UPPER_SNAKE_CASE (e.g. `SEAT_ASSIGNED`). Phase C's framework
+    callsite templates need to render `EVENT_TYPE_SEAT_ASSIGNED` —
+    so the lookup value here is the CATEGORY-prefixed constant name.
+    """
+    index: dict[str, dict[str, dict[str, str]]] = {}
+    for product in inventory.get("products") or []:
+        slug = product.get("product_slug", "")
+        if not slug:
+            continue
+        product_index: dict[str, dict[str, str]] = {}
+        for category, entries in (product.get("constants") or {}).items():
+            value_to_const: dict[str, str] = {}
+            for e in entries or []:
+                if e.get("name") and e.get("value") is not None:
+                    value_to_const[e["value"]] = f"{category}_{e['name']}"
+            product_index[category] = value_to_const
+        index[slug] = product_index
+    return index
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
