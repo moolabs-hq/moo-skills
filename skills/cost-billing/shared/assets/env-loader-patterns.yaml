@@ -1,0 +1,144 @@
+# Env-loader pattern catalog — drives env_loader_scan.py recognition.
+# One entry per recognized pattern. Each pattern is checked in order of priority
+# (higher first); the first high-confidence match wins per service.
+#
+# Fields:
+#   id              — unique pattern id (used in env-routing-inventory.yaml output)
+#   language        — python | typescript | go
+#   detection_signal— human-readable description of what triggers the match
+#   import_signals  — list of import-statement regexes (any-match → +0.3 confidence)
+#   structural_signals — list of structural-pattern regexes (any-match → +0.4 confidence)
+#   wire_target     — what env_loader_scan flags for instrument's Phase 1.7 to emit
+#   priority        — higher means checked first when multiple patterns hit
+#
+# Confidence band rules (computed by env_loader_scan):
+#   - import + structural hit → confidence: high (0.9+)
+#   - only structural hit     → confidence: medium (0.5-0.8)
+#   - only import hit         → confidence: low (0.3-0.5)
+#   - no hit                  → pattern not detected for this service
+#   - low confidence triggers stub_required: true downstream
+
+patterns:
+  # ── Python (4 patterns) ────────────────────────────────────────────────
+  - id: python-pydantic-settings-v2
+    language: python
+    detection_signal: "pydantic-settings BaseSettings subclass"
+    import_signals:
+      - "from\\s+pydantic_settings\\s+import\\s+.*BaseSettings"
+    structural_signals:
+      - "class\\s+\\w+\\(BaseSettings\\)"
+    wire_target:
+      kind: add_pydantic_settings_field
+      field_template: "moolabs_api_key: SecretStr = Field(..., env=\"MOOLABS_API_KEY\")"
+    priority: 100
+
+  - id: python-pydantic-v1-settings
+    language: python
+    detection_signal: "pydantic v1 BaseSettings subclass"
+    import_signals:
+      - "from\\s+pydantic\\s+import\\s+.*BaseSettings"
+    structural_signals:
+      - "class\\s+\\w+\\(BaseSettings\\)"
+    wire_target:
+      kind: add_pydantic_settings_field
+      field_template: "moolabs_api_key: SecretStr = Field(..., env=\"MOOLABS_API_KEY\")"
+    priority: 90
+
+  - id: python-decouple
+    language: python
+    detection_signal: "python-decouple config() reads"
+    import_signals:
+      - "from\\s+decouple\\s+import\\s+config"
+    structural_signals:
+      - "config\\(['\"][A-Z_]+['\"]"
+    wire_target:
+      kind: add_decouple_line
+      line_template: "MOOLABS_API_KEY = config('MOOLABS_API_KEY')"
+    priority: 80
+
+  - id: python-dotenv-os-getenv
+    language: python
+    detection_signal: "python-dotenv + os.getenv pattern"
+    import_signals:
+      - "from\\s+dotenv\\s+import\\s+load_dotenv"
+      - "load_dotenv\\("
+    structural_signals:
+      - "os\\.(getenv|environ\\.get|environ\\[)"
+    wire_target:
+      kind: add_os_getenv_line
+      line_template: "MOOLABS_API_KEY = os.getenv(\"MOOLABS_API_KEY\")"
+    priority: 70
+
+  # ── TypeScript (3 patterns) ────────────────────────────────────────────
+  - id: ts-zod-env-schema
+    language: typescript
+    detection_signal: "zod env-validation schema in env.ts / config.ts"
+    import_signals:
+      - "import\\s+\\{[^}]*\\bz\\b[^}]*\\}\\s+from\\s+['\"]zod['\"]"
+      - "from\\s+['\"]zod['\"]"
+    structural_signals:
+      - "z\\.object\\(\\s*\\{"
+    wire_target:
+      kind: add_zod_field
+      field_template: "MOOLABS_API_KEY: z.string().min(1)"
+    priority: 100
+
+  - id: ts-process-env-direct
+    language: typescript
+    detection_signal: "multiple process.env.X reads in a config module"
+    import_signals: []
+    structural_signals:
+      - "process\\.env\\.[A-Z_]+"
+    wire_target:
+      kind: add_process_env_line
+      line_template: "export const MOOLABS_API_KEY = process.env.MOOLABS_API_KEY ?? \"\";"
+    priority: 70
+
+  - id: ts-env-var-library
+    language: typescript
+    detection_signal: "env-var library .get() pattern"
+    import_signals:
+      - "import\\s+.*env-var"
+      - "from\\s+['\"]env-var['\"]"
+    structural_signals:
+      - "env\\.get\\(['\"]"
+    wire_target:
+      kind: add_env_var_line
+      line_template: "export const MOOLABS_API_KEY = env.get(\"MOOLABS_API_KEY\").required().asString();"
+    priority: 90
+
+  # ── Go (3 patterns) ────────────────────────────────────────────────────
+  - id: go-viper
+    language: go
+    detection_signal: "viper.SetEnvPrefix / viper.AutomaticEnv usage"
+    import_signals:
+      - "spf13/viper"
+    structural_signals:
+      - "viper\\.(SetEnvPrefix|AutomaticEnv|BindEnv)"
+    wire_target:
+      kind: add_viper_bindenv
+      line_template: "viper.BindEnv(\"moolabs_api_key\", \"MOOLABS_API_KEY\")"
+    priority: 100
+
+  - id: go-envconfig
+    language: go
+    detection_signal: "kelseyhightower/envconfig struct tags"
+    import_signals:
+      - "kelseyhightower/envconfig"
+    structural_signals:
+      - "envconfig:\"[A-Z_]+\""
+    wire_target:
+      kind: add_envconfig_field
+      field_template: "MoolabsAPIKey string `envconfig:\"MOOLABS_API_KEY\" required:\"true\"`"
+    priority: 90
+
+  - id: go-os-getenv
+    language: go
+    detection_signal: "raw os.Getenv reads in a config.go"
+    import_signals: []
+    structural_signals:
+      - "os\\.Getenv\\(['\"]"
+    wire_target:
+      kind: add_os_getenv_line
+      line_template: "MoolabsAPIKey := os.Getenv(\"MOOLABS_API_KEY\")"
+    priority: 70

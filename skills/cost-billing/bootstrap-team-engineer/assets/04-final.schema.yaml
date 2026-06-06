@@ -116,6 +116,26 @@ properties:
     properties:
       sdk_key_location: { type: object }
       sdk_key_read_pattern: { type: string }
+      env_loader_granularity:
+        type: string
+        enum: [per-service, repo-wide, hybrid, TBD]
+        description: |
+          From Q14b. Determines whether env_loader_scan.py scans each service
+          independently (per-service) or only a shared config path (repo-wide).
+          Defaults to TBD when absent; the scanner runs best-effort and the
+          inventory carries granularity_source: default-fallback.
+      shared_config_path:
+        type: string
+        description: |
+          Repo-relative path to the shared config package. Required when
+          env_loader_granularity is repo-wide or hybrid. Example: packages/config
+      hybrid_shared_services:
+        type: array
+        items: { type: string }
+        description: |
+          List of service slugs that USE the shared_config_path when
+          env_loader_granularity is hybrid. Services not in this list are
+          scanned per-service.
       # NOTE: regions, environments, multi_tenant come from finance — engineer only references
       # them. Codemod reads them from 01-finance via the input_chain hash check.
 

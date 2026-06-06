@@ -150,6 +150,44 @@ You are LAST in the chain. Your output IS the consolidated `customer-context/` t
 >
 > I need the resolution PATH, not the key value."
 
+### Q14b — Env-loader granularity (NEW v0.3 env-routing migration)
+
+> "How is env-loading wired in your repo? This determines whether the codemod
+> integrates MOOLABS_API_KEY into one shared config file or into each service's
+> own config file.
+>
+> - **Per-service** — each service has its own config code (e.g. one
+>   pydantic-settings class per service)
+> - **Repo-wide** — shared config package every service imports from
+>   (e.g. `packages/config/`)
+> - **Hybrid** — some services share, others have their own. (I'll ask you to
+>   name which.)
+> - **TBD** — let the scanner detect best-effort"
+
+If **Repo-wide** or **Hybrid**, follow up:
+
+> "What's the path to your shared config package, relative to repo root?
+> (e.g. `packages/config`)"
+
+If **Hybrid**, also follow up:
+
+> "Which services use the shared package, and which have their own config?
+> List service slugs per group."
+
+The answer is written to `04-final.signed.yaml` as:
+
+```yaml
+integration:
+  env_loader_granularity: per-service   # or repo-wide / hybrid / TBD
+  shared_config_path: packages/config   # only when granularity != per-service
+  hybrid_shared_services:               # only when granularity == hybrid
+    - billing-api
+    - notifications-svc
+```
+
+The Phase 1 discovery scan (`env_loader_scan.py`) reads these fields to decide
+whether to scan each service independently or only the shared path.
+
 ### Q16 — Moolabs SDK install source (per language)
 
 > "The codemod will tell your CI to install the Moolabs SDK before merge. Where does YOUR environment install the SDK from?
