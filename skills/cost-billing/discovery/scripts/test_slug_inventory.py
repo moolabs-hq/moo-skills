@@ -109,5 +109,52 @@ class DeriveFeatureKeys(unittest.TestCase):
         self.assertIn("seat", values)
 
 
+class DeriveProviders(unittest.TestCase):
+    def test_providers_from_catalog(self):
+        cost_inv = {"entries": []}
+        usage_inv = {"entries": []}
+        omap = {"edges": []}
+        provider_catalog = {
+            "providers": [
+                {"slug": "openai", "name": "OpenAI"},
+                {"slug": "anthropic", "name": "Anthropic"},
+                {"slug": "stripe", "name": "Stripe"},
+            ],
+        }
+        by_product = si.derive_per_product_constants(
+            cost_inv, usage_inv, omap, provider_catalog
+        )
+        # PROVIDER constants are global across products — every product
+        # gets the same enum from the catalog.
+        # For an empty inventory we expect at least one "default" product
+        # entry carrying the providers.
+        self.assertIn("default", by_product)
+        providers = by_product["default"]["PROVIDER"]
+        names = {e["name"] for e in providers}
+        self.assertEqual(names, {"OPENAI", "ANTHROPIC", "STRIPE"})
+
+
+class DeriveSpanTypes(unittest.TestCase):
+    def test_span_types_from_cost_kind(self):
+        cost_inv = {
+            "entries": [
+                {"workflow_id": "x", "event_type": "x", "cost_kind": "llm-tokens",
+                 "product_slug": "billing"},
+                {"workflow_id": "y", "event_type": "y", "cost_kind": "gpu-seconds",
+                 "product_slug": "billing"},
+                {"workflow_id": "z", "event_type": "z", "cost_kind": "llm-tokens",
+                 "product_slug": "billing"},  # duplicate cost_kind — de-duped
+            ],
+        }
+        usage_inv = {"entries": []}
+        omap = {"edges": []}
+        by_product = si.derive_per_product_constants(
+            cost_inv, usage_inv, omap, provider_catalog=None
+        )
+        span_types = by_product["billing"]["SPAN_TYPE"]
+        names = {e["name"] for e in span_types}
+        self.assertEqual(names, {"LLM_TOKENS", "GPU_SECONDS"})
+
+
 if __name__ == "__main__":
     unittest.main()

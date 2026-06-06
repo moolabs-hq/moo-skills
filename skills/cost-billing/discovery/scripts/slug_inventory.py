@@ -119,7 +119,30 @@ def derive_per_product_constants(
                 _add_unique(bucket["FEATURE_KEY"],
                             to_constant_name(fk_value), fk_value)
 
-    # PROVIDER and SPAN_TYPE come from later tasks
+    # SPAN_TYPE from cost_kind values in cost-events-inventory
+    for entry in cost_inv.get("entries", []) or []:
+        product = entry.get("product_slug") or "default"
+        bucket = _ensure(product)
+        cost_kind = entry.get("cost_kind")
+        if cost_kind:
+            _add_unique(bucket["SPAN_TYPE"],
+                        to_constant_name(cost_kind), cost_kind)
+
+    # PROVIDER from provider-catalog (global — every product gets the same
+    # enum). When inventories are empty, we still ensure a "default" bucket
+    # so the providers are surfaced somewhere.
+    if provider_catalog:
+        providers = provider_catalog.get("providers") or []
+        if not by_product and providers:
+            _ensure("default")
+        for product in list(by_product.keys()):
+            bucket = by_product[product]
+            for p in providers:
+                slug = p.get("slug")
+                if slug:
+                    _add_unique(bucket["PROVIDER"],
+                                to_constant_name(slug), slug)
+
     return by_product
 
 
