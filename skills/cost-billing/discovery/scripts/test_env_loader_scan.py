@@ -532,6 +532,100 @@ class InventoryYamlEmit(unittest.TestCase):
             self.assertIn("granularity_source: declared", content)
             self.assertIn("services: []", content)
 
+    def test_emit_yaml_roundtrips_through_pyyaml(self):
+        """Regression guard: the emitted YAML must be parseable by PyYAML
+        and preserve the exact field values. This catches the entire class
+        of YAML escape bugs (backslash, quote, special chars) that the
+        assertIn-based tests would otherwise miss."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "env-routing-inventory.yaml"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "granularity": "per-service",
+                "granularity_source": "declared",
+                "services": [
+                    {
+                        "service_slug": "svc-a",
+                        "app_config": {
+                            "pattern": "python-pydantic-settings-v2",
+                            "file": "services/svc-a/app/config.py",
+                            "line_to_insert": 5,
+                            "confidence": "high",
+                            "confidence_score": 0.95,
+                            "stub_required": False,
+                            "evidence": [
+                                'line 3: from pydantic_settings import BaseSettings',
+                            ],
+                            "wire_target": {
+                                "kind": "add_pydantic_settings_field",
+                                "field_template": 'moolabs_api_key: SecretStr',
+                            },
+                        },
+                        "deployment_surfaces": [
+                            {"kind": "terraform", "path": "infra/variables.tf",
+                             "insert_kind": "variable_block_append"},
+                        ],
+                    },
+                ],
+            }
+            els.emit_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(parsed["granularity"], "per-service")
+            self.assertEqual(len(parsed["services"]), 1)
+            svc = parsed["services"][0]
+            self.assertEqual(svc["service_slug"], "svc-a")
+            self.assertEqual(svc["app_config"]["pattern"], "python-pydantic-settings-v2")
+            self.assertEqual(svc["app_config"]["line_to_insert"], 5)
+
+    def test_emit_yaml_handles_backslash_in_evidence(self):
+        """Regression guard for the backslash YAML escape bug. Source
+        files containing Windows paths or regex literals can produce
+        evidence strings with backslashes. The hand-rolled emitter must
+        double-escape backslashes (and quotes) so PyYAML doesn't read
+        `\\n` as newline, `\\t` as tab, etc."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "env-routing-inventory.yaml"
+            evidence_with_backslash = r"line 12: pattern = r'\w+\s*=\s*\d+'"
+            wire_value_with_backslash = r"prefix\suffix"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "granularity": "per-service",
+                "granularity_source": "declared",
+                "services": [
+                    {
+                        "service_slug": "svc-bs",
+                        "app_config": {
+                            "pattern": "python-decouple",
+                            "file": "config.py",
+                            "line_to_insert": 12,
+                            "confidence": "medium",
+                            "confidence_score": 0.65,
+                            "stub_required": False,
+                            "evidence": [evidence_with_backslash],
+                            "wire_target": {
+                                "kind": "add_decouple_line",
+                                "field_template": wire_value_with_backslash,
+                            },
+                        },
+                        "deployment_surfaces": [],
+                    },
+                ],
+            }
+            els.emit_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["services"][0]["app_config"]["evidence"][0],
+                evidence_with_backslash,
+            )
+            self.assertEqual(
+                parsed["services"][0]["app_config"]["wire_target"]["field_template"],
+                wire_value_with_backslash,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

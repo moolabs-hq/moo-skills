@@ -220,5 +220,85 @@ class YamlEmit(unittest.TestCase):
             self.assertIn('value: "seat.assigned"', content)
 
 
+class YamlEmitRoundtrip(unittest.TestCase):
+    """Regression guard for the YAML escape bug class. The hand-rolled emitter
+    must round-trip through PyYAML preserving the exact field values,
+    including values with backslashes (workflow_ids constructed from regex
+    patterns or path-like keys) and quotes."""
+
+    def test_emit_roundtrips_through_pyyaml(self):
+        import yaml
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "slug-inventory.yaml"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "products": [
+                    {
+                        "product_slug": "billing",
+                        "constants": {
+                            "EVENT_TYPE": [
+                                {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+                            ],
+                            "METER_SLUG": [
+                                {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+                            ],
+                            "FEATURE_KEY": [
+                                {"name": "ASSIGNED", "value": "assigned"},
+                            ],
+                            "PROVIDER": [
+                                {"name": "OPENAI", "value": "openai"},
+                            ],
+                            "SPAN_TYPE": [
+                                {"name": "LLM_TOKENS", "value": "llm-tokens"},
+                            ],
+                        },
+                    },
+                ],
+            }
+            si.emit_slug_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(len(parsed["products"]), 1)
+            product = parsed["products"][0]
+            self.assertEqual(product["product_slug"], "billing")
+            event_types = product["constants"]["EVENT_TYPE"]
+            self.assertEqual(event_types[0]["value"], "seat.assigned")
+
+    def test_emit_handles_backslash_in_value(self):
+        """Slug values constructed from regex patterns or path-like keys
+        could contain backslashes. The emitter must double-escape them
+        so PyYAML doesn't interpret `\\n` as newline etc."""
+        import yaml
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "slug-inventory.yaml"
+            value_with_backslash = r"foo\bar.baz"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "products": [
+                    {
+                        "product_slug": "test",
+                        "constants": {
+                            "EVENT_TYPE": [
+                                {"name": "FOO_BAR_BAZ", "value": value_with_backslash},
+                            ],
+                            "METER_SLUG": [],
+                            "FEATURE_KEY": [],
+                            "PROVIDER": [],
+                            "SPAN_TYPE": [],
+                        },
+                    },
+                ],
+            }
+            si.emit_slug_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["products"][0]["constants"]["EVENT_TYPE"][0]["value"],
+                value_with_backslash,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

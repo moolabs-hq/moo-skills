@@ -601,13 +601,18 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
             if ac.get("evidence"):
                 lines.append(f"      evidence:")
                 for e in ac["evidence"]:
-                    # Escape quotes inside the evidence string
-                    e_safe = e.replace('"', '\\"')
+                    # Escape BOTH backslashes AND quotes for YAML
+                    # double-quoted scalars. Backslash must come FIRST or the
+                    # later quote-escape backslash gets double-escaped. Without
+                    # the backslash escape, source lines containing Windows
+                    # paths or regex literals (e.g. `\w+`) produce YAML that
+                    # PyYAML reads as `\n` → newline, `\t` → tab, etc.
+                    e_safe = e.replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'        - "{e_safe}"')
             if ac.get("wire_target"):
                 lines.append(f"      wire_target:")
                 for k, v in ac["wire_target"].items():
-                    v_str = str(v).replace('"', '\\"')
+                    v_str = str(v).replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'        {k}: "{v_str}"')
 
             if svc["deployment_surfaces"]:

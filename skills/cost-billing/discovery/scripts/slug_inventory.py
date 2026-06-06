@@ -201,8 +201,12 @@ def emit_slug_inventory_yaml(inventory: dict, dest: Path) -> None:
                 lines.append(f"      {category}:")
                 for e in entries:
                     lines.append(f"        - name: {e['name']}")
-                    # Quote the value to handle dots/hyphens cleanly.
-                    v = str(e["value"]).replace('"', '\\"')
+                    # Escape BOTH backslashes AND quotes for YAML double-quoted
+                    # scalars. Backslash MUST come first or the quote-escape
+                    # backslash gets double-escaped. Without backslash escape,
+                    # any slug value containing `\` (rare but possible in
+                    # workflow_id / cost_kind strings) produces malformed YAML.
+                    v = str(e["value"]).replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'          value: "{v}"')
 
     dest.write_text("\n".join(lines) + "\n")
