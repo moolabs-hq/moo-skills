@@ -528,6 +528,49 @@ class GranularityHandling(unittest.TestCase):
             self.assertEqual(entry["app_config"]["pattern"], "unrecognized")
             self.assertTrue(entry["app_config"]["stub_required"])
 
+    def test_hybrid_warns_and_degrades_to_per_service(self):
+        """Phase A does not implement hybrid granularity. If an engineer
+        declares hybrid, the scanner must:
+          (a) print a stderr warning so the degradation is visible
+          (b) actually run per-service (not silently produce wrong data)
+          (c) record the degradation in the output YAML so adversarial
+              review can spot it.
+        """
+        import io
+        import contextlib
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "services" / "svc-a" / "app").mkdir(parents=True)
+            (repo / "services" / "svc-a" / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    x: str\n"
+            )
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                inventory = els.build_inventory(
+                    repo_root=repo,
+                    services=[
+                        {"slug": "svc-a", "root": "services/svc-a", "language": "python"},
+                    ],
+                    catalog=els.load_pattern_catalog(CATALOG_PATH),
+                    granularity="hybrid",
+                    granularity_source="declared",
+                    shared_config_path="packages/config",
+                )
+            warning = captured.getvalue()
+            self.assertIn("hybrid", warning)
+            self.assertIn("out-of-scope", warning)
+            self.assertIn("per-service", warning)
+            # Degradation is recorded in the YAML output so downstream
+            # consumers can see it
+            self.assertIn("degraded", inventory["granularity"])
+            # The scan still ran per-service (didn't crash, produced a result)
+            self.assertEqual(len(inventory["services"]), 1)
+            self.assertEqual(
+                inventory["services"][0]["app_config"]["pattern"],
+                "python-pydantic-settings-v2",
+            )
+
     def test_repo_wide_uses_shared_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

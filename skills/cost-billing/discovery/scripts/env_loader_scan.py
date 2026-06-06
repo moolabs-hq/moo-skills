@@ -561,9 +561,11 @@ def build_inventory(
       - per-service:  scan each service's root independently
       - repo-wide:    scan ONLY shared_config_path; every service entry
                       points at the same file
-      - hybrid:       per-service for services not in the shared set;
-                      shared_config_path for the rest (out of scope for
-                      Phase A — falls back to per-service)
+      - hybrid:       OUT OF SCOPE for Phase A. Logs a loud stderr WARNING
+                      and degrades to per-service. The output YAML records
+                      granularity="hybrid (degraded to per-service)" so
+                      downstream consumers (and adversarial review) can
+                      see the degradation happened.
       - TBD:          per-service best-effort with granularity_source flag
     """
     if granularity == "repo-wide" and shared_config_path:
@@ -572,8 +574,23 @@ def build_inventory(
         for svc in services:
             entry = _service_entry(repo_root, svc, scan_root, catalog)
             service_entries.append(entry)
+        effective_granularity = granularity
     else:
-        # per-service (or TBD / hybrid → per-service for Phase A)
+        if granularity == "hybrid":
+            # Hybrid is declared but Phase A doesn't implement the per-slug
+            # split between shared and per-service services. Make the
+            # degradation LOUD so the engineer notices.
+            print(
+                "WARNING: env_loader_granularity=hybrid is out-of-scope for "
+                "Phase A. Falling back to per-service scanning. "
+                "shared_config_path will NOT be honored. "
+                "Track Phase B (config_wire.py) for hybrid support.",
+                file=sys.stderr,
+            )
+            effective_granularity = "hybrid (degraded to per-service)"
+        else:
+            # per-service or TBD — both run per-service.
+            effective_granularity = granularity
         service_entries = []
         for svc in services:
             svc_root = repo_root / svc["root"]
@@ -582,7 +599,7 @@ def build_inventory(
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "granularity": granularity,
+        "granularity": effective_granularity,
         "granularity_source": granularity_source,
         "services": service_entries,
     }
