@@ -16,22 +16,28 @@
 # Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_event_safe
-import uuid as _moolabs_uuid
+{% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const or entry.span_type_const %}from {{ entry.slugs_import_path }} import (
+{% if entry.event_type_const %}    {{ entry.event_type_const }},
+{% endif %}{% if entry.meter_slug_const %}    {{ entry.meter_slug_const }},
+{% endif %}{% if entry.feature_key_const %}    {{ entry.feature_key_const }},
+{% endif %}{% if entry.span_type_const %}    {{ entry.span_type_const }},
+{% endif %})
+{% endif %}import uuid as _moolabs_uuid
 
 _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% if not attribution_sources.request_id %}_moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
 # REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
 emit_event_safe(
-    event_type="{{ entry.event_type }}",
+    event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ entry.event_type ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     entity_id=str({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabs_event_id" }}),
-    meter_slug="{{ entry.workflow_id }}",
+    meter_slug={{ entry.meter_slug_const if entry.meter_slug_const else '"' ~ entry.workflow_id ~ '"' }},
     value={{ entry.refund_unit.derivation }},
     spans=[{
         "span_id": _moolabs_span_id,
         {% if entry.cost_micros_source %}"cost_micros": {{ entry.cost_micros_source }},
-        {% endif %}{% if entry.cost_kind %}"kind": "{{ entry.cost_kind }}",
+        {% endif %}{% if entry.cost_kind %}"kind": {{ entry.span_type_const if entry.span_type_const else '"' ~ entry.cost_kind ~ '"' }},
         {% endif %}
     }],
     meta={
@@ -47,16 +53,21 @@ emit_event_safe(
 # moolabs SDK insert (usage-only, v0.3.0-rc1) — emit_usage_event_safe.
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_usage_event_safe
-{% if not attribution_sources.request_id %}import uuid as _moolabs_uuid
+{% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const %}from {{ entry.slugs_import_path }} import (
+{% if entry.event_type_const %}    {{ entry.event_type_const }},
+{% endif %}{% if entry.meter_slug_const %}    {{ entry.meter_slug_const }},
+{% endif %}{% if entry.feature_key_const %}    {{ entry.feature_key_const }},
+{% endif %})
+{% endif %}{% if not attribution_sources.request_id %}import uuid as _moolabs_uuid
 
 _moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
 # REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
 emit_usage_event_safe(
-    event_type="{{ entry.event_type }}",
+    event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ entry.event_type ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     entity_id=str({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabs_event_id" }}),
-    meter_slug="{{ entry.workflow_id }}",
+    meter_slug={{ entry.meter_slug_const if entry.meter_slug_const else '"' ~ entry.workflow_id ~ '"' }},
     value={{ entry.refund_unit.derivation }},
     meta={
         "workflow_id": "{{ entry.workflow_id }}",
@@ -71,19 +82,24 @@ emit_usage_event_safe(
 # moolabs SDK insert (cost-only, v0.3.0-rc1) — emit_cost_event_safe.
 # ─────────────────────────────────────────────────────────────────────────────
 from app.services.moolabs_client import emit_cost_event_safe
-import uuid as _moolabs_uuid
+{% if entry.event_type_const or entry.feature_key_const or entry.span_type_const %}from {{ entry.slugs_import_path }} import (
+{% if entry.event_type_const %}    {{ entry.event_type_const }},
+{% endif %}{% if entry.feature_key_const %}    {{ entry.feature_key_const }},
+{% endif %}{% if entry.span_type_const %}    {{ entry.span_type_const }},
+{% endif %})
+{% endif %}import uuid as _moolabs_uuid
 
 _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% if not attribution_sources.request_id %}_moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
 emit_cost_event_safe(
-    event_type="{{ entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id) }}",
+    event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id)) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
     entity_id=str({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabs_event_id" }}),
     spans=[{
         "span_id": _moolabs_span_id,
         {% if entry.cost_micros_source %}"cost_micros": {{ entry.cost_micros_source }},
-        {% endif %}{% if entry.cost_kind %}"kind": "{{ entry.cost_kind }}",
+        {% endif %}{% if entry.cost_kind %}"kind": {{ entry.span_type_const if entry.span_type_const else '"' ~ entry.cost_kind ~ '"' }},
         {% endif %}
     }],
     meta={

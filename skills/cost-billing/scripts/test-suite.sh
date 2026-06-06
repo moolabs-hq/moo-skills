@@ -181,6 +181,12 @@ entry_base = {
     "refund_unit":{"unit":"completion","derivation":"1"},
     "cost_kind":"llm-tokens","cost_micros_source":"resp.cm",
     "cost_workflow_ids":["s.llm"],"consumer_agent_source":'"agent"',
+    "slugs_import_path": "app.services.moolabs.slugs_billing",
+    "event_type_const": "EVENT_TYPE_COMPLETION_DELIVERED",
+    "meter_slug_const": "METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED",
+    "feature_key_const": "FEATURE_KEY_RECOMMENDATION",
+    "span_type_const": "SPAN_TYPE_LLM_TOKENS",
+    "provider_const": None,
 }
 sources = {"tenant_id":"req.state.tid","request_id":"req.state.rid","customer_id":"req.state.cid",
            "consumer_agent":None,"feature_key":None}
@@ -712,6 +718,30 @@ for tpl in templates:
                     break
             if await_fail:
                 continue
+
+        if tpl.startswith("python-"):
+            # Phase C slugs assertions (Python)
+            has_slugs_import = "from app.services.moolabs.slugs_billing import" in r
+            has_event_type_const = "event_type=EVENT_TYPE_COMPLETION_DELIVERED" in r
+            has_meter_slug_const = ("meter_slug=METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED" in r
+                                    or pat == "cost-only")
+            no_event_type_literal = 'event_type="completion.delivered"' not in r
+            no_meter_slug_literal = 'meter_slug="checkout.recommendation.delivered"' not in r
+            if not has_slugs_import:
+                print(f"  FAIL  {tpl}[{pat}]: Phase C slugs import missing")
+                fail_count += 1; continue
+            if not has_event_type_const:
+                print(f"  FAIL  {tpl}[{pat}]: event_type_const not rendered")
+                fail_count += 1; continue
+            if not has_meter_slug_const:
+                print(f"  FAIL  {tpl}[{pat}]: meter_slug_const not rendered")
+                fail_count += 1; continue
+            if not no_event_type_literal:
+                print(f"  FAIL  {tpl}[{pat}]: event_type STRING LITERAL leaked")
+                fail_count += 1; continue
+            if not no_meter_slug_literal:
+                print(f"  FAIL  {tpl}[{pat}]: meter_slug STRING LITERAL leaked")
+                fail_count += 1; continue
 
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
