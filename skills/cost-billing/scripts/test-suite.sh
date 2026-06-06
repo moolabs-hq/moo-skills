@@ -774,6 +774,36 @@ for tpl in templates:
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
 
+# Phase D: customer-fixture-env-routing presence check
+import os
+phase_d_fixture = "skills/cost-billing/examples/customer-fixture-env-routing"
+if os.path.isdir(phase_d_fixture):
+    files_required = [
+        f"{phase_d_fixture}/customer-repo/app/settings.py",
+        f"{phase_d_fixture}/inventories/slug-inventory.yaml",
+        f"{phase_d_fixture}/inventories/attribution-bindings.yaml",
+        f"{phase_d_fixture}/customer-context/04-final.signed.yaml",
+    ]
+    missing = [f for f in files_required if not os.path.exists(f)]
+    if missing:
+        print(f"  FAIL  phase-d fixture: missing {missing}")
+        fail_count += 1
+    else:
+        # Validate slug-inventory.yaml round-trips
+        try:
+            import yaml
+            data = yaml.safe_load(open(files_required[1]).read())
+            assert "products" in data and len(data["products"]) == 1
+            assert data["products"][0]["product_slug"] == "billing"
+            print(f"  PASS  phase-d fixture: all 4 files present + slug-inventory parses")
+            pass_count += 1
+        except Exception as e:
+            print(f"  FAIL  phase-d fixture: parse error: {e}")
+            fail_count += 1
+else:
+    # Fixture not present — skip (not a failure if Phase D hasn't merged)
+    pass
+
 # Planner refuse-to-run gate: example attribution-bindings must satisfy it.
 # v0.3.0-rc1 (FR-3): tenant_id is NOT required by the helpers or the planner —
 # the SDK derives tenant identity server-side from the API key. consumer_agent
