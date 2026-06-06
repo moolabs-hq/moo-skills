@@ -179,6 +179,43 @@ def _python_insert_line(text: str, class_pattern: str) -> int:
     return 1
 
 
+def _ts_insert_line(text: str, opening_pattern: str) -> int:
+    """For TS object/schema patterns: return the last entry line of the
+    first matched balanced-brace block (1-indexed). Falls back to last
+    non-blank line + 1 when no balanced match.
+    """
+    lines = text.splitlines()
+    opening_re = re.compile(opening_pattern)
+    for i, line in enumerate(lines, start=1):
+        if opening_re.search(line):
+            # Found the opener; now find the closing brace and the last
+            # content line inside.
+            depth = line.count("{") - line.count("}")
+            if depth <= 0:
+                continue
+            last_content_line = i
+            for j in range(i + 1, len(lines) + 1):
+                inner = lines[j - 1]
+                inner_stripped = inner.strip()
+                depth += inner.count("{") - inner.count("}")
+                if depth <= 0:
+                    # We've closed the block — return the line BEFORE the closer.
+                    # If the closer is on a line by itself, last_content_line
+                    # already points at the last content line.
+                    if inner_stripped in {"}", "};", "})", "});", "})", "}));"}:
+                        return last_content_line
+                    return j
+                # Only track content lines while still inside the block
+                if inner_stripped and not inner_stripped.startswith("//"):
+                    last_content_line = j
+            return last_content_line
+    # Fallback: last non-blank line
+    for i in range(len(lines), 0, -1):
+        if lines[i - 1].strip():
+            return i
+    return 1
+
+
 def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
     """Scan a single file against the patterns. Return the highest-confidence
     match, or None if no pattern reaches the LOW threshold."""
@@ -214,7 +251,13 @@ def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
             # For class-based Python patterns, derive insertion line from the class
             line_to_insert = 1
             if p.structural_signals:
-                line_to_insert = _python_insert_line(text, p.structural_signals[0])
+                if p.language == "python":
+                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
+                elif p.language == "typescript":
+                    line_to_insert = _ts_insert_line(text, p.structural_signals[0])
+                else:
+                    # Go inserts handled in Task 5
+                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
             best = ScanResult(
                 pattern_id=p.id,
                 file=str(path),

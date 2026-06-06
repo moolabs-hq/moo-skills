@@ -137,5 +137,84 @@ class UnrecognizedFileReturnsNone(unittest.TestCase):
             self.assertIsNone(result)
 
 
+class TypeScriptZodEnv(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.ts_patterns = els.group_patterns_by_language(self.catalog)["typescript"]
+
+    def test_detects_zod_env_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "env.ts"
+            f.write_text(
+                "import { z } from 'zod';\n"
+                "\n"
+                "export const envSchema = z.object({\n"
+                "  DATABASE_URL: z.string(),\n"
+                "  REDIS_URL: z.string(),\n"
+                "});\n"
+            )
+            result = els.scan_file(f, self.ts_patterns)
+            self.assertEqual(result.pattern_id, "ts-zod-env-schema")
+            self.assertEqual(result.confidence, "high")
+
+
+class TypeScriptProcessEnvDirect(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.ts_patterns = els.group_patterns_by_language(self.catalog)["typescript"]
+
+    def test_detects_process_env_direct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.ts"
+            f.write_text(
+                "export const DATABASE_URL = process.env.DATABASE_URL ?? '';\n"
+                "export const REDIS_URL = process.env.REDIS_URL ?? '';\n"
+                "export const API_PORT = process.env.API_PORT ?? '8080';\n"
+            )
+            result = els.scan_file(f, self.ts_patterns)
+            self.assertEqual(result.pattern_id, "ts-process-env-direct")
+            # Only structural hit (no import) → medium confidence.
+            self.assertEqual(result.confidence, "medium")
+
+
+class TypeScriptEnvVarLibrary(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.ts_patterns = els.group_patterns_by_language(self.catalog)["typescript"]
+
+    def test_detects_env_var_library(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "config.ts"
+            f.write_text(
+                "import * as env from 'env-var';\n"
+                "\n"
+                "export const DATABASE_URL = env.get('DATABASE_URL').required().asString();\n"
+            )
+            result = els.scan_file(f, self.ts_patterns)
+            self.assertEqual(result.pattern_id, "ts-env-var-library")
+
+
+class TypeScriptInsertLineHeuristic(unittest.TestCase):
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.ts_patterns = els.group_patterns_by_language(self.catalog)["typescript"]
+
+    def test_zod_schema_insert_line_is_inside_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "env.ts"
+            f.write_text(
+                "import { z } from 'zod';\n"          # line 1
+                "\n"                                   # line 2
+                "export const envSchema = z.object({\n"  # line 3
+                "  DATABASE_URL: z.string(),\n"       # line 4
+                "  REDIS_URL: z.string(),\n"          # line 5
+                "});\n"                               # line 6
+            )
+            result = els.scan_file(f, self.ts_patterns)
+            # Insertion line should be inside the object — line 5 (the last
+            # field before the closing brace).
+            self.assertEqual(result.line_to_insert, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
