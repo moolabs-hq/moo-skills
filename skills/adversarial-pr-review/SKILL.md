@@ -567,6 +567,20 @@ Default lenses (use these AND any others the codebase profile suggests):
 10. CI-vs-local divergence — cache globs, missing CI install steps, env vars
     only set in the dev shell, codegen artifacts not regenerated in CI
 11. Documented anti-patterns from above — flag any occurrence in the diff
+12. Env-routing strategy-branch leakage — helper templates that still resolve
+    secrets via `boto3.client("secretsmanager")` / `vault.read_secret()` /
+    `gcp.get_secret()` strategy branches instead of the customer's settings
+    layer (`get_settings()` / `getSettings()` / `config.Get()`). See verbose
+    reference below.
+13. String-literal slug leakage at emit callsites — framework callsite
+    templates emitting `event_type=`, `meter_slug=`, or `kind=` (in spans
+    list) as inline string literals instead of CONSTANT references imported
+    from the per-product slugs module. Both single- and double-quote leaks
+    must be checked. See verbose reference below.
+14. Config default semantics regression — new config fields whose non-empty
+    defaults activate new code paths on customers who upgrade without
+    touching their YAML. The default's RUNTIME IMPACT matters, not just
+    its parseability. See verbose reference below.
 
 Report each finding as: severity (CRITICAL / IMPORTANT / MINOR / NIT),
 file:line, what the bug is, why it's wrong, and a suggested minimal fix.
@@ -577,6 +591,86 @@ them — this list is a floor, not a ceiling.
 ```
 
 Save the reviewer's output. Update the spec with the round number and the finding count.
+
+### Pass 2 — Phase D extended lens reference
+
+The compact numbered items 12-14 in the Pass 2 prompt above are summarized
+forms of three lenses derived from the cost-billing v0.3 migration's actual
+adversarial review. The verbose reference below documents each lens's catch
+pattern, how to check, and severity tier — operators briefing the reviewer
+on a PR that touches env-routing helpers, slugs modules, or config defaults
+should expand the compact item with the corresponding block.
+
+#### Env-routing strategy-branch leakage
+
+**Pattern (catch):** A PR that introduces helper templates resolving
+the SDK API key. After v0.3 migration, the helper should read through
+the customer's settings layer (`get_settings()` / `getSettings()` /
+`config.Get()`) — NOT through strategy-branched `boto3.client(
+"secretsmanager")` / `vault.read_secret()` / `gcp.get_secret()`
+blocks.
+
+**How to check:**
+- `grep -nE 'boto3\.client.*secretsmanager|vault.*read_secret|gcp.*get_secret' \
+  <rendered-helper>` → must return nothing post-migration.
+- Look in the helper template for `{% if strategy ==` branches — these
+  shouldn't exist post-Phase B.
+- Smoke assertion `no_strategy_branches` should fire.
+
+**Severity:** CRITICAL — a strategy-branch leak means the helper
+template hasn't been migrated; customers on the old shape will keep
+shipping the wrong code.
+
+#### String-literal slug leakage at emit callsites
+
+**Pattern (catch):** A PR that introduces framework callsite templates
+emitting `event_type=` / `meter_slug=` / `kind=` (in spans list). After
+v0.3 migration, these values should be CONSTANT references imported
+from the per-product slugs module — NOT inline string literals.
+
+**How to check:**
+- `grep -nE 'event_type\s*=\s*"[^"]+"' <rendered-callsite>` → must
+  return nothing post-migration.
+- The callsite should have `from {slugs_import_path} import (...)` at
+  the top.
+- Smoke assertion `no_event_type_literal` / `no_meter_slug_literal`
+  should fire.
+- BOTH single-quote AND double-quote leaks must be checked for TS.
+
+**Severity:** CRITICAL — a literal leak means the slugs module isn't
+the source of truth; renaming a slug in the inventory won't propagate
+to the customer's code.
+
+#### Config default semantics regression
+
+**Pattern (catch):** A PR that adds a config field with a non-empty
+default that activates new behavior on customers who upgrade without
+touching their YAML.
+
+**Why this matters:** The default's RUNTIME IMPACT matters, not just
+its parseability. "If a user upgrades without touching their YAML,
+does this default break them?" If yes, the default is wrong even if
+it parses fine.
+
+**How to check:**
+- Look at every new field added to a `Settings` / `Config` / `BaseSettings`
+  subclass. What is its default value?
+- For each non-empty default, trace through the code: does setting
+  this field activate a new branch? If yes, the field should default
+  to empty string / false (opt-in), not the non-empty value.
+- Specific patterns to flag:
+  - `cluster_name: str = "default"` — activates clustering at upgrade time
+  - `feature_flag_x: bool = True` — activates feature at upgrade time
+  - `distributed_table_name: str = "events_dist"` — activates Phase 3
+    schema branch at upgrade time
+
+**Severity:** CRITICAL when the new code path has irreversible side
+effects (schema migration, table creation, write fan-out). IMPORTANT
+when reversible (cache warming, log volume).
+
+**This lens is derived from the cost-billing v0.3 migration's actual
+adversarial review — Phase A's config_wire.py default-empty-string
+audit found the same bug pattern.**
 
 ## Phase 3: Verify and fix confirmed bugs
 
