@@ -166,6 +166,7 @@ import sys
 from pathlib import Path
 try:
     from jinja2 import Environment, FileSystemLoader
+    import yaml
 except ImportError:
     print("  SKIP  jinja2 not installed; rendered-template assertions skipped")
     sys.exit(0)
@@ -447,6 +448,35 @@ for stub_tpl in ("python-moolabs-settings.py.j2",
         else:
             print(f"  FAIL  stub {stub_tpl}: missing Get function")
             fail_count += 1
+
+# Deployment-surface templates
+deploy_ctx = {"service_slug": "test-svc"}
+for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
+            "k8s-secret-moolabs.yaml.j2"):
+    try:
+        r = env.get_template(tpl).render(**deploy_ctx)
+    except Exception as e:
+        print(f"  FAIL  deploy {tpl}: render error: {e}")
+        fail_count += 1
+        continue
+    if tpl.endswith(".env.j2") and "MOOLABS_API_KEY=" in r:
+        print(f"  PASS  deploy {tpl}")
+        pass_count += 1
+    elif tpl.endswith(".tf.j2") and 'variable "moolabs_api_key"' in r:
+        print(f"  PASS  deploy {tpl}")
+        pass_count += 1
+    elif tpl.endswith(".yaml.j2") and "kind: Secret" in r and "test-svc-moolabs" in r:
+        # Also validate YAML parses
+        try:
+            yaml.safe_load(r)
+            print(f"  PASS  deploy {tpl}")
+            pass_count += 1
+        except yaml.YAMLError as e:
+            print(f"  FAIL  deploy {tpl}: invalid YAML: {e}")
+            fail_count += 1
+    else:
+        print(f"  FAIL  deploy {tpl}: expected content missing")
+        fail_count += 1
 
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
