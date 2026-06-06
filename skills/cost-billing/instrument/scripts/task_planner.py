@@ -362,6 +362,75 @@ def build_slug_index(inventory: dict) -> dict[str, dict[str, dict[str, str]]]:
     return index
 
 
+@dataclass
+class SlugsEmitTask:
+    """One slugs-emit task per product. Renders slugs-<lang>.j2 to
+    <slugs_emit_path> based on the inventory's per-product constants."""
+    task_id: str
+    product_slug: str
+    constants: dict          # per-category {name, value} lists from slug-inventory
+    generated_at: str        # from slug-inventory.yaml
+
+
+def resolve_slug_constants(
+    index: dict[str, dict[str, dict[str, str]]],
+    product_slug: str,
+    event_type: str | None,
+    workflow_id: str | None,
+    cost_kind: str | None,
+) -> dict[str, str | None]:
+    """Look up the per-callsite constant names from the index.
+
+    Phase C framework callsite templates use these to render
+    `event_type=EVENT_TYPE_X` instead of `event_type="x.y"`.
+
+    Returns a dict with keys: event_type_const, meter_slug_const,
+    feature_key_const, provider_const, span_type_const. Each value is
+    the CATEGORY-prefixed constant name (e.g. `EVENT_TYPE_SEAT_ASSIGNED`)
+    or None if the lookup misses.
+    """
+    product_index = index.get(product_slug) or {}
+
+    def _lookup(category: str, value: str | None) -> str | None:
+        if not value:
+            return None
+        return (product_index.get(category) or {}).get(value)
+
+    # feature_key is derived from workflow_id's second dotted segment
+    # (matches slug_inventory.py's _feature_key_for convention)
+    feature_key_value: str | None = None
+    if workflow_id:
+        parts = workflow_id.split(".")
+        feature_key_value = parts[1] if len(parts) >= 2 else workflow_id
+
+    return {
+        "event_type_const": _lookup("EVENT_TYPE", event_type),
+        "meter_slug_const": _lookup("METER_SLUG", workflow_id),
+        "feature_key_const": _lookup("FEATURE_KEY", feature_key_value),
+        # provider isn't carried per-callsite in this codepath; discovered
+        # per-cost-event but not joined here. Future work.
+        "provider_const": _lookup("PROVIDER", None),
+        "span_type_const": _lookup("SPAN_TYPE", cost_kind),
+    }
+
+
+def build_slugs_emit_tasks(inventory: dict) -> list[SlugsEmitTask]:
+    """One slugs-emit task per product in the inventory."""
+    out: list[SlugsEmitTask] = []
+    generated_at = inventory.get("generated_at", "")
+    for idx, product in enumerate(inventory.get("products") or [], start=1):
+        slug = product.get("product_slug", "")
+        if not slug:
+            continue
+        out.append(SlugsEmitTask(
+            task_id=f"slugs_emit_{idx:03d}_{slug}",
+            product_slug=slug,
+            constants=product.get("constants") or {},
+            generated_at=generated_at,
+        ))
+    return out
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -466,7 +535,12 @@ def build_tasks(
     return tasks
 
 
-def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireTask] | None = None) -> None:
+def emit_tasks_yaml(
+    tasks: list[Task],
+    dest: Path,
+    env_wire_tasks: list[EnvWireTask] | None = None,
+    slugs_emit_tasks: list[SlugsEmitTask] | None = None,
+) -> None:
     lines: list[str] = []
     lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"total_tasks: {len(tasks)}")
@@ -547,6 +621,28 @@ def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireT
                     lines.append(f"        mode: {s['mode']}")
             else:
                 lines.append("    deployment_stubs: []")
+    # Phase 1.8 slugs-emit tasks (one per product). Same escape pattern.
+    if slugs_emit_tasks:
+        lines.append("slugs_emit_tasks:")
+        for st in slugs_emit_tasks:
+            lines.append(f"  - task_id: {st.task_id}")
+            lines.append(f"    product_slug: {st.product_slug}")
+            safe_gen_at = st.generated_at.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'    generated_at: "{safe_gen_at}"')
+            # The constants block is rendered as a nested mapping.
+            lines.append("    constants:")
+            for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
+                             "PROVIDER", "SPAN_TYPE"):
+                entries = st.constants.get(category, []) or []
+                if not entries:
+                    lines.append(f"      {category}: []")
+                    continue
+                lines.append(f"      {category}:")
+                for e in entries:
+                    safe_name = str(e.get("name", "")).replace("\\", "\\\\").replace('"', '\\"')
+                    safe_value = str(e.get("value", "")).replace("\\", "\\\\").replace('"', '\\"')
+                    lines.append(f'        - name: "{safe_name}"')
+                    lines.append(f'          value: "{safe_value}"')
     dest.write_text("\n".join(lines) + "\n")
 
 
@@ -556,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inventory-dir", default=".moolabs/inventory")
     ap.add_argument("--snapshot", default=".moolabs/customer-context/sdk-surface-snapshot.yaml")
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
+    ap.add_argument(
+        "--slug-inventory",
+        default=".moolabs/customer-context/slug-inventory.yaml",
+    )
     ap.add_argument("--output", default=".moolabs/codemod/tasks.yaml")
     ap.add_argument("--config-wiring-plan", default=".moolabs/customer-context/config-wiring-plan.yaml")
     args = ap.parse_args(argv)
@@ -618,11 +718,26 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
         return 1
 
+    # Phase 1.7 env-wire tasks (Phase B).
     env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
+    # Phase 1.8 slugs-emit tasks (Phase C). Missing file degrades to
+    # empty list (no slugs tasks rendered, existing tasks unaffected).
+    slug_inv = load_slug_inventory(Path(args.slug_inventory))
+    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv)
+
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    emit_tasks_yaml(tasks, out_path, env_wire_tasks)
-    print(f"wrote {out_path} ({len(tasks)} tasks, {sum(len(t.inserts) for t in tasks)} inserts)")
+    emit_tasks_yaml(
+        tasks, out_path,
+        env_wire_tasks=env_wire_tasks,
+        slugs_emit_tasks=slugs_emit_tasks,
+    )
+    print(
+        f"wrote {out_path} ({len(tasks)} tasks, "
+        f"{sum(len(t.inserts) for t in tasks)} inserts, "
+        f"{len(env_wire_tasks)} env-wire tasks, "
+        f"{len(slugs_emit_tasks)} slugs-emit tasks)"
+    )
     return 0
 
 
