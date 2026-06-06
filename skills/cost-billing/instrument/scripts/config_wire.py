@@ -271,20 +271,117 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
     }
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Plan build (orchestrator)
+# ──────────────────────────────────────────────────────────────────────
+
+def build_plan(inventory: dict, services_languages: dict[str, str]) -> dict:
+    """Orchestrate per-service plan derivation across the whole inventory.
+
+    services_languages: {service_slug: "python" | "typescript" | "go"}.
+    When a service slug is absent, defaults to python (matches Phase A's
+    parse_services_and_granularity fallback).
+    """
+    service_plans: list[dict] = []
+    for svc in inventory.get("services") or []:
+        slug = svc.get("service_slug", "")
+        language = services_languages.get(slug, "python")
+        service_plans.append(plan_service_env_wire(svc, language))
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "services": service_plans,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YAML emit (hand-rolled, matches Phase A convention; escapes \ AND " per
+# the Phase A review bug-class fix)
+# ──────────────────────────────────────────────────────────────────────
+
+def _quote(value: str) -> str:
+    """Escape backslash THEN double-quote (order matters; reverse would
+    double-escape the quote escape). Returns the QUOTED scalar."""
+    safe = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{safe}"'
+
+
+def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
+    lines: list[str] = []
+    lines.append(f"generated_at: {plan['generated_at']}")
+    if not plan.get("services"):
+        lines.append("services: []")
+    else:
+        lines.append("services:")
+        for svc in plan["services"]:
+            lines.append(f"  - service_slug: {svc['service_slug']}")
+            lines.append(f"    mode: {svc['mode']}")
+            lines.append(f"    settings_import_path: {_quote(svc['settings_import_path'])}")
+            lines.append(f"    api_key_accessor: {_quote(svc['api_key_accessor'])}")
+            if svc.get("stub_emit_path"):
+                lines.append(f"    stub_emit_path: {_quote(svc['stub_emit_path'])}")
+            else:
+                lines.append(f"    stub_emit_path: null")
+            stubs = svc.get("deployment_stubs", [])
+            if not stubs:
+                lines.append(f"    deployment_stubs: []")
+            else:
+                lines.append(f"    deployment_stubs:")
+                for s in stubs:
+                    lines.append(f"      - kind: {s['kind']}")
+                    lines.append(f"        source_path: {_quote(s['source_path'])}")
+                    if "emit_path" in s:
+                        lines.append(f"        emit_path: {_quote(s['emit_path'])}")
+                    lines.append(f"        mode: {s['mode']}")
+    dest.write_text("\n".join(lines) + "\n")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Signed-yaml helper (read services + per-service language)
+# ──────────────────────────────────────────────────────────────────────
+
+def _read_services_languages(signed_yaml_path: Path) -> dict[str, str]:
+    """Return {service_slug: language} from 04-final.signed.yaml.
+    Empty dict if the file is missing or PyYAML is absent."""
+    if not signed_yaml_path.exists():
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(signed_yaml_path.read_text()) or {}
+    except ImportError:
+        return {}
+    out: dict[str, str] = {}
+    for s in (data.get("integration") or {}).get("services") or []:
+        slug = s.get("slug") or s.get("service_slug") or ""
+        lang = s.get("language") or "python"
+        if slug:
+            out[slug] = lang
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--env-routing-inventory",
         default=".moolabs/customer-context/env-routing-inventory.yaml",
     )
+    ap.add_argument(
+        "--signed-yaml",
+        default=".moolabs/chain/04-final.signed.yaml",
+        help="path to 04-final.signed.yaml for per-service language lookup",
+    )
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
     args = ap.parse_args(argv)
 
     inv = load_env_routing_inventory(Path(args.env_routing_inventory))
-    print(
-        f"Phase B Task 2 skeleton — loaded {len(inv.get('services', []))} services.",
-        file=sys.stderr,
-    )
+    languages = _read_services_languages(Path(args.signed_yaml))
+    plan = build_plan(inv, languages)
+
+    out_dir = Path(args.customer_context_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "config-wiring-plan.yaml"
+    emit_config_wiring_plan_yaml(plan, out_path)
+    print(f"wrote {out_path}", file=sys.stderr)
     return 0
 
 

@@ -359,5 +359,100 @@ class DeploymentSurfacePlan(unittest.TestCase):
         self.assertNotIn("emit_path", stubs[0])
 
 
+class BuildPlanFromInventory(unittest.TestCase):
+    def test_build_plan_one_service(self):
+        inventory = {
+            "granularity": "per-service",
+            "services": [
+                {
+                    "service_slug": "svc-a",
+                    "app_config": {
+                        "pattern": "python-pydantic-settings-v2",
+                        "file": "svc-a/app/config.py",
+                        "stub_required": False,
+                    },
+                    "deployment_surfaces": [],
+                },
+            ],
+        }
+        plan = cw.build_plan(inventory, services_languages={"svc-a": "python"})
+        self.assertEqual(len(plan["services"]), 1)
+        self.assertEqual(plan["services"][0]["mode"], "modify")
+
+    def test_build_plan_unknown_language_falls_back_to_python(self):
+        inventory = {
+            "services": [
+                {"service_slug": "svc", "app_config": {"pattern": "unrecognized"},
+                 "deployment_surfaces": []},
+            ],
+        }
+        plan = cw.build_plan(inventory, services_languages={})
+        # No language declared → default to python (Phase A's
+        # parse_services_and_granularity makes the same fallback).
+        self.assertEqual(plan["services"][0]["mode"], "stub")
+        self.assertEqual(
+            plan["services"][0]["stub_emit_path"],
+            "app/services/moolabs_settings.py",
+        )
+
+
+class YamlEmit(unittest.TestCase):
+    def test_emit_yaml_roundtrips(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "config-wiring-plan.yaml"
+            plan = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "services": [
+                    {
+                        "service_slug": "svc",
+                        "mode": "modify",
+                        "settings_import_path": "app.config",
+                        "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+                        "stub_emit_path": None,
+                        "deployment_stubs": [
+                            {"kind": "dotenv_example",
+                             "source_path": ".env.example",
+                             "emit_path": ".env.example",
+                             "mode": "append"},
+                        ],
+                    },
+                ],
+            }
+            cw.emit_config_wiring_plan_yaml(plan, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(parsed["services"][0]["service_slug"], "svc")
+            self.assertEqual(parsed["services"][0]["mode"], "modify")
+            self.assertEqual(
+                parsed["services"][0]["api_key_accessor"],
+                "get_settings().moolabs_api_key.get_secret_value()",
+            )
+
+    def test_emit_yaml_handles_backslash_in_accessor(self):
+        """Defensive against the Phase A YAML escape bug class. Accessors
+        could legitimately contain `\` (regex literals, escape sequences)."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "plan.yaml"
+            accessor_with_bs = r'get_settings()["api\nkey"]'
+            plan = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "services": [{
+                    "service_slug": "svc",
+                    "mode": "modify",
+                    "settings_import_path": "app.config",
+                    "api_key_accessor": accessor_with_bs,
+                    "stub_emit_path": None,
+                    "deployment_stubs": [],
+                }],
+            }
+            cw.emit_config_wiring_plan_yaml(plan, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["services"][0]["api_key_accessor"],
+                accessor_with_bs,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
