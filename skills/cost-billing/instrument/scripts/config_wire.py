@@ -148,30 +148,97 @@ def _go_settings_import_path(file_path: str, service_slug: str = "") -> str:
     return "/".join(parts) if parts else "internal/config"
 
 
-def plan_service_env_wire(service: dict, language: str) -> dict:
-    """Derive the per-service env-wiring plan from an inventory entry.
+# Stub-mode emit paths per language. The customer merges this file into
+# their own config layer (per the spec's "stub fallback" rule).
+_STUB_EMIT_PATHS = {
+    "python":     "app/services/moolabs_settings.py",
+    "typescript": "src/services/moolabs-settings.ts",
+    "go":         "internal/moolabsconfig/settings.go",
+}
 
-    Returns:
-        {
-            "service_slug": str,
-            "mode": "modify" | "stub",
-            "settings_import_path": str,
-            "api_key_accessor": str,
-            "stub_emit_path": str | None,  # only when mode == "stub"
-        }
+# Stub-mode accessor (helper imports get_settings from the stub).
+_STUB_ACCESSORS = {
+    "python":     "get_settings().moolabs_api_key.get_secret_value()",
+    "typescript": "getSettings().MOOLABS_API_KEY",
+    "go":         "config.Get().MoolabsAPIKey",
+}
+
+# Stub-mode import path per language.
+_STUB_IMPORT_PATHS = {
+    "python":     "app.services.moolabs_settings",
+    "typescript": "@/services/moolabs-settings",
+    "go":         "internal/moolabsconfig",
+}
+
+
+def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
+    """Map each detected deployment surface to a stub-emit plan.
+
+    Per the spec's "deployment-surface stubs" rule:
+      - terraform / k8s: emit a NEW file alongside (never modify existing)
+      - dotenv_example:  append a single line to the existing file
+      - dockerfile:      checklist only (security smell — never auto-edit)
     """
+    out: list[dict] = []
+    for s in surfaces or []:
+        kind = s.get("kind")
+        path = s.get("path", "")
+        if kind == "terraform":
+            # Emit moolabs.tf alongside the detected variables.tf
+            dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
+            out.append({
+                "kind": "terraform",
+                "source_path": path,
+                "emit_path": f"{dir_path}/moolabs.tf" if dir_path != "." else "moolabs.tf",
+                "mode": "new_file",
+            })
+        elif kind == "k8s":
+            dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
+            out.append({
+                "kind": "k8s",
+                "source_path": path,
+                "emit_path": f"{dir_path}/secret-moolabs.yaml" if dir_path != "." else "secret-moolabs.yaml",
+                "mode": "new_file",
+            })
+        elif kind == "docker-compose":
+            out.append({
+                "kind": "docker-compose",
+                "source_path": path,
+                "emit_path": path,  # appending to existing
+                "mode": "append",
+            })
+        elif kind == "dotenv_example":
+            out.append({
+                "kind": "dotenv_example",
+                "source_path": path,
+                "emit_path": path,  # appending to existing
+                "mode": "append",
+            })
+        elif kind == "dockerfile":
+            out.append({
+                "kind": "dockerfile",
+                "source_path": path,
+                "mode": "checklist_only",
+            })
+    return out
+
+
+def plan_service_env_wire(service: dict, language: str) -> dict:
+    """Derive the per-service env-wiring plan from an inventory entry."""
     app_config = service.get("app_config") or {}
     pattern = app_config.get("pattern", "unrecognized")
     stub_required = bool(app_config.get("stub_required", True))
+    service_slug = service.get("service_slug", "")
+    deployment_stubs = _plan_deployment_stubs(service.get("deployment_surfaces") or [])
 
     if stub_required or pattern == "unrecognized":
-        # Stub mode — landed in Task 5.
         return {
-            "service_slug": service.get("service_slug", ""),
+            "service_slug": service_slug,
             "mode": "stub",
-            "settings_import_path": "",
-            "api_key_accessor": "",
-            "stub_emit_path": None,
+            "settings_import_path": _STUB_IMPORT_PATHS.get(language, ""),
+            "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
+            "stub_emit_path": _STUB_EMIT_PATHS.get(language),
+            "deployment_stubs": deployment_stubs,
         }
 
     accessor_map = {
@@ -179,24 +246,16 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
         "typescript": _TS_PATTERN_ACCESSORS,
         "go": _GO_PATTERN_ACCESSORS,
     }.get(language)
-    if accessor_map is None:
-        return {
-            "service_slug": service.get("service_slug", ""),
-            "mode": "stub",
-            "settings_import_path": "",
-            "api_key_accessor": "",
-            "stub_emit_path": None,
-        }
-    accessor = accessor_map.get(pattern)
+    accessor = accessor_map.get(pattern) if accessor_map else None
     if accessor is None:
         return {
-            "service_slug": service.get("service_slug", ""),
+            "service_slug": service_slug,
             "mode": "stub",
-            "settings_import_path": "",
-            "api_key_accessor": "",
-            "stub_emit_path": None,
+            "settings_import_path": _STUB_IMPORT_PATHS.get(language, ""),
+            "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
+            "stub_emit_path": _STUB_EMIT_PATHS.get(language),
+            "deployment_stubs": deployment_stubs,
         }
-    service_slug = service.get("service_slug", "")
     import_path = {
         "python": _python_settings_import_path,
         "typescript": _ts_settings_import_path,
@@ -208,6 +267,7 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
         "settings_import_path": import_path,
         "api_key_accessor": accessor,
         "stub_emit_path": None,
+        "deployment_stubs": deployment_stubs,
     }
 
 

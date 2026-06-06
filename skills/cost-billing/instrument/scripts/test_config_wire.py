@@ -252,5 +252,112 @@ class GoWireTargetDispatch(unittest.TestCase):
         self.assertEqual(plan["api_key_accessor"], 'os.Getenv("MOOLABS_API_KEY")')
 
 
+class StubModeFallback(unittest.TestCase):
+    def test_unrecognized_pattern_triggers_stub(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "unrecognized",
+                "confidence": "none",
+                "stub_required": True,
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "stub")
+        # Stub Settings file is emitted at a conventional service-relative path.
+        self.assertEqual(plan["stub_emit_path"], "app/services/moolabs_settings.py")
+        # Accessor reads from the stub.
+        self.assertEqual(
+            plan["api_key_accessor"],
+            "get_settings().moolabs_api_key.get_secret_value()",
+        )
+        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+
+    def test_stub_required_true_overrides_recognized_pattern(self):
+        """When confidence is low even for a recognized pattern, stub_required
+        triggers the stub fallback to avoid wiring into an uncertain match."""
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "pattern": "python-decouple",
+                "file": "svc/app/config.py",
+                "confidence": "low",
+                "stub_required": True,
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "stub")
+
+    def test_typescript_stub(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="typescript")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["stub_emit_path"], "src/services/moolabs-settings.ts")
+
+    def test_go_stub(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="go")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["stub_emit_path"], "internal/moolabsconfig/settings.go")
+
+
+class DeploymentSurfacePlan(unittest.TestCase):
+    def test_per_surface_emit_paths(self):
+        service = {
+            "service_slug": "payments-api",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [
+                {"kind": "terraform", "path": "infra/terraform/payments-api/variables.tf",
+                 "insert_kind": "variable_block_append"},
+                {"kind": "k8s", "path": "infra/k8s/payments-api/deployment.yaml",
+                 "insert_kind": "secret_ref_checklist"},
+                {"kind": "dotenv_example", "path": "services/payments-api/.env.example",
+                 "insert_kind": "line_append"},
+            ],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        stubs = plan.get("deployment_stubs", [])
+        self.assertEqual(len(stubs), 3)
+        kinds = {s["kind"] for s in stubs}
+        self.assertEqual(kinds, {"terraform", "k8s", "dotenv_example"})
+        terraform = next(s for s in stubs if s["kind"] == "terraform")
+        # Stub file goes ALONGSIDE the existing infra (never modifying it).
+        self.assertEqual(terraform["emit_path"],
+                         "infra/terraform/payments-api/moolabs.tf")
+        k8s = next(s for s in stubs if s["kind"] == "k8s")
+        self.assertEqual(k8s["emit_path"],
+                         "infra/k8s/payments-api/secret-moolabs.yaml")
+        dotenv = next(s for s in stubs if s["kind"] == "dotenv_example")
+        # .env.example gets a line APPENDED — same file, not a new one.
+        self.assertEqual(dotenv["emit_path"],
+                         "services/payments-api/.env.example")
+        self.assertEqual(dotenv["mode"], "append")
+
+    def test_dockerfile_emits_checklist_only(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [
+                {"kind": "dockerfile", "path": "services/svc/Dockerfile",
+                 "insert_kind": "checklist_only"},
+            ],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        stubs = plan.get("deployment_stubs", [])
+        self.assertEqual(len(stubs), 1)
+        self.assertEqual(stubs[0]["mode"], "checklist_only")
+        self.assertNotIn("emit_path", stubs[0])
+
+
 if __name__ == "__main__":
     unittest.main()
