@@ -537,6 +537,33 @@ else:
         print(f"  FAIL  slugs {slugs_python_tpl}: missing {', '.join(missing)}")
         fail_count += 1
 
+slugs_ts_tpl = "slugs-typescript.j2"
+try:
+    r = env.get_template(slugs_ts_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_ts_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc = "DO NOT EDIT" in r and "billing" in r
+    has_event = 'export const EVENT_TYPE_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_meter = 'export const METER_SLUG_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_provider = 'export const PROVIDER_OPENAI = "openai"' in r
+    has_span = 'export const SPAN_TYPE_LLM_TOKENS = "llm-tokens"' in r
+    has_as_const = "as const" in r  # TS literal type annotation
+    if has_doc and has_event and has_meter and has_provider and has_span and has_as_const:
+        print(f"  PASS  slugs {slugs_ts_tpl}: renders + 5 categories + as-const annotations")
+        pass_count += 1
+    else:
+        missing = []
+        if not has_doc: missing.append("doc-header")
+        if not has_event: missing.append("EVENT_TYPE")
+        if not has_meter: missing.append("METER_SLUG")
+        if not has_provider: missing.append("PROVIDER")
+        if not has_span: missing.append("SPAN_TYPE")
+        if not has_as_const: missing.append("as-const annotation")
+        print(f"  FAIL  slugs {slugs_ts_tpl}: missing {', '.join(missing)}")
+        fail_count += 1
+
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
     for pat in patterns:
