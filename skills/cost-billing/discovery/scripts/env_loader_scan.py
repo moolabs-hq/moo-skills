@@ -480,7 +480,185 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# CLI (skeleton — fleshed out in later tasks)
+# Inventory build
+# ──────────────────────────────────────────────────────────────────────
+
+def _service_entry(
+    repo_root: Path,
+    service: dict,
+    scan_root: Path,
+    catalog: list[Pattern],
+) -> dict:
+    """Build one services[] entry from a scan_service result + deployment
+    surfaces under the service's path."""
+    language = service.get("language", "python")
+    result = scan_service(scan_root, language, catalog)
+
+    if result is None:
+        app_config = {
+            "pattern": "unrecognized",
+            "confidence": "none",
+            "evidence": [],
+            "stub_required": True,
+        }
+    else:
+        rel_file = str(Path(result.file).relative_to(repo_root)) \
+            if Path(result.file).is_relative_to(repo_root) else result.file
+        app_config = {
+            "pattern": result.pattern_id,
+            "file": rel_file,
+            "line_to_insert": result.line_to_insert,
+            "confidence": result.confidence,
+            "confidence_score": round(result.confidence_score, 2),
+            "evidence": result.evidence,
+            "stub_required": result.confidence == "low",
+            "wire_target": result.wire_target,
+        }
+
+    # Deployment surfaces scoped to the SERVICE's path (not the whole repo).
+    service_path = repo_root / service["root"]
+    surfaces = scan_deployment_surfaces(service_path) if service_path.exists() else []
+
+    return {
+        "service_slug": service["slug"],
+        "app_config": app_config,
+        "deployment_surfaces": [
+            {"kind": s.kind, "path": s.path, "insert_kind": s.insert_kind}
+            for s in surfaces
+        ],
+    }
+
+
+def build_inventory(
+    repo_root: Path,
+    services: list[dict],
+    catalog: list[Pattern],
+    granularity: str,
+    granularity_source: str,
+    shared_config_path: str | None,
+) -> dict:
+    """Build the env-routing-inventory dict that will be YAML-emitted.
+
+    Granularity behavior:
+      - per-service:  scan each service's root independently
+      - repo-wide:    scan ONLY shared_config_path; every service entry
+                      points at the same file
+      - hybrid:       per-service for services not in the shared set;
+                      shared_config_path for the rest (out of scope for
+                      Phase A — falls back to per-service)
+      - TBD:          per-service best-effort with granularity_source flag
+    """
+    if granularity == "repo-wide" and shared_config_path:
+        scan_root = repo_root / shared_config_path
+        service_entries: list[dict] = []
+        for svc in services:
+            entry = _service_entry(repo_root, svc, scan_root, catalog)
+            service_entries.append(entry)
+    else:
+        # per-service (or TBD / hybrid → per-service for Phase A)
+        service_entries = []
+        for svc in services:
+            svc_root = repo_root / svc["root"]
+            entry = _service_entry(repo_root, svc, svc_root, catalog)
+            service_entries.append(entry)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "granularity": granularity,
+        "granularity_source": granularity_source,
+        "services": service_entries,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YAML emit (hand-rolled, matches sdk_snapshot.py convention)
+# ──────────────────────────────────────────────────────────────────────
+
+def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
+    """Hand-rolled YAML emit for env-routing-inventory.yaml. Avoids PyYAML
+    runtime dep for the customer codemod environment."""
+    lines: list[str] = []
+    lines.append(f"generated_at: {inventory['generated_at']}")
+    lines.append(f"granularity: {inventory['granularity']}")
+    lines.append(f"granularity_source: {inventory['granularity_source']}")
+    if not inventory["services"]:
+        lines.append("services: []")
+    else:
+        lines.append("services:")
+        for svc in inventory["services"]:
+            lines.append(f"  - service_slug: {svc['service_slug']}")
+            ac = svc["app_config"]
+            lines.append(f"    app_config:")
+            lines.append(f"      pattern: {ac['pattern']}")
+            if ac.get("file"):
+                lines.append(f"      file: {ac['file']}")
+                lines.append(f"      line_to_insert: {ac['line_to_insert']}")
+                lines.append(f"      confidence: {ac['confidence']}")
+                lines.append(f"      confidence_score: {ac['confidence_score']}")
+            else:
+                lines.append(f"      confidence: {ac['confidence']}")
+            lines.append(f"      stub_required: {str(ac['stub_required']).lower()}")
+            if ac.get("evidence"):
+                lines.append(f"      evidence:")
+                for e in ac["evidence"]:
+                    # Escape quotes inside the evidence string
+                    e_safe = e.replace('"', '\\"')
+                    lines.append(f'        - "{e_safe}"')
+            if ac.get("wire_target"):
+                lines.append(f"      wire_target:")
+                for k, v in ac["wire_target"].items():
+                    v_str = str(v).replace('"', '\\"')
+                    lines.append(f'        {k}: "{v_str}"')
+
+            if svc["deployment_surfaces"]:
+                lines.append(f"    deployment_surfaces:")
+                for s in svc["deployment_surfaces"]:
+                    lines.append(f"      - kind: {s['kind']}")
+                    lines.append(f"        path: {s['path']}")
+                    lines.append(f"        insert_kind: {s['insert_kind']}")
+            else:
+                lines.append(f"    deployment_surfaces: []")
+
+    dest.write_text("\n".join(lines) + "\n")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Signed-yaml parser (read services + env_loader_granularity)
+# ──────────────────────────────────────────────────────────────────────
+
+def parse_services_and_granularity(signed_yaml_path: Path) -> tuple[list[dict], str, str, str | None]:
+    """Read `04-final.signed.yaml` and return:
+      (services, env_loader_granularity, granularity_source, shared_config_path)
+
+    Defaults: granularity="TBD", source="default-fallback" if absent.
+    """
+    if not signed_yaml_path.exists():
+        return [], "TBD", "default-fallback", None
+    try:
+        import yaml
+        data = yaml.safe_load(signed_yaml_path.read_text()) or {}
+    except ImportError:
+        # Phase A leans on PyYAML; documented in the module docstring.
+        return [], "TBD", "default-fallback", None
+
+    integration = data.get("integration") or {}
+    services_raw = integration.get("services") or []
+    services: list[dict] = []
+    for s in services_raw:
+        services.append({
+            "slug": s.get("slug") or s.get("service_slug") or "",
+            "root": s.get("root") or s.get("path") or "",
+            "language": s.get("language") or "python",
+        })
+
+    granularity = integration.get("env_loader_granularity")
+    if granularity:
+        return services, granularity, "declared", integration.get("shared_config_path")
+    return services, "TBD", "default-fallback", None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLI
 # ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -491,10 +669,36 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo-root", default=".")
     args = ap.parse_args(argv)
 
-    # Phase A Task 3 ships catalog load + per-file scan only. Granularity,
-    # deployment surfaces, and YAML emit land in later tasks.
+    repo_root = Path(args.repo_root).resolve()
     catalog = load_pattern_catalog(Path(args.catalog))
-    print(f"loaded {len(catalog)} patterns", file=sys.stderr)
+    services, granularity, granularity_source, shared_config_path = \
+        parse_services_and_granularity(Path(args.signed_yaml))
+
+    if not services:
+        print(
+            "WARNING: no services found in 04-final.signed.yaml. "
+            "Inventory will have an empty services list.",
+            file=sys.stderr,
+        )
+
+    inventory = build_inventory(
+        repo_root=repo_root,
+        services=services,
+        catalog=catalog,
+        granularity=granularity,
+        granularity_source=granularity_source,
+        shared_config_path=shared_config_path,
+    )
+
+    out_dir = Path(args.customer_context_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "env-routing-inventory.yaml"
+    emit_inventory_yaml(inventory, out_path)
+    print(f"wrote {out_path}", file=sys.stderr)
+
+    # No exit code 2 / refuse-to-run in Phase A — the stub_required flag
+    # downstream handles the unrecognized-pattern case. The codemod
+    # adversarial review surfaces low-confidence entries.
     return 0
 
 

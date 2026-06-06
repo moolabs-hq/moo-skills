@@ -439,5 +439,99 @@ class DeploymentSurfaceScan(unittest.TestCase):
             self.assertEqual(docker_hits[0].insert_kind, "checklist_only")
 
 
+class GranularityHandling(unittest.TestCase):
+    def test_per_service_emits_one_entry_per_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "services" / "svc-a" / "app").mkdir(parents=True)
+            (repo / "services" / "svc-a" / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    x: str\n"
+            )
+            (repo / "services" / "svc-b" / "app").mkdir(parents=True)
+            (repo / "services" / "svc-b" / "app" / "config.py").write_text(
+                "from pydantic import BaseSettings\n"
+                "class S(BaseSettings):\n    x: str\n"
+            )
+            inventory = els.build_inventory(
+                repo_root=repo,
+                services=[
+                    {"slug": "svc-a", "root": "services/svc-a", "language": "python"},
+                    {"slug": "svc-b", "root": "services/svc-b", "language": "python"},
+                ],
+                catalog=els.load_pattern_catalog(CATALOG_PATH),
+                granularity="per-service",
+                granularity_source="declared",
+                shared_config_path=None,
+            )
+            self.assertEqual(len(inventory["services"]), 2)
+            slugs = {s["service_slug"] for s in inventory["services"]}
+            self.assertEqual(slugs, {"svc-a", "svc-b"})
+
+    def test_unrecognized_pattern_yields_stub_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "services" / "weird" / "app").mkdir(parents=True)
+            (repo / "services" / "weird" / "app" / "main.py").write_text(
+                "def main(): pass\n"
+            )
+            inventory = els.build_inventory(
+                repo_root=repo,
+                services=[{"slug": "weird", "root": "services/weird", "language": "python"}],
+                catalog=els.load_pattern_catalog(CATALOG_PATH),
+                granularity="per-service",
+                granularity_source="declared",
+                shared_config_path=None,
+            )
+            entry = inventory["services"][0]
+            self.assertEqual(entry["app_config"]["pattern"], "unrecognized")
+            self.assertTrue(entry["app_config"]["stub_required"])
+
+    def test_repo_wide_uses_shared_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            shared = repo / "packages" / "config"
+            shared.mkdir(parents=True)
+            (shared / "settings.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    x: str\n"
+            )
+            inventory = els.build_inventory(
+                repo_root=repo,
+                services=[
+                    {"slug": "svc-a", "root": "services/svc-a", "language": "python"},
+                    {"slug": "svc-b", "root": "services/svc-b", "language": "python"},
+                ],
+                catalog=els.load_pattern_catalog(CATALOG_PATH),
+                granularity="repo-wide",
+                granularity_source="declared",
+                shared_config_path="packages/config",
+            )
+            # Both services share the same wire target — the shared file.
+            self.assertEqual(len(inventory["services"]), 2)
+            for entry in inventory["services"]:
+                self.assertTrue(entry["app_config"]["file"].endswith("settings.py"))
+                self.assertEqual(entry["app_config"]["pattern"], "python-pydantic-settings-v2")
+
+
+class InventoryYamlEmit(unittest.TestCase):
+    def test_emit_yaml_has_top_level_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "env-routing-inventory.yaml"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "granularity": "per-service",
+                "granularity_source": "declared",
+                "services": [],
+            }
+            els.emit_inventory_yaml(inventory, out)
+            content = out.read_text()
+            self.assertIn("generated_at:", content)
+            self.assertIn("granularity: per-service", content)
+            self.assertIn("granularity_source: declared", content)
+            self.assertIn("services: []", content)
+
+
 if __name__ == "__main__":
     unittest.main()
