@@ -373,5 +373,71 @@ class ServiceScan(unittest.TestCase):
             self.assertIsNone(result)
 
 
+class DeploymentSurfaceScan(unittest.TestCase):
+    def test_detects_terraform_variables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_dir = Path(tmp) / "infra" / "terraform" / "payments-api"
+            tf_dir.mkdir(parents=True)
+            (tf_dir / "variables.tf").write_text(
+                'variable "database_url" { type = string }\n'
+            )
+            (tf_dir / "main.tf").write_text("# main\n")
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            terraform_hits = [s for s in surfaces if s.kind == "terraform"]
+            self.assertEqual(len(terraform_hits), 1)
+            self.assertTrue(terraform_hits[0].path.endswith("variables.tf"))
+            self.assertEqual(terraform_hits[0].insert_kind, "variable_block_append")
+
+    def test_detects_k8s_deployment_with_envfrom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            k8s = Path(tmp) / "infra" / "k8s" / "payments-api"
+            k8s.mkdir(parents=True)
+            (k8s / "deployment.yaml").write_text(
+                "apiVersion: apps/v1\n"
+                "kind: Deployment\n"
+                "metadata:\n  name: payments-api\n"
+                "spec:\n  template:\n    spec:\n      containers:\n"
+                "      - name: app\n"
+                "        envFrom:\n"
+                "        - secretRef:\n            name: payments-secrets\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            k8s_hits = [s for s in surfaces if s.kind == "k8s"]
+            self.assertEqual(len(k8s_hits), 1)
+            self.assertEqual(k8s_hits[0].insert_kind, "secret_ref_checklist")
+
+    def test_detects_docker_compose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "docker-compose.yml").write_text(
+                "services:\n  app:\n    image: app:latest\n    environment:\n"
+                "      - DATABASE_URL=postgres://...\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            compose_hits = [s for s in surfaces if s.kind == "docker-compose"]
+            self.assertEqual(len(compose_hits), 1)
+
+    def test_detects_dotenv_example(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "services" / "payments-api"
+            svc.mkdir(parents=True)
+            (svc / ".env.example").write_text("DATABASE_URL=\nREDIS_URL=\n")
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            dotenv_hits = [s for s in surfaces if s.kind == "dotenv_example"]
+            self.assertEqual(len(dotenv_hits), 1)
+            self.assertEqual(dotenv_hits[0].insert_kind, "line_append")
+
+    def test_dockerfile_with_env_lines_emits_checklist_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Dockerfile").write_text(
+                "FROM python:3.11\n"
+                "ENV DATABASE_URL=postgres://baked-in\n"  # security smell
+                "COPY . /app\n"
+            )
+            surfaces = els.scan_deployment_surfaces(Path(tmp))
+            docker_hits = [s for s in surfaces if s.kind == "dockerfile"]
+            self.assertEqual(len(docker_hits), 1)
+            self.assertEqual(docker_hits[0].insert_kind, "checklist_only")
+
+
 if __name__ == "__main__":
     unittest.main()

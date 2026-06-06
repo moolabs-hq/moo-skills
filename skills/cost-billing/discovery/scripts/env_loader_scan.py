@@ -385,6 +385,101 @@ def scan_service(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Deployment-surface scan
+# ──────────────────────────────────────────────────────────────────────
+
+@dataclass
+class DeploymentSurface:
+    kind: str          # "terraform" | "k8s" | "docker-compose" | "dotenv_example" | "dockerfile"
+    path: str          # repo-relative path
+    insert_kind: str   # "variable_block_append" | "secret_ref_checklist" |
+                       # "environment_block_append" | "line_append" | "checklist_only"
+
+
+# Per-surface skip dirs are MORE permissive than _SKIP_DIRS — we explicitly
+# want to scan infra/, deployment/, k8s/, etc.
+_SURFACE_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", "vendor"})
+
+
+def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
+    """Walk the repo for deployment-surface insertion points. Each detected
+    surface becomes one entry; the instrument side decides per-entry whether
+    to emit a stub file, append to an existing file, or emit a CHECKLIST
+    comment.
+
+    Recognition rules (all non-destructive — no file modification here):
+      - Terraform: any `variable "..." {}` block in a *.tf file
+      - k8s: Deployment / StatefulSet / DaemonSet manifests with envFrom: secretRef
+      - docker-compose: `services.<X>.environment:` block in compose yaml
+      - .env.example / .env.sample: presence
+      - Dockerfile: ENV lines (security smell — checklist only)
+    """
+    out: list[DeploymentSurface] = []
+
+    for path in repo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _SURFACE_SKIP_DIRS for part in path.parts):
+            continue
+        rel = str(path.relative_to(repo_root))
+
+        # Terraform
+        if path.suffix == ".tf":
+            text = path.read_text(errors="ignore")
+            if re.search(r'variable\s+"[^"]+"\s*\{', text):
+                out.append(DeploymentSurface(
+                    kind="terraform",
+                    path=rel,
+                    insert_kind="variable_block_append",
+                ))
+            continue
+
+        # Kubernetes manifests
+        if path.suffix in (".yaml", ".yml"):
+            text = path.read_text(errors="ignore")
+            if re.search(r'^\s*kind:\s*(Deployment|StatefulSet|DaemonSet)\b',
+                         text, re.MULTILINE):
+                out.append(DeploymentSurface(
+                    kind="k8s",
+                    path=rel,
+                    insert_kind="secret_ref_checklist",
+                ))
+                continue
+            # docker-compose detection by filename
+            if path.name in {"docker-compose.yml", "docker-compose.yaml",
+                             "compose.yml", "compose.yaml"}:
+                if re.search(r'^\s*environment:\s*$', text, re.MULTILINE) or \
+                   re.search(r'^\s*environment:\s*\[', text, re.MULTILINE):
+                    out.append(DeploymentSurface(
+                        kind="docker-compose",
+                        path=rel,
+                        insert_kind="environment_block_append",
+                    ))
+            continue
+
+        # .env.example / .env.sample
+        if path.name in {".env.example", ".env.sample"}:
+            out.append(DeploymentSurface(
+                kind="dotenv_example",
+                path=rel,
+                insert_kind="line_append",
+            ))
+            continue
+
+        # Dockerfile
+        if path.name == "Dockerfile" or path.name.startswith("Dockerfile."):
+            text = path.read_text(errors="ignore")
+            if re.search(r'^\s*ENV\s+\w+', text, re.MULTILINE):
+                out.append(DeploymentSurface(
+                    kind="dockerfile",
+                    path=rel,
+                    insert_kind="checklist_only",
+                ))
+
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────
 # CLI (skeleton — fleshed out in later tasks)
 # ──────────────────────────────────────────────────────────────────────
 
