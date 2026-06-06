@@ -1,0 +1,13 @@
+/**
+ * Generated stub Moolabs Settings for {{ service_slug }}.
+ *
+ * Phase A's env_loader_scan.py could not recognize an existing env-config
+ * pattern (zod / process.env / env-var) in this service. Merge this into
+ * your real config, or accept as-is.
+ */
+
+export const MOOLABS_API_KEY = process.env.MOOLABS_API_KEY ?? '';
+
+export function getSettings(): { MOOLABS_API_KEY: string } {
+  return { MOOLABS_API_KEY };
+}

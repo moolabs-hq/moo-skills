@@ -401,6 +401,53 @@ else:
         print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
         pass_count += 1
 
+# Stub Settings templates
+for stub_tpl in ("python-moolabs-settings.py.j2",
+                 "typescript-moolabs-settings.ts.j2",
+                 "go-moolabs-settings.go.j2"):
+    try:
+        r = env.get_template(stub_tpl).render(service_slug="test-svc")
+    except Exception as e:
+        print(f"  FAIL  stub {stub_tpl}: render error: {e}")
+        fail_count += 1
+        continue
+    if stub_tpl.startswith("python"):
+        try:
+            compile(r, stub_tpl, "exec")
+        except SyntaxError as e:
+            print(f"  FAIL  stub {stub_tpl}: py syntax: {e.msg}")
+            fail_count += 1
+            continue
+        if "def get_settings" in r and "moolabs_api_key" in r:
+            print(f"  PASS  stub {stub_tpl}: renders + py-compile clean + get_settings present")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing get_settings/moolabs_api_key")
+            fail_count += 1
+    elif stub_tpl.startswith("typescript"):
+        if "export function getSettings" in r and "MOOLABS_API_KEY" in r:
+            print(f"  PASS  stub {stub_tpl}: renders + exports getSettings")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing exports")
+            fail_count += 1
+    else:  # go
+        if "func Get()" in r and "MoolabsAPIKey" in r:
+            if gofmt:
+                with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
+                    tf.write(r); tfp = tf.name
+                res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
+                Path(tfp).unlink()
+                if res.returncode != 0:
+                    print(f"  FAIL  stub {stub_tpl}: gofmt: {res.stderr.strip()[:200]}")
+                    fail_count += 1
+                    continue
+            print(f"  PASS  stub {stub_tpl}: renders + Get/MoolabsAPIKey + gofmt-clean")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing Get function")
+            fail_count += 1
+
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
     for pat in patterns:

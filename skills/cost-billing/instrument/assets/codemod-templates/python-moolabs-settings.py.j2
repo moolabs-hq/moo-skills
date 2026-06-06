@@ -1,0 +1,32 @@
+{# Stub Moolabs Settings — generated when env_loader_scan.py did NOT
+   recognize the customer's existing config pattern. The customer should
+   merge this into their own Settings class, or accept it as-is for
+   minimal MOOLABS_API_KEY-only routing.
+
+   Variables expected:
+     service_slug — for the docstring header
+#}
+"""Generated stub Settings for {{ service_slug }} Moolabs API key.
+
+Phase A's env_loader_scan.py could not recognize an existing config
+pattern (pydantic-settings, dotenv, etc.) in this service's source tree.
+This file is the minimal stub to make the codemod-generated helper work:
+the helper imports `get_settings()` from here and reads `moolabs_api_key`.
+
+ACTION FOR THE ENGINEER: merge this into your real config layer, or
+accept it as-is.
+"""
+
+from functools import lru_cache
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings
+
+
+class _MoolabsSettings(BaseSettings):
+    moolabs_api_key: SecretStr = Field(..., env="MOOLABS_API_KEY")
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> _MoolabsSettings:
+    return _MoolabsSettings()
