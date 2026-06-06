@@ -51,6 +51,100 @@ def load_env_routing_inventory(path: Path) -> dict:
     return data
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Per-service plan derivation
+# ──────────────────────────────────────────────────────────────────────
+
+# Maps each pattern_id → (mode-when-recognized, accessor template).
+# Accessor template uses {{settings_call}} as a placeholder for the language-
+# specific get_settings() call site.
+_PYTHON_PATTERN_ACCESSORS = {
+    "python-pydantic-settings-v2": "get_settings().moolabs_api_key.get_secret_value()",
+    "python-pydantic-v1-settings": "get_settings().moolabs_api_key.get_secret_value()",
+    "python-decouple":            "MOOLABS_API_KEY",
+    "python-dotenv-os-getenv":    "MOOLABS_API_KEY",
+}
+
+
+def _python_settings_import_path(file_path: str, service_slug: str = "") -> str:
+    """Derive the Python import path for the customer's settings module.
+
+    Convention:
+      services/<svc>/<pkg>/config.py   → <pkg>.config
+      <slug>/app/settings.py           → app.settings  (slug prefix stripped)
+      packages/config/settings.py      → packages.config.settings
+    """
+    parts = file_path.split("/")
+    # Strip leading "services/<svc>/" if present (two segments)
+    if len(parts) >= 2 and parts[0] == "services":
+        parts = parts[2:]
+    # Strip leading service-slug segment when it matches
+    elif service_slug and parts and parts[0] == service_slug:
+        parts = parts[1:]
+    # Drop the .py extension from the final segment
+    if parts and parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][:-3]
+    return ".".join(parts)
+
+
+def plan_service_env_wire(service: dict, language: str) -> dict:
+    """Derive the per-service env-wiring plan from an inventory entry.
+
+    Returns:
+        {
+            "service_slug": str,
+            "mode": "modify" | "stub",
+            "settings_import_path": str,
+            "api_key_accessor": str,
+            "stub_emit_path": str | None,  # only when mode == "stub"
+        }
+    """
+    app_config = service.get("app_config") or {}
+    pattern = app_config.get("pattern", "unrecognized")
+    stub_required = bool(app_config.get("stub_required", True))
+
+    if stub_required or pattern == "unrecognized":
+        # Stub mode — landed in Task 5.
+        return {
+            "service_slug": service.get("service_slug", ""),
+            "mode": "stub",
+            "settings_import_path": "",
+            "api_key_accessor": "",
+            "stub_emit_path": None,
+        }
+
+    if language == "python":
+        accessor = _PYTHON_PATTERN_ACCESSORS.get(pattern)
+        if accessor is None:
+            return {
+                "service_slug": service.get("service_slug", ""),
+                "mode": "stub",
+                "settings_import_path": "",
+                "api_key_accessor": "",
+                "stub_emit_path": None,
+            }
+        import_path = _python_settings_import_path(
+            app_config.get("file", ""),
+            service_slug=service.get("service_slug", ""),
+        )
+        return {
+            "service_slug": service.get("service_slug", ""),
+            "mode": "modify",
+            "settings_import_path": import_path,
+            "api_key_accessor": accessor,
+            "stub_emit_path": None,
+        }
+
+    # Other languages handled in Task 4.
+    return {
+        "service_slug": service.get("service_slug", ""),
+        "mode": "stub",
+        "settings_import_path": "",
+        "api_key_accessor": "",
+        "stub_emit_path": None,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
