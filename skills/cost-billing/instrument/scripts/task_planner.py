@@ -92,6 +92,49 @@ class Task:
     audit: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class EnvWireTask:
+    """One env-wire task per service. Distinct from per-file callsite Tasks
+    because env-wiring is service-scoped (one helper module per service,
+    plus optional deployment stubs)."""
+    task_id: str
+    service_slug: str
+    mode: str  # "modify" | "stub"
+    settings_import_path: str
+    api_key_accessor: str
+    stub_emit_path: str | None
+    deployment_stubs: list[dict]
+
+
+def _load_config_wiring_plan(path: Path) -> list[dict]:
+    """Read config-wiring-plan.yaml from Phase 1.7. Returns the per-service
+    plan list (empty if file missing or PyYAML absent)."""
+    if not path.exists():
+        return []
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text()) or {}
+    except ImportError:
+        return []
+    return data.get("services") or []
+
+
+def build_env_wire_tasks(config_wiring_path: Path) -> list[EnvWireTask]:
+    services = _load_config_wiring_plan(config_wiring_path)
+    out: list[EnvWireTask] = []
+    for idx, svc in enumerate(services, start=1):
+        out.append(EnvWireTask(
+            task_id=f"env_wire_{idx:03d}_{svc.get('service_slug', '')}",
+            service_slug=svc.get("service_slug", ""),
+            mode=svc.get("mode", "stub"),
+            settings_import_path=svc.get("settings_import_path", ""),
+            api_key_accessor=svc.get("api_key_accessor", ""),
+            stub_emit_path=svc.get("stub_emit_path"),
+            deployment_stubs=svc.get("deployment_stubs") or [],
+        ))
+    return out
+
+
 def _shasum(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
@@ -384,7 +427,7 @@ def build_tasks(
     return tasks
 
 
-def emit_tasks_yaml(tasks: list[Task], dest: Path) -> None:
+def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireTask] | None = None) -> None:
     lines: list[str] = []
     lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"total_tasks: {len(tasks)}")
@@ -433,6 +476,33 @@ def emit_tasks_yaml(tasks: list[Task], dest: Path) -> None:
         lines.append("    audit:")
         for k, v in t.audit.items():
             lines.append(f"      {k}: {v}")
+    # Phase 1.7 env-wire tasks (one per service). Backslash + quote escape
+    # follows Phase A's YAML emit-bug-class fix.
+    if env_wire_tasks:
+        lines.append("env_wire_tasks:")
+        for t in env_wire_tasks:
+            lines.append(f"  - task_id: {t.task_id}")
+            lines.append(f"    service_slug: {t.service_slug}")
+            lines.append(f"    mode: {t.mode}")
+            safe_import = t.settings_import_path.replace('\\', '\\\\').replace('"', '\\"')
+            safe_accessor = t.api_key_accessor.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'    settings_import_path: "{safe_import}"')
+            lines.append(f'    api_key_accessor: "{safe_accessor}"')
+            if t.stub_emit_path:
+                safe_stub = t.stub_emit_path.replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'    stub_emit_path: "{safe_stub}"')
+            else:
+                lines.append(f"    stub_emit_path: null")
+            if t.deployment_stubs:
+                lines.append("    deployment_stubs:")
+                for s in t.deployment_stubs:
+                    lines.append(f"      - kind: {s['kind']}")
+                    if "emit_path" in s:
+                        safe_emit = str(s['emit_path']).replace('\\', '\\\\').replace('"', '\\"')
+                        lines.append(f'        emit_path: "{safe_emit}"')
+                    lines.append(f"        mode: {s['mode']}")
+            else:
+                lines.append("    deployment_stubs: []")
     dest.write_text("\n".join(lines) + "\n")
 
 
@@ -443,6 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--snapshot", default=".moolabs/customer-context/sdk-surface-snapshot.yaml")
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
     ap.add_argument("--output", default=".moolabs/codemod/tasks.yaml")
+    ap.add_argument("--config-wiring-plan", default=".moolabs/customer-context/config-wiring-plan.yaml")
     args = ap.parse_args(argv)
 
     inv_dir = Path(args.inventory_dir)
@@ -503,9 +574,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
         return 1
 
+    env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    emit_tasks_yaml(tasks, out_path)
+    emit_tasks_yaml(tasks, out_path, env_wire_tasks)
     print(f"wrote {out_path} ({len(tasks)} tasks, {sum(len(t.inserts) for t in tasks)} inserts)")
     return 0
 
