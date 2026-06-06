@@ -202,7 +202,7 @@ def _ts_insert_line(text: str, opening_pattern: str) -> int:
                     # We've closed the block — return the line BEFORE the closer.
                     # If the closer is on a line by itself, last_content_line
                     # already points at the last content line.
-                    if inner_stripped in {"}", "};", "})", "});", "})", "}));"}:
+                    if inner_stripped in {"}", "};", "})", "});", "}))", "}));"}:
                         return last_content_line
                     return j
                 # Only track content lines while still inside the block
@@ -339,9 +339,12 @@ def scan_service(
     """Walk a service directory and return the best env-loader-pattern match
     found, or None if no file passes the LOW threshold.
 
-    Conflict resolution: the highest-priority pattern wins. If two files
-    match the SAME pattern, the deepest match (most-specific path) wins —
-    `app/config.py` beats `app/legacy/old_config.py`.
+    Conflict resolution (sort_key order):
+      1. Highest confidence_score wins.
+      2. Among equal scores, highest catalog priority wins.
+      3. Among equal priority, the SHALLOWEST path wins (closest to the
+         service root = most canonical config location).
+         e.g. `app/config.py` beats `app/legacy/old_config.py`.
     """
     by_lang = group_patterns_by_language(catalog)
     patterns = by_lang.get(language, [])

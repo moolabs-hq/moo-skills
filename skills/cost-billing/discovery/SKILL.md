@@ -263,8 +263,10 @@ across five categories:
 - `SPAN_TYPE` — canonical span-kind from cost_kind values (per-product,
   de-duped by name)
 
-Naming convention: `UPPER_SNAKE_CASE` via
-`slug.value.replace(".", "_").replace("-", "_").upper()`.
+Naming convention: `UPPER_SNAKE_CASE` via `re.split(r"[.\-_]+", value)`
+joined with `_` and uppercased. Empty segments (from leading/trailing
+or consecutive separators) are stripped — so `"foo..bar"` becomes
+`"FOO_BAR"`, not `"FOO__BAR"`.
 
 Duplicate-detection: when two different source values in the same
 (product, category) collapse to the same canonical name (e.g. one entry

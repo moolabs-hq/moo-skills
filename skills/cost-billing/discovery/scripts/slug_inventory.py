@@ -155,11 +155,12 @@ def check_duplicates(by_product: dict[str, dict[str, list[dict]]]) -> list[str]:
     collapse to the same canonical NAME. Returns a list of error strings.
     Empty list = clean.
 
-    Note: _add_unique() in derive_per_product_constants() already drops
-    duplicates by NAME — so we need to re-scan the per-category buckets
-    looking for the case where TWO DIFFERENT source values would generate
-    the same NAME. We detect by re-running to_constant_name on each value
-    in the bucket and counting collisions.
+    `_add_unique()` in `derive_per_product_constants()` dedupes by the
+    `(name, value)` PAIR — so exact duplicates (same name + same value)
+    drop, but two different source values that to_constant_name() collapses
+    to the SAME canonical name both land in the bucket. This function walks
+    each bucket grouping by name and reports any name with multiple
+    distinct values as a collision.
     """
     errors: list[str] = []
     for product, categories in by_product.items():
