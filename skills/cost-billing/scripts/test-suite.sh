@@ -210,6 +210,12 @@ helper_ctx = {
         "cost_method_path": "client.cost.ingest_event",
         "events_method_path": "client.events.ingest",
     },
+    "env_config": {
+        "mode": "modify",
+        "settings_import_path": "app.config",
+        "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+        "stub_emit_path": None,
+    },
 }
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
     try:
@@ -237,6 +243,18 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
                        and "resolved_event_id" not in r
                        and "skipped_no_tenant_id" not in r
                        and "log_kwargs[" not in r)
+        # Phase 1.7 env-wire: helper imports from get_settings() instead of
+        # direct os.environ / strategy-branched fetches.
+        has_get_settings = "from app.config import get_settings" in r
+        # Phase 1.7 negative-leakage: NO strategy-branched fetches.
+        no_strategy_branches = (
+            "import boto3" not in r and
+            "from google.cloud import secretmanager" not in r and
+            "import hvac" not in r and
+            "subprocess.run" not in r  # 1Password CLI
+        )
+        # Phase 1.7 _resolve_api_key reads via accessor, not os.environ direct
+        no_direct_environ_resolve = "os.environ.get(\"MOOLABS_API_KEY\")" not in r
         failed = []
         if not has_usage:   failed.append("usage.ingest_event missing")
         if not has_cost:    failed.append("cost.ingest_event missing")
@@ -245,6 +263,9 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         if not has_rail:    failed.append("never-drop log rail missing")
         if not no_tenant:   failed.append("tenant_id leaked (FR-3 violation)")
         if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if not has_get_settings:        failed.append("env_config get_settings import missing")
+        if not no_strategy_branches:    failed.append("v0.2 strategy branch leaked (boto3/google/hvac/op)")
+        if not no_direct_environ_resolve: failed.append("os.environ direct read leaked")
         if failed:
             print(f"  FAIL  helper {helper}: {', '.join(failed)}")
             fail_count += 1

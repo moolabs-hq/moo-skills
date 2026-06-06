@@ -46,12 +46,21 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any, Optional
 
-{% if sdk_key_location.strategy == "aws_secrets_manager" %}import boto3
-{% elif sdk_key_location.strategy == "gcp_secret_manager" %}from google.cloud import secretmanager
-{% elif sdk_key_location.strategy == "vault" %}import hvac
-{% elif sdk_key_location.strategy == "onepassword" %}import subprocess
-{% endif %}import structlog
+{# Phase 1.7 env-wire (NEW v0.3 env-routing migration):
+   env_config.mode               — "modify" | "stub"
+   env_config.settings_import_path — e.g. "app.config" or "app.services.moolabs_settings"
+   env_config.api_key_accessor   — e.g. "get_settings().moolabs_api_key.get_secret_value()"
+
+   The v0.2-era strategy-branched _resolve_api_key (boto3/hvac/google.cloud)
+   is gone. The customer's Settings class is now RESPONSIBLE for resolving
+   the secret from whatever store they use (Vault/AWS/etc) — the helper
+   just reads `get_settings().moolabs_api_key`.
+#}
+import structlog
 from moolabs import Moolabs
+
+# Import the customer's settings layer (or the generated stub).
+from {{ env_config.settings_import_path }} import get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -70,53 +79,14 @@ _DEV_ENV_VAR = "SDK_DEVELOPMENT"
 
 @lru_cache(maxsize=1)
 def _resolve_api_key() -> str:
-    """Resolve MOOLABS_API_KEY from {{ sdk_key_location.strategy }}.
+    """Read MOOLABS_API_KEY from the customer's settings layer.
 
-    Cached via lru_cache (singleton). If resolution fails, returns empty
-    string — get_client() will instantiate with no key, the SDK call will
-    fail, and _handle_emit_err routes per SDK_DEVELOPMENT.
+    The customer's Settings class (or the generated stub at
+    {{ env_config.stub_emit_path if env_config.mode == "stub" else env_config.settings_import_path }})
+    owns secret resolution — whether it pulls from Vault, AWS Secrets
+    Manager, env vars, or a hardcoded value. This helper does not care.
     """
-    env = os.environ.get("APP_ENV", "prod")
-{% if sdk_key_location.strategy == "aws_secrets_manager" %}
-    secret_id = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
-    try:
-        client = boto3.client("secretsmanager", region_name="{{ sdk_key_location.region | default('us-east-1') }}")
-        response = client.get_secret_value(SecretId=secret_id)
-        return response["SecretString"]
-    except Exception as exc:
-        logger.error("moolabs.sdk_key.resolution_failed", secret_id=secret_id,
-                     error=str(exc), policy="fail_open_silent_swallow")
-        return ""
-{% elif sdk_key_location.strategy == "gcp_secret_manager" %}
-    secret_id = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        response = client.access_secret_version(name=secret_id)
-        return response.payload.data.decode("utf-8")
-    except Exception as exc:
-        logger.error("moolabs.sdk_key.resolution_failed", secret_id=secret_id,
-                     error=str(exc), policy="fail_open_silent_swallow")
-        return ""
-{% elif sdk_key_location.strategy == "vault" %}
-    secret_path = f"{{ sdk_key_location.secret_id_template }}".format(env=env)
-    try:
-        vault = hvac.Client()
-        response = vault.secrets.kv.v2.read_secret_version(path=secret_path)
-        return response["data"]["data"]["api_key"]
-    except Exception as exc:
-        logger.error("moolabs.sdk_key.resolution_failed", secret_path=secret_path,
-                     error=str(exc), policy="fail_open_silent_swallow")
-        return ""
-{% elif sdk_key_location.strategy == "env_var" %}
-    return os.environ.get("MOOLABS_API_KEY", "")
-{% elif sdk_key_location.strategy == "custom" %}
-    try:
-        {{ sdk_key_read_pattern | indent(8) }}
-    except Exception as exc:
-        logger.error("moolabs.sdk_key.resolution_failed", error=str(exc),
-                     policy="fail_open_silent_swallow")
-        return ""
-{% endif %}
+    return {{ env_config.api_key_accessor }}
 
 
 # ── client singleton ────────────────────────────────────────────────────────
