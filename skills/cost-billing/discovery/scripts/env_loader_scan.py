@@ -314,6 +314,77 @@ def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Service-level scan
+# ──────────────────────────────────────────────────────────────────────
+
+_EXTENSION_BY_LANGUAGE = {
+    "python": (".py",),
+    "typescript": (".ts", ".tsx", ".mts"),
+    "go": (".go",),
+}
+
+# Skip directories that never contain config (saves walk time + avoids
+# false positives in vendored dependencies).
+_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox",
+    "vendor", "dist", "build", ".next", ".pytest_cache", ".mypy_cache",
+})
+
+
+def scan_service(
+    service_root: Path,
+    language: str,
+    catalog: list[Pattern],
+) -> ScanResult | None:
+    """Walk a service directory and return the best env-loader-pattern match
+    found, or None if no file passes the LOW threshold.
+
+    Conflict resolution: the highest-priority pattern wins. If two files
+    match the SAME pattern, the deepest match (most-specific path) wins —
+    `app/config.py` beats `app/legacy/old_config.py`.
+    """
+    by_lang = group_patterns_by_language(catalog)
+    patterns = by_lang.get(language, [])
+    if not patterns:
+        return None
+
+    extensions = _EXTENSION_BY_LANGUAGE.get(language, ())
+    if not extensions:
+        return None
+
+    candidates: list[ScanResult] = []
+    for path in service_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        if path.suffix not in extensions:
+            continue
+        hit = scan_file(path, patterns)
+        if hit is not None:
+            candidates.append(hit)
+
+    if not candidates:
+        return None
+
+    # Sort by: confidence_score desc, then by priority of the matched
+    # pattern desc, then by path depth asc (shallower path = more canonical
+    # config location).
+    priority_by_id = {p.id: p.priority for p in catalog}
+
+    def sort_key(r: ScanResult) -> tuple:
+        depth = r.file.count("/")
+        return (
+            -r.confidence_score,
+            -priority_by_id.get(r.pattern_id, 0),
+            depth,
+        )
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
+# ──────────────────────────────────────────────────────────────────────
 # CLI (skeleton — fleshed out in later tasks)
 # ──────────────────────────────────────────────────────────────────────
 

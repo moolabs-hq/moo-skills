@@ -305,5 +305,73 @@ class GoEnvconfigInsertLine(unittest.TestCase):
             self.assertEqual(result.line_to_insert, 7)
 
 
+class ServiceScan(unittest.TestCase):
+    """Scan a service directory (multiple files) and return the best match."""
+
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+
+    def test_scan_service_finds_pydantic_settings_in_config_subdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "services" / "payments-api"
+            (svc / "app").mkdir(parents=True)
+            (svc / "app" / "main.py").write_text("from app.config import Settings\n")
+            (svc / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "\n"
+                "class Settings(BaseSettings):\n"
+                "    database_url: str\n"
+            )
+            result = els.scan_service(svc, "python", self.catalog)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-v2")
+            self.assertTrue(result.file.endswith("config.py"))
+
+    def test_scan_service_picks_highest_confidence_when_multiple_match(self):
+        """If a service has BOTH pydantic-settings AND a dotenv+os.getenv
+        config file, pick the higher-priority pydantic one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "services" / "payments-api"
+            (svc / "app").mkdir(parents=True)
+            # The "real" config — pydantic-settings, high confidence
+            (svc / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "\n"
+                "class Settings(BaseSettings):\n"
+                "    database_url: str\n"
+            )
+            # A legacy helper using dotenv + os.getenv (lower priority)
+            (svc / "app" / "legacy_env.py").write_text(
+                "from dotenv import load_dotenv\n"
+                "import os\n"
+                "load_dotenv()\n"
+                "DB = os.getenv('DB')\n"
+            )
+            result = els.scan_service(svc, "python", self.catalog)
+            # Pydantic-settings priority=100 vs dotenv priority=70 → pydantic wins
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-v2")
+
+    def test_scan_service_returns_none_when_no_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "services" / "no-config"
+            svc.mkdir(parents=True)
+            (svc / "main.py").write_text("def main(): pass\n")
+            result = els.scan_service(svc, "python", self.catalog)
+            self.assertIsNone(result)
+
+    def test_scan_service_skips_irrelevant_extensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "services" / "py-svc"
+            svc.mkdir(parents=True)
+            # A Go config file in a Python service — should be skipped when
+            # we ask for language=python.
+            (svc / "config.go").write_text(
+                "import \"github.com/spf13/viper\"\n"
+                "viper.AutomaticEnv()\n"
+            )
+            result = els.scan_service(svc, "python", self.catalog)
+            self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
