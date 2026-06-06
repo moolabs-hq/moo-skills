@@ -564,6 +564,44 @@ else:
         print(f"  FAIL  slugs {slugs_ts_tpl}: missing {', '.join(missing)}")
         fail_count += 1
 
+slugs_go_tpl = "slugs-go.j2"
+try:
+    r = env.get_template(slugs_go_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_go_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc = "DO NOT EDIT" in r and "billing" in r
+    has_package = "package moolabsslugs_billing" in r
+    has_event = 'EVENT_TYPE_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_meter = 'METER_SLUG_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_provider = 'PROVIDER_OPENAI = "openai"' in r
+    has_span = 'SPAN_TYPE_LLM_TOKENS = "llm-tokens"' in r
+    if not (has_doc and has_package and has_event and has_meter and has_provider and has_span):
+        missing = []
+        if not has_doc: missing.append("doc-header")
+        if not has_package: missing.append("package declaration")
+        if not has_event: missing.append("EVENT_TYPE constant")
+        if not has_meter: missing.append("METER_SLUG constant")
+        if not has_provider: missing.append("PROVIDER constant")
+        if not has_span: missing.append("SPAN_TYPE constant")
+        print(f"  FAIL  slugs {slugs_go_tpl}: missing {', '.join(missing)}")
+        fail_count += 1
+    elif gofmt:
+        with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
+            tf.write(r); tfp = tf.name
+        res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
+        Path(tfp).unlink()
+        if res.returncode != 0:
+            print(f"  FAIL  slugs {slugs_go_tpl}: gofmt: {res.stderr.strip()[:200]}")
+            fail_count += 1
+        else:
+            print(f"  PASS  slugs {slugs_go_tpl}: renders + 5 categories + gofmt-clean")
+            pass_count += 1
+    else:
+        print(f"  PASS-no-gofmt  slugs {slugs_go_tpl}: structural check only (gofmt absent)")
+        pass_count += 1
+
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
     for pat in patterns:
