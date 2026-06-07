@@ -450,6 +450,33 @@ class YamlEmit(unittest.TestCase):
                 parsed["services"][0]["api_key_accessor"],
                 "get_settings().moolabs_api_key.get_secret_value()",
             )
+            # M-2 regression guard: generated_at must round-trip as a string,
+            # not auto-coerced to datetime by PyYAML's implicit ISO-8601 parse.
+            self.assertIsInstance(
+                parsed["generated_at"], str,
+                "generated_at must round-trip as str (M-2 regression guard)",
+            )
+
+    def test_emit_yaml_service_slug_with_yaml_metachar_roundtrips(self):
+        """M-1 regression guard: service_slug containing YAML metacharacters
+        (`:`, `#`) must round-trip cleanly. Unquoted scalar would break parse."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "plan.yaml"
+            plan = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "services": [{
+                    "service_slug": "svc:weird#case",
+                    "mode": "stub",
+                    "settings_import_path": "app.services.moolabs_settings",
+                    "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+                    "stub_emit_path": "app/services/moolabs_settings.py",
+                    "deployment_stubs": [],
+                }],
+            }
+            cw.emit_config_wiring_plan_yaml(plan, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(parsed["services"][0]["service_slug"], "svc:weird#case")
 
     def test_emit_yaml_handles_backslash_in_accessor(self):
         """Defensive against the Phase A YAML escape bug class. Accessors

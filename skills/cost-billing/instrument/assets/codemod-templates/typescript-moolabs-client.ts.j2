@@ -40,7 +40,21 @@ import {
   type CostIngestEventArgs,
   type EventsIngestArgs,
 } from 'moolabs';
-{# Phase 1.7 env-wire — see Python template's docstring. Same contract. #}
+{# Phase 1.7 env-wire — see Python template's docstring. Same contract.
+
+   IMPORTANT: as of PR #4 round-2 fix, `_TS_PATTERN_ACCESSORS` in
+   config_wire.py is INTENTIONALLY EMPTY — all recognized TS patterns
+   (zod-env-schema / process-env-direct / env-var-library) route to
+   stub mode because their accessors don't compose with the unconditional
+   `getSettings` import below. The stub Settings template at
+   `_STUB_EMIT_PATHS["typescript"]` exports getSettings(), so the import
+   resolves correctly under stub mode (the only mode TS currently uses).
+
+   Future enhancement: pattern-aware template variants that import
+   `env` / bare consts for direct-export patterns. Until then, do NOT
+   re-add direct-export patterns to `_TS_PATTERN_ACCESSORS` without
+   also adding template branches — re-introducing them while this
+   import stays unconditional reproduces PR #4 review CRIT-2. #}
 import { getSettings } from '{{ env_config.settings_import_path }}';
 import { logger } from './logger'; // adapt to {{ service_slug }}'s existing logger import
 
