@@ -402,7 +402,19 @@ class DeploymentSurface:
 
 # Per-surface skip dirs are MORE permissive than _SKIP_DIRS — we explicitly
 # want to scan infra/, deployment/, k8s/, etc.
-_SURFACE_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", "vendor"})
+#
+# `.terraform` / `.terragrunt-cache` MUST be skipped (PR #7 review IMPORTANT):
+# `terraform init` copies module SOURCES into `.terraform/modules/<name>/*.tf`
+# and terragrunt copies the full module tree into `.terragrunt-cache/<hash>/`.
+# These are machine-generated, gitignored, and NOT customer-editable — a dev
+# who ran `terraform init` locally would otherwise see these vendored copies
+# pulled in as false-positive repo-scope terraform surfaces, producing
+# CHECKLIST entries pointing at paths that don't exist in the committed tree
+# AND falsely clearing infra_discovery_gap for a repo with no real IaC.
+_SURFACE_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", "vendor",
+    ".terraform", ".terragrunt-cache",
+})
 
 # Repo-root directories that may hold CENTRALIZED infrastructure for monorepos
 # (instead of, or in addition to, per-service infra). moolabs is the canonical
@@ -506,9 +518,17 @@ def scan_deployment_surfaces(
         try:
             rel = str(path.relative_to(anchor))
         except ValueError:
-            # path isn't under the anchor — emit absolute path as a fallback
-            # rather than crashing the scan.
-            rel = str(path)
+            # path isn't under the anchor — warn-and-skip rather than emit a
+            # machine-absolute path into a customer-committed inventory YAML
+            # (PR #7 review MINOR). Unreachable with current callers (rglob
+            # only yields paths under repo_root, and anchor is always an
+            # ancestor), but a future caller passing a non-ancestor anchor
+            # would otherwise silently leak absolute paths. Skip loudly.
+            sys.stderr.write(
+                f"WARN: deployment-surface scan skipping {path} — not under "
+                f"anchor {anchor} (would emit a non-repo-relative path)\n"
+            )
+            continue
 
         # Terraform
         if path.suffix == ".tf":
@@ -661,7 +681,23 @@ def _service_entry(
     surfaces: list[DeploymentSurface] = []
     if service_path.exists():
         surfaces.extend(scan_deployment_surfaces(service_path, scope="service"))
-    surfaces.extend(scan_repo_level_deployment_surfaces(repo_root))
+
+    # PR #7 review IMPORTANT (Challenge 3): when a service root lives UNDER one
+    # of the repo-level infra dirs (e.g. service at `deploy/myservice/`), the
+    # repo-level scan would re-detect the same files the service-scope scan
+    # already found — producing duplicate surfaces with conflicting scope tags
+    # (service→new_file AND repo→checklist_only for the SAME physical file).
+    # Drop any repo-scope surface whose path is under this service's root.
+    # NOTE: repo-scope paths are repo-relative (e.g. "deploy/myservice/x.tf")
+    # while service-scope paths are service-relative ("x.tf") — they never
+    # string-match, so we compare against the service ROOT prefix, not the
+    # service-scope path strings.
+    service_root_rel = service["root"].rstrip("/")
+    service_prefix = f"{service_root_rel}/"
+    for s in scan_repo_level_deployment_surfaces(repo_root):
+        if s.path == service_root_rel or s.path.startswith(service_prefix):
+            continue  # already covered by the service-scope scan above
+        surfaces.append(s)
 
     # Gap-detection: when no infra surface (terraform / k8s / dockerfile)
     # was found at EITHER scope, set infra_discovery_gap=True. The
