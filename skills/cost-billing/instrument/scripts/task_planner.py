@@ -323,6 +323,137 @@ def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]
     return "usage-only"
 
 
+def load_slug_inventory(path: Path) -> dict:
+    """Read slug-inventory.yaml (Phase A's slug_inventory.py output).
+    Returns {"products": []} on missing file, absent PyYAML, OR malformed
+    YAML — degrades gracefully so a corrupted inventory doesn't crash the
+    planner. PR #5 review I-1 fix."""
+    if not path.exists():
+        return {"products": []}
+    try:
+        import yaml
+    except ImportError:
+        return {"products": []}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        sys.stderr.write(
+            f"WARN: slug-inventory.yaml at {path} is malformed "
+            f"({type(exc).__name__}); degrading to empty inventory\n"
+        )
+        return {"products": []}
+    data.setdefault("products", [])
+    return data
+
+
+def build_slug_index(inventory: dict) -> dict[str, dict[str, dict[str, str]]]:
+    """Build a per-product / per-category value-to-constant-name lookup.
+
+    Phase A's slug_inventory.py emits constants with `name` already in
+    canonical UPPER_SNAKE_CASE (e.g. `SEAT_ASSIGNED`). Phase C's framework
+    callsite templates need to render `EVENT_TYPE_SEAT_ASSIGNED` —
+    so the lookup value here is the CATEGORY-prefixed constant name.
+    """
+    index: dict[str, dict[str, dict[str, str]]] = {}
+    for product in inventory.get("products") or []:
+        slug = product.get("product_slug", "")
+        if not slug:
+            continue
+        product_index: dict[str, dict[str, str]] = {}
+        for category, entries in (product.get("constants") or {}).items():
+            value_to_const: dict[str, str] = {}
+            for e in entries or []:
+                if e.get("name") and e.get("value") is not None:
+                    value_to_const[e["value"]] = f"{category}_{e['name']}"
+            product_index[category] = value_to_const
+        index[slug] = product_index
+    return index
+
+
+@dataclass
+class SlugsEmitTask:
+    """One slugs-emit task per product. Renders slugs-<lang>.j2 to
+    <slugs_emit_path> based on the inventory's per-product constants."""
+    task_id: str
+    product_slug: str
+    constants: dict          # per-category {name, value} lists from slug-inventory
+    generated_at: str        # from slug-inventory.yaml
+
+
+def resolve_slug_constants(
+    index: dict[str, dict[str, dict[str, str]]],
+    product_slug: str,
+    event_type: str | None,
+    workflow_id: str | None,
+    cost_kind: str | None,
+) -> dict[str, str | None]:
+    """Look up the per-callsite constant names from the index.
+
+    Phase C framework callsite templates use these to render
+    `event_type=EVENT_TYPE_X` instead of `event_type="x.y"`.
+
+    Returns a dict with keys: event_type_const, meter_slug_const,
+    feature_key_const, provider_const, span_type_const. Each value is
+    the CATEGORY-prefixed constant name (e.g. `EVENT_TYPE_SEAT_ASSIGNED`)
+    or None if the lookup misses.
+    """
+    product_index = index.get(product_slug) or {}
+
+    def _lookup(category: str, value: str | None) -> str | None:
+        if not value:
+            return None
+        return (product_index.get(category) or {}).get(value)
+
+    # feature_key is derived from workflow_id's second dotted segment
+    # (matches slug_inventory.py's _feature_key_for convention)
+    feature_key_value: str | None = None
+    if workflow_id:
+        parts = workflow_id.split(".")
+        feature_key_value = parts[1] if len(parts) >= 2 else workflow_id
+
+    return {
+        "event_type_const": _lookup("EVENT_TYPE", event_type),
+        "meter_slug_const": _lookup("METER_SLUG", workflow_id),
+        "feature_key_const": _lookup("FEATURE_KEY", feature_key_value),
+        # provider isn't carried per-callsite in this codepath; discovered
+        # per-cost-event but not joined here. Future work.
+        "provider_const": _lookup("PROVIDER", None),
+        "span_type_const": _lookup("SPAN_TYPE", cost_kind),
+    }
+
+
+def build_slugs_emit_tasks(inventory: dict) -> list[SlugsEmitTask]:
+    """One slugs-emit task per product in the inventory."""
+    out: list[SlugsEmitTask] = []
+    generated_at = inventory.get("generated_at", "")
+    for idx, product in enumerate(inventory.get("products") or [], start=1):
+        slug = product.get("product_slug", "")
+        if not slug:
+            continue
+        out.append(SlugsEmitTask(
+            task_id=f"slugs_emit_{idx:03d}_{slug}",
+            product_slug=slug,
+            constants=product.get("constants") or {},
+            generated_at=generated_at,
+        ))
+    return out
+
+
+def _slugs_import_path_for(language: str, product_slug: str) -> str:
+    """Return the language-appropriate import path for a per-product slugs
+    module. Conventions match Phase C SKILL.md Phase 1.8:
+      - python: app.services.moolabs.slugs_<product>
+      - typescript: @/services/moolabs/slugs_<product>
+      - go: internal/moolabsclient/slugs_<product>
+    Defaults to the python convention when language is unknown."""
+    safe = (product_slug or "").replace("-", "_")
+    if language == "typescript":
+        return f"@/services/moolabs/slugs_{safe}"
+    if language == "go":
+        return f"internal/moolabsclient/slugs_{safe}"
+    return f"app.services.moolabs.slugs_{safe}"
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -332,9 +463,20 @@ def build_tasks(
     repo_profile: dict[str, Any],
     attribution_defaults: dict[str, str | None] | None = None,
     attribution_overrides: list[dict[str, Any]] | None = None,
+    slug_inventory: dict[str, Any] | None = None,
 ) -> list[Task]:
-    """Group inventory entries by file, emit one task per file."""
+    """Group inventory entries by file, emit one task per file.
+
+    Phase C (PR #5 review CRIT fix): when slug_inventory is provided, build
+    the per-product slug index and resolve per-callsite constant names +
+    slugs_import_path for each Insert.entry. The framework callsite
+    templates read these to render `event_type=EVENT_TYPE_X` (bare
+    identifier) instead of `event_type="x.y"` (string literal). Without
+    this wiring, the constants are never set and every callsite falls
+    back to the literal — defeating the slugs-as-source-of-truth contract.
+    """
     output_input_index = _build_output_input_index(output_input_map)
+    slug_index = build_slug_index(slug_inventory or {"products": []})
     capabilities = snapshot.get("capabilities", {}) if snapshot else {}
     service_slug = signed.get("service_slug", "unknown") if signed else "unknown"
     repo = signed.get("repo", {}) if signed else {}
@@ -382,7 +524,37 @@ def build_tasks(
             pattern = _pattern_for(entry, output_input_index)
             wf = entry.get("workflow_id", "")
             cost_workflow_ids = output_input_index.get(wf, [])
-            enriched_entry = {**entry, "cost_workflow_ids": cost_workflow_ids}
+            # Phase C (PR #5 review CRIT fix): resolve per-callsite slug
+            # constants from the slug-inventory + index. Each entry carries
+            # its product_slug from Phase A; the resolver returns
+            # event_type_const / meter_slug_const / feature_key_const /
+            # span_type_const + slugs_import_path so the framework callsite
+            # templates can render `event_type=EVENT_TYPE_X` instead of
+            # `event_type="x.y"`. None values trigger the template's
+            # inline-literal fallback path.
+            product_slug = entry.get("product_slug", "")
+            slug_consts = resolve_slug_constants(
+                slug_index,
+                product_slug=product_slug,
+                event_type=entry.get("event_type"),
+                workflow_id=wf,
+                cost_kind=entry.get("cost_kind"),
+            )
+            enriched_entry = {
+                **entry,
+                "cost_workflow_ids": cost_workflow_ids,
+                **slug_consts,
+                # Round 2 LOW fix: when product_slug is empty, emit None
+                # rather than a trailing-underscore path like
+                # "app.services.moolabs.slugs_" — purely a tasks.yaml
+                # data-quality fix (rendered source is unaffected because
+                # all _const keys are None and the import block is gated).
+                "slugs_import_path": (
+                    _slugs_import_path_for(primary_lang, product_slug)
+                    if product_slug
+                    else None
+                ),
+            }
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
@@ -427,7 +599,12 @@ def build_tasks(
     return tasks
 
 
-def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireTask] | None = None) -> None:
+def emit_tasks_yaml(
+    tasks: list[Task],
+    dest: Path,
+    env_wire_tasks: list[EnvWireTask] | None = None,
+    slugs_emit_tasks: list[SlugsEmitTask] | None = None,
+) -> None:
     lines: list[str] = []
     lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"total_tasks: {len(tasks)}")
@@ -508,6 +685,28 @@ def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireT
                     lines.append(f"        mode: {s['mode']}")
             else:
                 lines.append("    deployment_stubs: []")
+    # Phase 1.8 slugs-emit tasks (one per product). Same escape pattern.
+    if slugs_emit_tasks:
+        lines.append("slugs_emit_tasks:")
+        for st in slugs_emit_tasks:
+            lines.append(f"  - task_id: {st.task_id}")
+            lines.append(f"    product_slug: {st.product_slug}")
+            safe_gen_at = st.generated_at.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'    generated_at: "{safe_gen_at}"')
+            # The constants block is rendered as a nested mapping.
+            lines.append("    constants:")
+            for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
+                             "PROVIDER", "SPAN_TYPE"):
+                entries = st.constants.get(category, []) or []
+                if not entries:
+                    lines.append(f"      {category}: []")
+                    continue
+                lines.append(f"      {category}:")
+                for e in entries:
+                    safe_name = str(e.get("name", "")).replace("\\", "\\\\").replace('"', '\\"')
+                    safe_value = str(e.get("value", "")).replace("\\", "\\\\").replace('"', '\\"')
+                    lines.append(f'        - name: "{safe_name}"')
+                    lines.append(f'          value: "{safe_value}"')
     dest.write_text("\n".join(lines) + "\n")
 
 
@@ -517,6 +716,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inventory-dir", default=".moolabs/inventory")
     ap.add_argument("--snapshot", default=".moolabs/customer-context/sdk-surface-snapshot.yaml")
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
+    ap.add_argument(
+        "--slug-inventory",
+        default=".moolabs/customer-context/slug-inventory.yaml",
+    )
     ap.add_argument("--output", default=".moolabs/codemod/tasks.yaml")
     ap.add_argument("--config-wiring-plan", default=".moolabs/customer-context/config-wiring-plan.yaml")
     args = ap.parse_args(argv)
@@ -570,20 +773,43 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Phase C (PR #5 review CRIT fix): load slug-inventory BEFORE build_tasks
+    # so build_tasks can resolve per-callsite slug constants for each Insert.
+    # Missing file / malformed YAML / absent PyYAML all degrade to empty
+    # inventory (load_slug_inventory handles all three). Without this,
+    # entry.event_type_const stays None and templates fall back to inline
+    # string literals — defeating Phase C's slugs-as-source-of-truth contract.
+    slug_inv = load_slug_inventory(Path(args.slug_inventory))
     tasks = build_tasks(
         cost_inv, usage_inv, omap, snapshot, signed, repo_profile,
         attribution_defaults=attribution_defaults,
         attribution_overrides=attribution_overrides,
+        slug_inventory=slug_inv,
     )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
         return 1
 
+    # Phase 1.7 env-wire tasks (Phase B).
     env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
+    # Phase 1.8 slugs-emit tasks (Phase C). slug_inv was loaded BEFORE
+    # build_tasks above so build_tasks could resolve per-callsite slug
+    # constants — reuse the same inventory here.
+    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv)
+
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    emit_tasks_yaml(tasks, out_path, env_wire_tasks)
-    print(f"wrote {out_path} ({len(tasks)} tasks, {sum(len(t.inserts) for t in tasks)} inserts)")
+    emit_tasks_yaml(
+        tasks, out_path,
+        env_wire_tasks=env_wire_tasks,
+        slugs_emit_tasks=slugs_emit_tasks,
+    )
+    print(
+        f"wrote {out_path} ({len(tasks)} tasks, "
+        f"{sum(len(t.inserts) for t in tasks)} inserts, "
+        f"{len(env_wire_tasks)} env-wire tasks, "
+        f"{len(slugs_emit_tasks)} slugs-emit tasks)"
+    )
     return 0
 
 

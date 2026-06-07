@@ -15,29 +15,35 @@
 // join key. Attribution sources from Phase 1.6 (attribution-bindings.yaml).
 // ─────────────────────────────────────────────────────────────────────────
 import { emitEventSafe } from '@/services/moolabs-client';
-
+{% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const or entry.span_type_const %}import {
+{% if entry.event_type_const %}  {{ entry.event_type_const }},
+{% endif %}{% if entry.meter_slug_const %}  {{ entry.meter_slug_const }},
+{% endif %}{% if entry.feature_key_const %}  {{ entry.feature_key_const }},
+{% endif %}{% if entry.span_type_const %}  {{ entry.span_type_const }},
+{% endif %}} from '{{ entry.slugs_import_path }}';
+{% endif %}
 const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% if not attribution_sources.request_id %}const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% endif %}
 // REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
 await emitEventSafe({
-  eventType: '{{ entry.event_type }}',
+  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ entry.event_type ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
   // Usage lane
-  meterSlug: '{{ entry.workflow_id }}',
+  meterSlug: {{ entry.meter_slug_const if entry.meter_slug_const else "'" ~ entry.workflow_id ~ "'" }},
   value: {{ entry.refund_unit.derivation }},
   // Cost lane
   spans: [{
     spanId: _moolabsSpanId,
     {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
-    {% endif %}{% if entry.cost_kind %}kind: '{{ entry.cost_kind }}',
+    {% endif %}{% if entry.cost_kind %}kind: {{ entry.span_type_const if entry.span_type_const else "'" ~ entry.cost_kind ~ "'" }},
     {% endif %}
   }],
   // Open-shape attribution (lands at data.meta.<key>)
   meta: {
     workflow_id: '{{ entry.workflow_id }}',
-    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    feature_key: {{ entry.feature_key_const if entry.feature_key_const else "'" ~ (entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 1 else entry.workflow_id) ~ "'" }},
     {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
     {% endif %}
@@ -48,19 +54,24 @@ await emitEventSafe({
 // moolabs SDK insert (usage-only, v0.3.0-rc1) — emitUsageEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitUsageEventSafe } from '@/services/moolabs-client';
-{% if not attribution_sources.request_id %}
+{% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const %}import {
+{% if entry.event_type_const %}  {{ entry.event_type_const }},
+{% endif %}{% if entry.meter_slug_const %}  {{ entry.meter_slug_const }},
+{% endif %}{% if entry.feature_key_const %}  {{ entry.feature_key_const }},
+{% endif %}} from '{{ entry.slugs_import_path }}';
+{% endif %}{% if not attribution_sources.request_id %}
 const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% endif %}
 // REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
 await emitUsageEventSafe({
-  eventType: '{{ entry.event_type }}',
+  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ entry.event_type ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
-  meterSlug: '{{ entry.workflow_id }}',
+  meterSlug: {{ entry.meter_slug_const if entry.meter_slug_const else "'" ~ entry.workflow_id ~ "'" }},
   value: {{ entry.refund_unit.derivation }},
   meta: {
     workflow_id: '{{ entry.workflow_id }}',
-    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    feature_key: {{ entry.feature_key_const if entry.feature_key_const else "'" ~ (entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 1 else entry.workflow_id) ~ "'" }},
     {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
     {% endif %}
@@ -71,23 +82,28 @@ await emitUsageEventSafe({
 // moolabs SDK insert (cost-only, v0.3.0-rc1) — emitCostEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
 import { emitCostEventSafe } from '@/services/moolabs-client';
-
+{% if entry.event_type_const or entry.feature_key_const or entry.span_type_const %}import {
+{% if entry.event_type_const %}  {{ entry.event_type_const }},
+{% endif %}{% if entry.feature_key_const %}  {{ entry.feature_key_const }},
+{% endif %}{% if entry.span_type_const %}  {{ entry.span_type_const }},
+{% endif %}} from '{{ entry.slugs_import_path }}';
+{% endif %}
 const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% if not attribution_sources.request_id %}const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% endif %}
 await emitCostEventSafe({
-  eventType: '{{ entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id) }}',
+  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id)) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
   spans: [{
     spanId: _moolabsSpanId,
     {% if entry.cost_micros_source %}costMicros: {{ entry.cost_micros_source }},
-    {% endif %}{% if entry.cost_kind %}kind: '{{ entry.cost_kind }}',
+    {% endif %}{% if entry.cost_kind %}kind: {{ entry.span_type_const if entry.span_type_const else "'" ~ entry.cost_kind ~ "'" }},
     {% endif %}
   }],
   meta: {
     workflow_id: '{{ entry.workflow_id }}',
-    feature_key: '{{ entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 2 else entry.workflow_id }}',
+    feature_key: {{ entry.feature_key_const if entry.feature_key_const else "'" ~ (entry.workflow_id.split(".")[1] if entry.workflow_id.count(".") >= 1 else entry.workflow_id) ~ "'" }},
     {% if attribution_sources.consumer_agent %}consumer_agent: {{ attribution_sources.consumer_agent }},
     {% endif %}{% if attribution_sources.request_id %}correlation_id: String({{ attribution_sources.request_id }} ?? ''),
     {% endif %}

@@ -181,6 +181,12 @@ entry_base = {
     "refund_unit":{"unit":"completion","derivation":"1"},
     "cost_kind":"llm-tokens","cost_micros_source":"resp.cm",
     "cost_workflow_ids":["s.llm"],"consumer_agent_source":'"agent"',
+    "slugs_import_path": "app.services.moolabs.slugs_billing",
+    "event_type_const": "EVENT_TYPE_COMPLETION_DELIVERED",
+    "meter_slug_const": "METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED",
+    "feature_key_const": "FEATURE_KEY_RECOMMENDATION",
+    "span_type_const": "SPAN_TYPE_LLM_TOKENS",
+    "provider_const": None,
 }
 sources = {"tenant_id":"req.state.tid","request_id":"req.state.rid","customer_id":"req.state.cid",
            "consumer_agent":None,"feature_key":None}
@@ -402,7 +408,7 @@ else:
         print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
         pass_count += 1
 
-# Stub Settings templates
+# Stub Settings templates (Phase 1.7 — env-wire)
 for stub_tpl in ("python-moolabs-settings.py.j2",
                  "typescript-moolabs-settings.ts.j2",
                  "go-moolabs-settings.go.j2"):
@@ -449,7 +455,7 @@ for stub_tpl in ("python-moolabs-settings.py.j2",
             print(f"  FAIL  stub {stub_tpl}: missing Get function")
             fail_count += 1
 
-# Deployment-surface templates
+# Deployment-surface templates (Phase 1.7 — env-wire)
 deploy_ctx = {"service_slug": "test-svc"}
 for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
             "k8s-secret-moolabs.yaml.j2"):
@@ -478,10 +484,136 @@ for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
         print(f"  FAIL  deploy {tpl}: expected content missing")
         fail_count += 1
 
+# Slugs module templates (Phase 1.8 — slugs emission)
+slugs_ctx = {
+    "product_slug": "billing",
+    "generated_at": "2026-06-06T00:00:00+00:00",
+    "constants": {
+        "EVENT_TYPE": [
+            {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+            {"name": "CHECKOUT_RECOMMENDATION_DELIVERED",
+             "value": "checkout.recommendation.delivered"},
+        ],
+        "METER_SLUG": [
+            {"name": "SEAT_ASSIGNED", "value": "seat.assigned"},
+        ],
+        "FEATURE_KEY": [
+            {"name": "ASSIGNED", "value": "assigned"},
+        ],
+        "PROVIDER": [
+            {"name": "OPENAI", "value": "openai"},
+        ],
+        "SPAN_TYPE": [
+            {"name": "LLM_TOKENS", "value": "llm-tokens"},
+        ],
+    },
+}
+
+slugs_python_tpl = "slugs-python.j2"
+try:
+    r = env.get_template(slugs_python_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_python_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc_header = "DO NOT EDIT" in r and "billing" in r
+    has_event_type_const = "EVENT_TYPE_SEAT_ASSIGNED: str = \"seat.assigned\"" in r
+    has_meter_slug_const = "METER_SLUG_SEAT_ASSIGNED: str = \"seat.assigned\"" in r
+    has_provider_const = "PROVIDER_OPENAI: str = \"openai\"" in r
+    has_span_type_const = "SPAN_TYPE_LLM_TOKENS: str = \"llm-tokens\"" in r
+    # py-compile check
+    try:
+        compile(r, slugs_python_tpl, "exec")
+        py_ok = True
+    except SyntaxError as e:
+        print(f"  FAIL  slugs {slugs_python_tpl}: py syntax: {e.msg}")
+        py_ok = False
+        fail_count += 1
+    if py_ok and has_doc_header and has_event_type_const and has_meter_slug_const \
+            and has_provider_const and has_span_type_const:
+        print(f"  PASS  slugs {slugs_python_tpl}: renders + py-compile + all 5 categories present")
+        pass_count += 1
+    elif py_ok:
+        missing = []
+        if not has_doc_header: missing.append("doc-header/product_slug")
+        if not has_event_type_const: missing.append("EVENT_TYPE constant")
+        if not has_meter_slug_const: missing.append("METER_SLUG constant")
+        if not has_provider_const: missing.append("PROVIDER constant")
+        if not has_span_type_const: missing.append("SPAN_TYPE constant")
+        print(f"  FAIL  slugs {slugs_python_tpl}: missing {', '.join(missing)}")
+        fail_count += 1
+
+slugs_ts_tpl = "slugs-typescript.j2"
+try:
+    r = env.get_template(slugs_ts_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_ts_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc = "DO NOT EDIT" in r and "billing" in r
+    has_event = 'export const EVENT_TYPE_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_meter = 'export const METER_SLUG_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_provider = 'export const PROVIDER_OPENAI = "openai"' in r
+    has_span = 'export const SPAN_TYPE_LLM_TOKENS = "llm-tokens"' in r
+    has_as_const = "as const" in r  # TS literal type annotation
+    if has_doc and has_event and has_meter and has_provider and has_span and has_as_const:
+        print(f"  PASS  slugs {slugs_ts_tpl}: renders + 5 categories + as-const annotations")
+        pass_count += 1
+    else:
+        missing = []
+        if not has_doc: missing.append("doc-header")
+        if not has_event: missing.append("EVENT_TYPE")
+        if not has_meter: missing.append("METER_SLUG")
+        if not has_provider: missing.append("PROVIDER")
+        if not has_span: missing.append("SPAN_TYPE")
+        if not has_as_const: missing.append("as-const annotation")
+        print(f"  FAIL  slugs {slugs_ts_tpl}: missing {', '.join(missing)}")
+        fail_count += 1
+
+slugs_go_tpl = "slugs-go.j2"
+try:
+    r = env.get_template(slugs_go_tpl).render(**slugs_ctx)
+except Exception as e:
+    print(f"  FAIL  slugs {slugs_go_tpl}: render error: {e}")
+    fail_count += 1
+else:
+    has_doc = "DO NOT EDIT" in r and "billing" in r
+    has_package = "package moolabsslugs_billing" in r
+    has_event = 'EVENT_TYPE_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_meter = 'METER_SLUG_SEAT_ASSIGNED = "seat.assigned"' in r
+    has_provider = 'PROVIDER_OPENAI = "openai"' in r
+    has_span = 'SPAN_TYPE_LLM_TOKENS = "llm-tokens"' in r
+    if not (has_doc and has_package and has_event and has_meter and has_provider and has_span):
+        missing = []
+        if not has_doc: missing.append("doc-header")
+        if not has_package: missing.append("package declaration")
+        if not has_event: missing.append("EVENT_TYPE constant")
+        if not has_meter: missing.append("METER_SLUG constant")
+        if not has_provider: missing.append("PROVIDER constant")
+        if not has_span: missing.append("SPAN_TYPE constant")
+        print(f"  FAIL  slugs {slugs_go_tpl}: missing {', '.join(missing)}")
+        fail_count += 1
+    elif gofmt:
+        with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
+            tf.write(r); tfp = tf.name
+        res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
+        Path(tfp).unlink()
+        if res.returncode != 0:
+            print(f"  FAIL  slugs {slugs_go_tpl}: gofmt: {res.stderr.strip()[:200]}")
+            fail_count += 1
+        else:
+            print(f"  PASS  slugs {slugs_go_tpl}: renders + 5 categories + gofmt-clean")
+            pass_count += 1
+    else:
+        print(f"  PASS-no-gofmt  slugs {slugs_go_tpl}: structural check only (gofmt absent)")
+        pass_count += 1
+
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:
     for pat in patterns:
         entry = {**entry_base, "pattern": pat}
+        if tpl.startswith("typescript-"):
+            entry["slugs_import_path"] = "@/services/moolabs/slugs_billing"
         try:
             r = env.get_template(tpl).render(entry=entry, attribution_sources=sources)
         except Exception as e:
@@ -588,6 +720,56 @@ for tpl in templates:
                     break
             if await_fail:
                 continue
+
+        if tpl.startswith("python-"):
+            # Phase C slugs assertions (Python)
+            has_slugs_import = "from app.services.moolabs.slugs_billing import" in r
+            has_event_type_const = "event_type=EVENT_TYPE_COMPLETION_DELIVERED" in r
+            has_meter_slug_const = ("meter_slug=METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED" in r
+                                    or pat == "cost-only")
+            no_event_type_literal = 'event_type="completion.delivered"' not in r
+            no_meter_slug_literal = 'meter_slug="checkout.recommendation.delivered"' not in r
+            if not has_slugs_import:
+                print(f"  FAIL  {tpl}[{pat}]: Phase C slugs import missing")
+                fail_count += 1; continue
+            if not has_event_type_const:
+                print(f"  FAIL  {tpl}[{pat}]: event_type_const not rendered")
+                fail_count += 1; continue
+            if not has_meter_slug_const:
+                print(f"  FAIL  {tpl}[{pat}]: meter_slug_const not rendered")
+                fail_count += 1; continue
+            if not no_event_type_literal:
+                print(f"  FAIL  {tpl}[{pat}]: event_type STRING LITERAL leaked")
+                fail_count += 1; continue
+            if not no_meter_slug_literal:
+                print(f"  FAIL  {tpl}[{pat}]: meter_slug STRING LITERAL leaked")
+                fail_count += 1; continue
+
+        if tpl.startswith("typescript-"):
+            # Phase C slugs assertions (TS)
+            has_slugs_import = "from '@/services/moolabs/slugs_billing'" in r
+            has_event_type_const = "eventType: EVENT_TYPE_COMPLETION_DELIVERED" in r
+            has_meter_slug_const = ("meterSlug: METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED" in r
+                                    or pat == "cost-only")
+            no_event_type_literal = ("eventType: 'completion.delivered'" not in r
+                                      and 'eventType: "completion.delivered"' not in r)
+            no_meter_slug_literal = ("meterSlug: 'checkout.recommendation.delivered'" not in r
+                                     and 'meterSlug: "checkout.recommendation.delivered"' not in r)
+            if not has_slugs_import:
+                print(f"  FAIL  {tpl}[{pat}]: Phase C TS slugs import missing")
+                fail_count += 1; continue
+            if not has_event_type_const:
+                print(f"  FAIL  {tpl}[{pat}]: TS event_type_const not rendered")
+                fail_count += 1; continue
+            if not has_meter_slug_const:
+                print(f"  FAIL  {tpl}[{pat}]: TS meter_slug_const not rendered")
+                fail_count += 1; continue
+            if not no_event_type_literal:
+                print(f"  FAIL  {tpl}[{pat}]: TS event_type STRING LITERAL leaked")
+                fail_count += 1; continue
+            if not no_meter_slug_literal:
+                print(f"  FAIL  {tpl}[{pat}]: TS meter_slug STRING LITERAL leaked")
+                fail_count += 1; continue
 
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1

@@ -338,6 +338,72 @@ secret resolution; the helper just reads the accessor. Customers using
 Vault for their other secrets already have their Settings class configured
 to pull from Vault on construction — the helper doesn't need to know.
 
+### Phase 1.8: Slugs emission (NEW v0.3 event-slug constants migration)
+
+Driven by `task_planner.py`'s `build_slugs_emit_tasks()`. Reads
+`.moolabs/customer-context/slug-inventory.yaml` (produced by Phase A
+of cost-billing-discovery) and emits one slugs module per discovered
+product.
+
+For each product in the inventory, the codemod renders one of:
+
+- `slugs-python.j2` → `app/services/moolabs/slugs_<product_slug>.py`
+- `slugs-typescript.j2` → `src/services/moolabs/slugs_<product_slug>.ts`
+- `slugs-go.j2` → `internal/moolabsclient/slugs_<product_slug>/slugs.go`
+
+The choice of language follows the per-service language declared in
+`04-final.signed.yaml > integration.services[].language`. For polyglot
+customers (one Python service + one Go service), the codemod emits a
+slugs module per language per product.
+
+Each slugs module contains 5 categories of constants:
+
+- `EVENT_TYPE_*` — per-feature canonical event identifiers
+- `METER_SLUG_*` — per-feature billing routing keys
+- `FEATURE_KEY_*` — per-feature short identifiers
+- `PROVIDER_*` — vendor identifiers from provider-catalog
+- `SPAN_TYPE_*` — span-kind identifiers from cost_kind values
+
+Constant naming convention: `<CATEGORY>_<NAME>` where `<NAME>` is the
+UPPER_SNAKE_CASE conversion of the source value (handled by Phase A's
+`slug_inventory.py`).
+
+The framework callsite templates (fastapi / django / flask / express /
+nestjs / nextjs) IMPORT the relevant constants from the slugs module
+and render them at the callsite instead of inlining string literals:
+
+```python
+# Before (v0.2 / Phase A):
+emit_event_safe(
+    event_type="checkout.recommendation.delivered",
+    meter_slug="checkout.recommendation.delivered",
+    ...
+)
+
+# After (Phase C):
+from app.services.moolabs.slugs_billing import (
+    EVENT_TYPE_CHECKOUT_RECOMMENDATION_DELIVERED,
+    METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED,
+)
+
+emit_event_safe(
+    event_type=EVENT_TYPE_CHECKOUT_RECOMMENDATION_DELIVERED,
+    meter_slug=METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED,
+    ...
+)
+```
+
+Per-callsite resolution from string value → constant name is done by
+`task_planner.py`'s `resolve_slug_constants()` using the index built
+by `build_slug_index()`. When the lookup misses (e.g. a discovered
+callsite whose event_type isn't in the inventory), the template falls
+back to the inline literal — and Phase 7 smoke's negative-leakage
+assertion ensures the canonical fixture exercises the constant path.
+
+The slugs modules are AUTO-GENERATED with a `DO NOT EDIT` header.
+Re-running the codemod against an updated `slug-inventory.yaml`
+regenerates them.
+
 ### Phase 2: Generate the per-service `moolabs_client.py` helper (MANDATORY, ONCE per service)
 
 **This MUST run before any call-site insert.** The codemod generates exactly ONE helper file per service that owns all SDK and OTel-span emission. Every call-site insert in Phase 2b imports from this helper — never instantiates `Moolabs(api_key=...)` inline.
