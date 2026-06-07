@@ -319,7 +319,10 @@ For each service:
   their real config layer or accepts as-is.
 
 Deployment-surface stubs are emitted per service alongside the helper
-generation:
+generation. Each surface carries a `scope` field that controls whether
+the stub is auto-emitted or surfaced as a CHECKLIST in the PR body:
+
+**scope=service** (per-service infra under `services/<svc>/...`):
 
 - `.env.example` — line `MOOLABS_API_KEY=` appended to existing file
 - `<infra_dir>/moolabs.tf` — new Terraform variable + commented SSM stub
@@ -328,9 +331,35 @@ generation:
 - `Dockerfile` — checklist comment only (never auto-edit ENV lines —
   baked-in secrets are a security smell)
 
+**scope=repo** (centralized infra at `infrastructure/`, `infra/`,
+`terraform/`, etc. — shared by every service):
+
+- ALL repo-scope surfaces downgrade to `mode: checklist_only`.
+- Auto-modifying a shared module (e.g. `infrastructure/terraform/modules/
+  secrets/variables.tf`) would affect every service simultaneously with
+  cross-service blast radius.
+- The execution agent renders these as PR-body CHECKLIST entries naming
+  the exact file the developer must edit by hand (the source_path).
+  Typical wiring for an ECS shop: add a `moolabs_api_key` variable to
+  `modules/secrets/variables.tf`, then thread it into `modules/ecs-
+  service/main.tf`'s task definition's `secrets:` block.
+
+**`infra_discovery_gap: true` — when Phase A found NO infra at any scope:**
+
+If the scanner walks both per-service AND repo-root infra dirs but finds
+zero terraform/k8s/dockerfile, the inventory flags `infra_discovery_gap:
+true` (`.env.example` alone is insufficient — it doesn't reach prod
+secret routing). The execution agent reads this flag and emits a
+DEVELOPER ACTION REQUIRED section in the PR body asking the customer
+where their IaC actually lives — covers non-conventional paths like
+`iac/`, `cdk/`, `pulumi/` that the heuristic doesn't recognize.
+
 `task_planner.py` reads `config-wiring-plan.yaml` and emits an
 `env_wire_tasks:` block into the tasks.yaml output. The codemod consumes
 both the per-file callsite Tasks and the per-service env-wire tasks.
+Each env_wire_task entry carries `infra_discovery_gap` and per-stub
+`scope` so the execution agent can correctly partition stubs into
+auto-emit vs CHECKLIST.
 
 The v0.2-era strategy-branched `_resolve_api_key()` (boto3 / google.cloud
 secretmanager / hvac / op CLI) is GONE. The customer's Settings class owns

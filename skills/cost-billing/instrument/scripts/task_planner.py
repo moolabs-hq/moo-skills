@@ -96,7 +96,19 @@ class Task:
 class EnvWireTask:
     """One env-wire task per service. Distinct from per-file callsite Tasks
     because env-wiring is service-scoped (one helper module per service,
-    plus optional deployment stubs)."""
+    plus optional deployment stubs).
+
+    PR #531 follow-up:
+      - infra_discovery_gap: True when Phase A scanner found no terraform/
+        k8s/dockerfile at either scope. The execution agent reads this
+        and emits a DEVELOPER ACTION REQUIRED section in the PR body
+        asking where the customer's IaC lives (covers non-standard paths
+        like iac/, cdk/, pulumi/).
+      - deployment_stubs entries now carry scope (service | repo). The
+        execution agent renders scope=repo entries as CHECKLIST text in
+        the PR body (file path + 'wire MOOLABS_API_KEY here by hand')
+        and renders scope=service entries as actual file emissions.
+    """
     task_id: str
     service_slug: str
     mode: str  # "modify" | "stub"
@@ -104,6 +116,7 @@ class EnvWireTask:
     api_key_accessor: str
     stub_emit_path: str | None
     deployment_stubs: list[dict]
+    infra_discovery_gap: bool = False
 
 
 def _load_config_wiring_plan(path: Path) -> list[dict]:
@@ -131,6 +144,7 @@ def build_env_wire_tasks(config_wiring_path: Path) -> list[EnvWireTask]:
             api_key_accessor=svc.get("api_key_accessor", ""),
             stub_emit_path=svc.get("stub_emit_path"),
             deployment_stubs=svc.get("deployment_stubs") or [],
+            infra_discovery_gap=bool(svc.get("infra_discovery_gap", False)),
         ))
     return out
 
@@ -675,14 +689,25 @@ def emit_tasks_yaml(
                 lines.append(f'    stub_emit_path: "{safe_stub}"')
             else:
                 lines.append(f"    stub_emit_path: null")
+            # PR #531 gap-detection: execution agent reads this and emits
+            # a DEVELOPER ACTION REQUIRED block in the PR body when True.
+            lines.append(f"    infra_discovery_gap: {str(t.infra_discovery_gap).lower()}")
             if t.deployment_stubs:
                 lines.append("    deployment_stubs:")
                 for s in t.deployment_stubs:
                     lines.append(f"      - kind: {s['kind']}")
+                    # source_path was added in PR #531 fix so the execution
+                    # agent knows which existing file to reference in the
+                    # CHECKLIST for repo-scope (centralized infra) entries.
+                    if "source_path" in s:
+                        safe_src = str(s['source_path']).replace('\\', '\\\\').replace('"', '\\"')
+                        lines.append(f'        source_path: "{safe_src}"')
                     if "emit_path" in s:
                         safe_emit = str(s['emit_path']).replace('\\', '\\\\').replace('"', '\\"')
                         lines.append(f'        emit_path: "{safe_emit}"')
                     lines.append(f"        mode: {s['mode']}")
+                    # scope: service (auto-emit safe) | repo (checklist only)
+                    lines.append(f"        scope: {s.get('scope', 'service')}")
             else:
                 lines.append("    deployment_stubs: []")
     # Phase 1.8 slugs-emit tasks (one per product). Same escape pattern.
