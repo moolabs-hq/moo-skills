@@ -361,6 +361,21 @@ def scan_service(
             continue
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
+        # Test files are NEVER the canonical app-config source — across ALL
+        # supported languages (Python/TS/JS/Go) a stray env access in a test
+        # (os.getenv / process.env / os.Getenv) must not outrank the real
+        # settings module. (Fixes the v0.3 misdetection of a test file over the
+        # real config when the real Settings extends a custom base the pattern's
+        # structural signal doesn't match.)
+        _nm = path.name
+        if (
+            _nm.startswith("test_")                                  # py
+            or _nm == "conftest.py"                                  # py
+            or re.search(r"_test\.(py|go)$", _nm)                    # py / go
+            or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
+            or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
+        ):
+            continue
         if path.suffix not in extensions:
             continue
         hit = scan_file(path, patterns)
@@ -532,6 +547,14 @@ def scan_deployment_surfaces(
 
         # Terraform
         if path.suffix == ".tf":
+            # Reusable `modules/` and account-bootstrap `accounts/` Terraform are
+            # NOT a service's env-var deployment point — only per-environment /
+            # service-level configs are. Skipping them avoids flooding the
+            # inventory with every module's variables.tf (v0.3 over-detection fix:
+            # a centralized infra/terraform tree was matching ~30 unrelated
+            # variables.tf). Scope further to the service at the instrument layer.
+            if "modules" in path.parts or "accounts" in path.parts:
+                continue
             text = path.read_text(errors="ignore")
             if re.search(r'variable\s+"[^"]+"\s*\{', text):
                 out.append(DeploymentSurface(
