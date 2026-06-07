@@ -450,15 +450,15 @@ class YamlEmit(unittest.TestCase):
                 parsed["services"][0]["api_key_accessor"],
                 "get_settings().moolabs_api_key.get_secret_value()",
             )
-            # M-2 regression guard: generated_at must round-trip as a string,
+            # M-3 regression guard: generated_at must round-trip as a string,
             # not auto-coerced to datetime by PyYAML's implicit ISO-8601 parse.
             self.assertIsInstance(
                 parsed["generated_at"], str,
-                "generated_at must round-trip as str (M-2 regression guard)",
+                "generated_at must round-trip as str (M-3 regression guard)",
             )
 
     def test_emit_yaml_service_slug_with_yaml_metachar_roundtrips(self):
-        """M-1 regression guard: service_slug containing YAML metacharacters
+        """M-4 regression guard: service_slug containing YAML metacharacters
         (`:`, `#`) must round-trip cleanly. Unquoted scalar would break parse."""
         import yaml
         with tempfile.TemporaryDirectory() as tmp:
