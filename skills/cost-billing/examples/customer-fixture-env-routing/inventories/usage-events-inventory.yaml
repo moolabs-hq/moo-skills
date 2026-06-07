@@ -1,0 +1,16 @@
+generated_at: "2026-06-06T00:00:00+00:00"
+entries:
+  - file: "app/services/seat_assignment.py"
+    line: 8
+    workflow_id: "seat.assigned"
+    event_type: "seat.assigned"
+    product_slug: "billing"
+    pattern: "usage-only"
+    confidence: 0.9
+    idempotency_anchor:
+      handler: "assign_seat"
+      path_param: "customer_id"
+      confidence: 0.9
+    refund_unit:
+      unit: "seat"
+      derivation: "1"

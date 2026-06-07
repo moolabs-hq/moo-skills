@@ -1,0 +1,25 @@
+generated_at: "2026-06-06T00:00:00+00:00"
+products:
+  - product_slug: billing
+    constants:
+      EVENT_TYPE:
+        - name: CHECKOUT_RECOMMENDATION_DELIVERED
+          value: "checkout.recommendation.delivered"
+        - name: SEAT_ASSIGNED
+          value: "seat.assigned"
+      METER_SLUG:
+        - name: CHECKOUT_RECOMMENDATION_DELIVERED
+          value: "checkout.recommendation.delivered"
+        - name: SEAT_ASSIGNED
+          value: "seat.assigned"
+      FEATURE_KEY:
+        - name: RECOMMENDATION
+          value: "recommendation"
+        - name: ASSIGNED
+          value: "assigned"
+      PROVIDER:
+        - name: OPENAI
+          value: "openai"
+      SPAN_TYPE:
+        - name: LLM_TOKENS
+          value: "llm-tokens"
