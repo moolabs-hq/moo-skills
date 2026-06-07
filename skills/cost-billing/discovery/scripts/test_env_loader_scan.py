@@ -770,5 +770,163 @@ class InventoryYamlEmit(unittest.TestCase):
             )
 
 
+class RepoLevelInfraScan(unittest.TestCase):
+    """Regression guard for PR #531 root cause — scanner was scoped to
+    services/<svc>/ and never saw centralized infra at the repo root.
+    moolabs has infrastructure/terraform/modules/secrets/variables.tf
+    shared by every service; the scanner emitted zero Terraform surfaces
+    for moo-arc."""
+
+    def _moolabs_shape(self, tmp):
+        """Build a fixture that mimics moolabs' shape: services/<svc>/ plus
+        centralized infrastructure/terraform/modules/secrets/variables.tf."""
+        (tmp / "services" / "moo-arc").mkdir(parents=True)
+        (tmp / "services" / "moo-arc" / ".env.example").write_text("FOO=\n")
+        (tmp / "services" / "moo-arc" / "Dockerfile").write_text(
+            "FROM python\nENV PYTHONPATH=.\n"
+        )
+        (tmp / "infrastructure" / "terraform" / "modules" / "secrets").mkdir(parents=True)
+        (tmp / "infrastructure" / "terraform" / "modules" / "secrets" / "variables.tf").write_text(
+            'variable "db_password" {\n  type = string\n}\n'
+        )
+        (tmp / "infrastructure" / "terraform" / "regional").mkdir(parents=True)
+        (tmp / "infrastructure" / "terraform" / "regional" / "variables.tf").write_text(
+            'variable "region" {\n  type = string\n}\n'
+        )
+
+    def test_scan_repo_level_finds_centralized_terraform(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            self._moolabs_shape(tmp)
+            surfaces = els.scan_repo_level_deployment_surfaces(tmp)
+            tf_paths = sorted(s.path for s in surfaces if s.kind == "terraform")
+            # Both Terraform files emitted with repo-relative paths
+            # (NOT truncated to infra-dir-relative).
+            self.assertIn("infrastructure/terraform/modules/secrets/variables.tf", tf_paths)
+            self.assertIn("infrastructure/terraform/regional/variables.tf", tf_paths)
+            # All repo-level surfaces tagged scope="repo"
+            for s in surfaces:
+                self.assertEqual(s.scope, "repo")
+
+    def test_scan_repo_level_returns_empty_for_no_infra_dirs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            (tmp / "src").mkdir()
+            (tmp / "src" / "app.py").write_text("pass\n")
+            surfaces = els.scan_repo_level_deployment_surfaces(tmp)
+            self.assertEqual(surfaces, [])
+
+    def test_service_entry_combines_both_scopes(self):
+        """_service_entry must aggregate service-scope AND repo-scope
+        surfaces, tagging each. Without this, PR #531's bug (no Terraform
+        stub for moolabs) ships again."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            self._moolabs_shape(tmp)
+            service = {"slug": "moo-arc", "root": "services/moo-arc", "language": "python"}
+            entry = els._service_entry(
+                tmp, service, tmp / "services" / "moo-arc", catalog=[]
+            )
+            kinds_by_scope = {
+                (s["kind"], s["scope"]) for s in entry["deployment_surfaces"]
+            }
+            # service-scope detections
+            self.assertIn(("dotenv_example", "service"), kinds_by_scope)
+            self.assertIn(("dockerfile", "service"), kinds_by_scope)
+            # repo-scope detection
+            self.assertIn(("terraform", "repo"), kinds_by_scope)
+            # gap=False because terraform + dockerfile were found
+            self.assertFalse(entry["infra_discovery_gap"])
+
+    def test_infra_discovery_gap_true_when_no_infra(self):
+        """When neither scope finds terraform/k8s/dockerfile, the gap flag
+        is set. .env.example alone is INSUFFICIENT (doesn't reach prod
+        secret-routing). The instrument layer reads this flag to ask the
+        developer where their IaC actually lives — covers non-standard
+        paths like iac/, cdk/, pulumi/."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            (tmp / "services" / "tiny").mkdir(parents=True)
+            (tmp / "services" / "tiny" / ".env.example").write_text("FOO=\n")
+            # No terraform/, no k8s/, no Dockerfile anywhere.
+            service = {"slug": "tiny", "root": "services/tiny", "language": "python"}
+            entry = els._service_entry(
+                tmp, service, tmp / "services" / "tiny", catalog=[]
+            )
+            self.assertTrue(entry["infra_discovery_gap"])
+
+    def test_scan_walks_all_repo_level_infra_dir_names(self):
+        """Every _REPO_LEVEL_INFRA_DIRS entry must be honored. Covers
+        customers using 'infra' instead of 'infrastructure', 'tf' instead
+        of 'terraform', etc."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            for dir_name in ("infra", "tf", "deploy", "k8s", "helm", "ops"):
+                tf_dir = tmp / dir_name / "secrets"
+                tf_dir.mkdir(parents=True)
+                (tf_dir / "vars.tf").write_text(
+                    'variable "x" {\n  type = string\n}\n'
+                )
+            surfaces = els.scan_repo_level_deployment_surfaces(tmp)
+            found_dirs = {
+                s.path.split("/")[0] for s in surfaces if s.kind == "terraform"
+            }
+            for dir_name in ("infra", "tf", "deploy", "k8s", "helm", "ops"):
+                self.assertIn(
+                    dir_name, found_dirs,
+                    f"_REPO_LEVEL_INFRA_DIRS missing {dir_name}",
+                )
+
+    def test_emit_yaml_includes_scope_and_gap_flag(self):
+        """The YAML emitter must include the new scope field on each
+        deployment_surface entry AND the infra_discovery_gap flag at the
+        service level. Without this, downstream consumers (config_wire,
+        instrument) can't distinguish service-scope from repo-scope or
+        know to surface the gap CHECKLIST."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "inv.yaml"
+            inventory = {
+                "generated_at": "2026-06-07T00:00:00+00:00",
+                "granularity": "per-service",
+                "env_loader_granularity": "per-service",
+                "granularity_source": "declared",
+                "services": [{
+                    "service_slug": "moo-arc",
+                    "infra_discovery_gap": False,
+                    "app_config": {
+                        "pattern": "unrecognized",
+                        "confidence": "none",
+                        "evidence": [],
+                        "stub_required": True,
+                    },
+                    "deployment_surfaces": [
+                        {"kind": "dotenv_example",
+                         "path": "services/moo-arc/.env.example",
+                         "insert_kind": "line_append",
+                         "scope": "service"},
+                        {"kind": "terraform",
+                         "path": "infrastructure/terraform/modules/secrets/variables.tf",
+                         "insert_kind": "variable_block_append",
+                         "scope": "repo"},
+                    ],
+                }],
+            }
+            els.emit_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            svc = parsed["services"][0]
+            # gap flag round-trips as bool
+            self.assertIs(svc["infra_discovery_gap"], False)
+            # scope round-trips on each surface
+            scopes = {s["kind"]: s["scope"] for s in svc["deployment_surfaces"]}
+            self.assertEqual(scopes["dotenv_example"], "service")
+            self.assertEqual(scopes["terraform"], "repo")
+
+
 if __name__ == "__main__":
     unittest.main()
