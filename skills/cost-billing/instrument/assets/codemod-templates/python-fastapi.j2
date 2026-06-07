@@ -59,7 +59,7 @@ emit_event_safe(
     # ── Open-shape attribution (lands at data.meta.<key>) ──
     meta={
         "workflow_id": "{{ entry.workflow_id }}",
-        "feature_key": "{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+        "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}
@@ -89,7 +89,7 @@ emit_usage_event_safe(
     value={{ entry.refund_unit.derivation }},
     meta={
         "workflow_id": "{{ entry.workflow_id }}",
-        "feature_key": "{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+        "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}
@@ -123,7 +123,7 @@ emit_cost_event_safe(
     }],
     meta={
         "workflow_id": "{{ entry.workflow_id }}",
-        "feature_key": "{{ entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 2 else entry.workflow_id }}",
+        "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}

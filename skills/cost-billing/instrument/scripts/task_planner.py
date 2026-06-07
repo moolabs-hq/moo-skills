@@ -325,14 +325,22 @@ def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]
 
 def load_slug_inventory(path: Path) -> dict:
     """Read slug-inventory.yaml (Phase A's slug_inventory.py output).
-    Returns {"products": []} on missing file or absent PyYAML.
-    """
+    Returns {"products": []} on missing file, absent PyYAML, OR malformed
+    YAML — degrades gracefully so a corrupted inventory doesn't crash the
+    planner. PR #5 review I-1 fix."""
     if not path.exists():
         return {"products": []}
     try:
         import yaml
-        data = yaml.safe_load(path.read_text()) or {}
     except ImportError:
+        return {"products": []}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        sys.stderr.write(
+            f"WARN: slug-inventory.yaml at {path} is malformed "
+            f"({type(exc).__name__}); degrading to empty inventory\n"
+        )
         return {"products": []}
     data.setdefault("products", [])
     return data
@@ -431,6 +439,21 @@ def build_slugs_emit_tasks(inventory: dict) -> list[SlugsEmitTask]:
     return out
 
 
+def _slugs_import_path_for(language: str, product_slug: str) -> str:
+    """Return the language-appropriate import path for a per-product slugs
+    module. Conventions match Phase C SKILL.md Phase 1.8:
+      - python: app.services.moolabs.slugs_<product>
+      - typescript: @/services/moolabs/slugs_<product>
+      - go: internal/moolabsclient/slugs_<product>
+    Defaults to the python convention when language is unknown."""
+    safe = (product_slug or "").replace("-", "_")
+    if language == "typescript":
+        return f"@/services/moolabs/slugs_{safe}"
+    if language == "go":
+        return f"internal/moolabsclient/slugs_{safe}"
+    return f"app.services.moolabs.slugs_{safe}"
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -440,9 +463,20 @@ def build_tasks(
     repo_profile: dict[str, Any],
     attribution_defaults: dict[str, str | None] | None = None,
     attribution_overrides: list[dict[str, Any]] | None = None,
+    slug_inventory: dict[str, Any] | None = None,
 ) -> list[Task]:
-    """Group inventory entries by file, emit one task per file."""
+    """Group inventory entries by file, emit one task per file.
+
+    Phase C (PR #5 review CRIT fix): when slug_inventory is provided, build
+    the per-product slug index and resolve per-callsite constant names +
+    slugs_import_path for each Insert.entry. The framework callsite
+    templates read these to render `event_type=EVENT_TYPE_X` (bare
+    identifier) instead of `event_type="x.y"` (string literal). Without
+    this wiring, the constants are never set and every callsite falls
+    back to the literal — defeating the slugs-as-source-of-truth contract.
+    """
     output_input_index = _build_output_input_index(output_input_map)
+    slug_index = build_slug_index(slug_inventory or {"products": []})
     capabilities = snapshot.get("capabilities", {}) if snapshot else {}
     service_slug = signed.get("service_slug", "unknown") if signed else "unknown"
     repo = signed.get("repo", {}) if signed else {}
@@ -490,7 +524,28 @@ def build_tasks(
             pattern = _pattern_for(entry, output_input_index)
             wf = entry.get("workflow_id", "")
             cost_workflow_ids = output_input_index.get(wf, [])
-            enriched_entry = {**entry, "cost_workflow_ids": cost_workflow_ids}
+            # Phase C (PR #5 review CRIT fix): resolve per-callsite slug
+            # constants from the slug-inventory + index. Each entry carries
+            # its product_slug from Phase A; the resolver returns
+            # event_type_const / meter_slug_const / feature_key_const /
+            # span_type_const + slugs_import_path so the framework callsite
+            # templates can render `event_type=EVENT_TYPE_X` instead of
+            # `event_type="x.y"`. None values trigger the template's
+            # inline-literal fallback path.
+            product_slug = entry.get("product_slug", "")
+            slug_consts = resolve_slug_constants(
+                slug_index,
+                product_slug=product_slug,
+                event_type=entry.get("event_type"),
+                workflow_id=wf,
+                cost_kind=entry.get("cost_kind"),
+            )
+            enriched_entry = {
+                **entry,
+                "cost_workflow_ids": cost_workflow_ids,
+                **slug_consts,
+                "slugs_import_path": _slugs_import_path_for(primary_lang, product_slug),
+            }
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
@@ -709,10 +764,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Phase C (PR #5 review CRIT fix): load slug-inventory BEFORE build_tasks
+    # so build_tasks can resolve per-callsite slug constants for each Insert.
+    # Missing file / malformed YAML / absent PyYAML all degrade to empty
+    # inventory (load_slug_inventory handles all three). Without this,
+    # entry.event_type_const stays None and templates fall back to inline
+    # string literals — defeating Phase C's slugs-as-source-of-truth contract.
+    slug_inv = load_slug_inventory(Path(args.slug_inventory))
     tasks = build_tasks(
         cost_inv, usage_inv, omap, snapshot, signed, repo_profile,
         attribution_defaults=attribution_defaults,
         attribution_overrides=attribution_overrides,
+        slug_inventory=slug_inv,
     )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
@@ -720,9 +783,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Phase 1.7 env-wire tasks (Phase B).
     env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
-    # Phase 1.8 slugs-emit tasks (Phase C). Missing file degrades to
-    # empty list (no slugs tasks rendered, existing tasks unaffected).
-    slug_inv = load_slug_inventory(Path(args.slug_inventory))
+    # Phase 1.8 slugs-emit tasks (Phase C). slug_inv was loaded BEFORE
+    # build_tasks above so build_tasks could resolve per-callsite slug
+    # constants — reuse the same inventory here.
     slugs_emit_tasks = build_slugs_emit_tasks(slug_inv)
 
     out_path = Path(args.output)
