@@ -42,9 +42,9 @@ THIS IS THE ONLY PLACE THAT INSTANTIATES THE MOOLABS CLIENT.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import re
 from functools import lru_cache
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 {# Phase 1.7 env-wire (NEW v0.3 env-routing migration):
    env_config.mode               — "modify" | "stub"
@@ -57,16 +57,32 @@ from typing import Any, Optional
    just reads `get_settings().moolabs_api_key`.
 #}
 import structlog
-from moolabs import Moolabs
 
 # Import the customer's settings layer (or the generated stub).
 from {{ env_config.settings_import_path }} import get_settings
+
+if TYPE_CHECKING:
+    # Annotation-only imports — keep `moolabs` out of module-import so this file
+    # imports before the SDK is installed (lazy import inside get_client()).
+    from datetime import datetime
+
+    from moolabs import Moolabs
 
 logger = structlog.get_logger(__name__)
 
 # Env-gated strict/lax mode — same var name as the Go helper for cross-language
 # parity. Non-empty -> raise (dev mode); unset -> log-rail swallow (prod).
 _DEV_ENV_VAR = "SDK_DEVELOPMENT"
+
+# Defense-in-depth: never let an API key reach logs/exceptions verbatim if an SDK
+# error echoes it. Scrub secret-shaped tokens at the rail's own boundary.
+_SECRET_TOKEN_RE = re.compile(
+    r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]+|\bwhsec_[A-Za-z0-9_]+|\bmoo_[a-z]+_[A-Za-z0-9_]+"
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    return _SECRET_TOKEN_RE.sub("[REDACTED]", text)
 
 {% if telemetry.mode == "brownfield" %}
 # Brownfield directive: {{ service_slug }} already has a live TracerProvider.
@@ -94,6 +110,8 @@ def _resolve_api_key() -> str:
 @lru_cache(maxsize=1)
 def get_client() -> Moolabs:
     """Return the singleton Moolabs SDK client (lru_cache = idempotent + thread-safe)."""
+    from moolabs import Moolabs  # noqa: PLC0415 — lazy so the module imports without the SDK installed
+
     return Moolabs(api_key=_resolve_api_key())
 
 
@@ -105,9 +123,9 @@ def _handle_emit_err(event_class: str, fields: dict, err: BaseException) -> None
     if os.environ.get(_DEV_ENV_VAR):
         raise RuntimeError(
             f"moolabsclient: {event_class} emission failed "
-            f"(SDK_DEVELOPMENT mode — unset to swallow): {err}"
+            f"(SDK_DEVELOPMENT mode — unset to swallow): {_scrub_secrets(str(err))}"
         ) from err
-    fields["error"] = str(err)
+    fields["error"] = _scrub_secrets(str(err))
     logger.warning(f"moolabs.{event_class}.event", **fields)
 
 
