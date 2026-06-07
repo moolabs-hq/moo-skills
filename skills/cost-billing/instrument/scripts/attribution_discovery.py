@@ -356,7 +356,7 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
             lines.append(f"    confidence: n_a")
             if b:
                 lines.append(f"    confirmed_by: {b.confirmed_by}")
-                lines.append(f"    confirmed_at: {b.confirmed_at}")
+                lines.append(f'    confirmed_at: "{b.confirmed_at}"')
             continue
         lines.append(f'    source: "{b.source}"')
         lines.append(f"    confidence: {b.confidence}")
@@ -364,7 +364,7 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
             lines.append(f"    evidence: [{', '.join(repr(e) for e in b.evidence[:5])}]")
         lines.append(f"    fallback_when_absent: {b.fallback_when_absent}")
         lines.append(f"    confirmed_by: {b.confirmed_by}")
-        lines.append(f"    confirmed_at: {b.confirmed_at}")
+        lines.append(f'    confirmed_at: "{b.confirmed_at}"')
     if overrides:
         lines.append("overrides:")
         for ov in overrides:
