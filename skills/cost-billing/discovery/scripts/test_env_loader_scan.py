@@ -1029,6 +1029,10 @@ class ServiceUnderInfraDirNoDoubleScan(unittest.TestCase):
             # Exactly ONE terraform surface, and it's the service-scope one.
             self.assertEqual(len(tf), 1, f"double-scan produced {tf}")
             self.assertEqual(tf[0][1], "service")
+            # Round-3 NIT pin: dropping the repo-scope DUPLICATE must NOT
+            # leave the service falsely flagged as having no infra — the
+            # surviving service-scope copy satisfies has_infra.
+            self.assertFalse(entry["infra_discovery_gap"])
 
     def test_centralized_infra_not_dropped_for_normal_service(self):
         """The dedup must NOT over-drop: a service under services/ must still
