@@ -313,5 +313,116 @@ class BuildTasksWiresSlugConstants(unittest.TestCase):
         )
 
 
+class EnvWireTaskGapDetection(unittest.TestCase):
+    """PR #531 follow-up: EnvWireTask must carry the infra_discovery_gap
+    flag from config-wiring-plan through to tasks.yaml, so the execution
+    agent can render a DEVELOPER ACTION REQUIRED block in the PR body
+    when the scanner found no IaC. Each deployment_stub also carries a
+    scope field for service-vs-repo partitioning."""
+
+    def test_build_env_wire_tasks_reads_gap_flag(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan_path = Path(t) / "config-wiring-plan.yaml"
+            plan_path.write_text(
+                'services:\n'
+                '  - service_slug: "tiny"\n'
+                '    mode: stub\n'
+                '    settings_import_path: "app.services.moolabs_settings"\n'
+                '    api_key_accessor: "get_settings().moolabs_api_key.get_secret_value()"\n'
+                '    stub_emit_path: "app/services/moolabs_settings.py"\n'
+                '    infra_discovery_gap: true\n'
+                '    deployment_stubs: []\n'
+            )
+            tasks = tp.build_env_wire_tasks(plan_path)
+            self.assertEqual(len(tasks), 1)
+            self.assertTrue(tasks[0].infra_discovery_gap)
+
+    def test_build_env_wire_tasks_defaults_gap_to_false(self):
+        """Backward compat: plans from before the field existed have no
+        infra_discovery_gap key. Default to False."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan_path = Path(t) / "config-wiring-plan.yaml"
+            plan_path.write_text(
+                'services:\n'
+                '  - service_slug: "svc"\n'
+                '    mode: modify\n'
+                '    settings_import_path: "app.config"\n'
+                '    api_key_accessor: "get_settings().moolabs_api_key"\n'
+                '    stub_emit_path: null\n'
+                '    deployment_stubs: []\n'
+            )
+            tasks = tp.build_env_wire_tasks(plan_path)
+            self.assertFalse(tasks[0].infra_discovery_gap)
+
+    def test_emit_tasks_yaml_includes_gap_flag_and_per_stub_scope(self):
+        """The tasks.yaml output must include infra_discovery_gap AND each
+        deployment_stub's scope so the execution agent reads them. Without
+        this passthrough, the PR-body CHECKLIST never fires."""
+        import tempfile
+        import yaml
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "tasks.yaml"
+            env_wire_tasks = [
+                tp.EnvWireTask(
+                    task_id="env_wire_001_moo-arc",
+                    service_slug="moo-arc",
+                    mode="stub",
+                    settings_import_path="app.services.moolabs_settings",
+                    api_key_accessor="get_settings().moolabs_api_key.get_secret_value()",
+                    stub_emit_path="app/services/moolabs_settings.py",
+                    deployment_stubs=[
+                        {"kind": "terraform",
+                         "source_path": "infrastructure/terraform/modules/secrets/variables.tf",
+                         "mode": "checklist_only",
+                         "scope": "repo"},
+                        {"kind": "dotenv_example",
+                         "source_path": "services/moo-arc/.env.example",
+                         "emit_path": "services/moo-arc/.env.example",
+                         "mode": "append",
+                         "scope": "service"},
+                    ],
+                    infra_discovery_gap=False,
+                ),
+            ]
+            tp.emit_tasks_yaml([], out, env_wire_tasks=env_wire_tasks)
+            parsed = yaml.safe_load(out.read_text())
+            ewt = parsed["env_wire_tasks"][0]
+            self.assertEqual(ewt["infra_discovery_gap"], False)
+            scopes = {s["kind"]: s["scope"] for s in ewt["deployment_stubs"]}
+            self.assertEqual(scopes["terraform"], "repo")
+            self.assertEqual(scopes["dotenv_example"], "service")
+            # source_path round-trips for repo-scope CHECKLIST rendering.
+            tf_stub = next(s for s in ewt["deployment_stubs"] if s["kind"] == "terraform")
+            self.assertEqual(
+                tf_stub["source_path"],
+                "infrastructure/terraform/modules/secrets/variables.tf",
+            )
+
+    def test_emit_tasks_yaml_gap_true_round_trips(self):
+        """When the gap flag is True, it must serialize as YAML true and
+        round-trip as Python bool."""
+        import tempfile
+        import yaml
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "tasks.yaml"
+            env_wire_tasks = [
+                tp.EnvWireTask(
+                    task_id="env_wire_001_tiny",
+                    service_slug="tiny",
+                    mode="stub",
+                    settings_import_path="app.services.moolabs_settings",
+                    api_key_accessor="get_settings().moolabs_api_key.get_secret_value()",
+                    stub_emit_path="app/services/moolabs_settings.py",
+                    deployment_stubs=[],
+                    infra_discovery_gap=True,
+                ),
+            ]
+            tp.emit_tasks_yaml([], out, env_wire_tasks=env_wire_tasks)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertIs(parsed["env_wire_tasks"][0]["infra_discovery_gap"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

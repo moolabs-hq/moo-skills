@@ -397,11 +397,41 @@ class DeploymentSurface:
     path: str          # repo-relative path
     insert_kind: str   # "variable_block_append" | "secret_ref_checklist" |
                        # "environment_block_append" | "line_append" | "checklist_only"
+    scope: str = "service"  # "service" (under services/<svc>/) | "repo" (centralized at repo root)
 
 
 # Per-surface skip dirs are MORE permissive than _SKIP_DIRS — we explicitly
 # want to scan infra/, deployment/, k8s/, etc.
-_SURFACE_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", "vendor"})
+#
+# `.terraform` / `.terragrunt-cache` MUST be skipped (PR #7 review IMPORTANT):
+# `terraform init` copies module SOURCES into `.terraform/modules/<name>/*.tf`
+# and terragrunt copies the full module tree into `.terragrunt-cache/<hash>/`.
+# These are machine-generated, gitignored, and NOT customer-editable — a dev
+# who ran `terraform init` locally would otherwise see these vendored copies
+# pulled in as false-positive repo-scope terraform surfaces, producing
+# CHECKLIST entries pointing at paths that don't exist in the committed tree
+# AND falsely clearing infra_discovery_gap for a repo with no real IaC.
+_SURFACE_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", "vendor",
+    ".terraform", ".terragrunt-cache",
+})
+
+# Repo-root directories that may hold CENTRALIZED infrastructure for monorepos
+# (instead of, or in addition to, per-service infra). moolabs is the canonical
+# centralized-infra example: `infrastructure/terraform/{modules,environments,
+# regional,global,accounts}/` defines shared Terraform that every service
+# inherits via module composition; no `services/<svc>/infra/` exists.
+#
+# When a service is scanned, we ALSO walk these repo-root dirs and tag any
+# surfaces found with scope="repo" so the instrument layer can emit a
+# CHECKLIST entry (rather than auto-modifying centralized infra, which would
+# affect every service simultaneously and risks cross-service blast radius).
+_REPO_LEVEL_INFRA_DIRS = frozenset({
+    "infrastructure", "infra", "terraform", "tf",
+    "deploy", "deployment", "deployments",
+    "k8s", "kubernetes", "helm", "charts",
+    "ops",
+})
 
 
 def _envfrom_secretref_in_same_container(text: str) -> bool:
@@ -446,11 +476,29 @@ def _envfrom_secretref_in_same_container(text: str) -> bool:
     return False
 
 
-def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
+def scan_deployment_surfaces(
+    repo_root: Path,
+    scope: str = "service",
+    path_anchor: Path | None = None,
+) -> list[DeploymentSurface]:
     """Walk the repo for deployment-surface insertion points. Each detected
     surface becomes one entry; the instrument side decides per-entry whether
     to emit a stub file, append to an existing file, or emit a CHECKLIST
     comment.
+
+    Args:
+      repo_root: dir to walk (a service path for scope=service, a repo-level
+                 infra dir like `infrastructure/` for scope=repo).
+      scope: tagged onto each emitted surface so the instrument layer can
+             distinguish service-scoped surfaces (safe to auto-modify) from
+             repo-scoped centralized infra (CHECKLIST only — modifying
+             centralized Terraform affects every service simultaneously).
+      path_anchor: when present, relative paths in emitted DeploymentSurfaces
+                   are computed against this anchor instead of `repo_root`.
+                   Used for repo-scope scans so the emitted path is
+                   `infrastructure/terraform/...` (repo-relative) rather
+                   than `terraform/...` (anchor-relative). Defaults to
+                   `repo_root` when None.
 
     Recognition rules (all non-destructive — no file modification here):
       - Terraform: any `variable "..." {}` block in a *.tf file
@@ -460,13 +508,27 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
       - Dockerfile: ENV lines (security smell — checklist only)
     """
     out: list[DeploymentSurface] = []
+    anchor = path_anchor if path_anchor is not None else repo_root
 
     for path in repo_root.rglob("*"):
         if not path.is_file():
             continue
         if any(part in _SURFACE_SKIP_DIRS for part in path.parts):
             continue
-        rel = str(path.relative_to(repo_root))
+        try:
+            rel = str(path.relative_to(anchor))
+        except ValueError:
+            # path isn't under the anchor — warn-and-skip rather than emit a
+            # machine-absolute path into a customer-committed inventory YAML
+            # (PR #7 review MINOR). Unreachable with current callers (rglob
+            # only yields paths under repo_root, and anchor is always an
+            # ancestor), but a future caller passing a non-ancestor anchor
+            # would otherwise silently leak absolute paths. Skip loudly.
+            sys.stderr.write(
+                f"WARN: deployment-surface scan skipping {path} — not under "
+                f"anchor {anchor} (would emit a non-repo-relative path)\n"
+            )
+            continue
 
         # Terraform
         if path.suffix == ".tf":
@@ -476,6 +538,7 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                     kind="terraform",
                     path=rel,
                     insert_kind="variable_block_append",
+                    scope=scope,
                 ))
             continue
 
@@ -497,6 +560,7 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                     kind="k8s",
                     path=rel,
                     insert_kind="secret_ref_checklist",
+                    scope=scope,
                 ))
                 continue
             # docker-compose detection by filename — accept the standard
@@ -515,6 +579,7 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                         kind="docker-compose",
                         path=rel,
                         insert_kind="environment_block_append",
+                        scope=scope,
                     ))
             continue
 
@@ -524,6 +589,7 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                 kind="dotenv_example",
                 path=rel,
                 insert_kind="line_append",
+                scope=scope,
             ))
             continue
 
@@ -535,8 +601,35 @@ def scan_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
                     kind="dockerfile",
                     path=rel,
                     insert_kind="checklist_only",
+                    scope=scope,
                 ))
 
+    return out
+
+
+def scan_repo_level_deployment_surfaces(repo_root: Path) -> list[DeploymentSurface]:
+    """Scan centralized-infra dirs at the repo root (per `_REPO_LEVEL_INFRA_DIRS`).
+    Each result is tagged scope="repo" so the instrument layer can emit a
+    CHECKLIST entry instead of auto-modifying — centralized Terraform/k8s
+    affects every service simultaneously and shouldn't be touched by a
+    per-service codemod.
+
+    Catches the moolabs-shape monorepo: `infrastructure/terraform/modules/
+    secrets/variables.tf` is shared by every service; without this scan it
+    was invisible to env_loader_scan and PR #531 shipped without any
+    Terraform stub for moolabs' actual infra layer.
+    """
+    out: list[DeploymentSurface] = []
+    for dir_name in _REPO_LEVEL_INFRA_DIRS:
+        candidate = repo_root / dir_name
+        if not candidate.is_dir():
+            continue
+        # path_anchor=repo_root keeps emitted paths repo-relative
+        # (e.g. "infrastructure/terraform/...") rather than truncated
+        # to the infra-dir-relative form ("terraform/...").
+        out.extend(scan_deployment_surfaces(
+            candidate, scope="repo", path_anchor=repo_root,
+        ))
     return out
 
 
@@ -576,15 +669,54 @@ def _service_entry(
             "wire_target": result.wire_target,
         }
 
-    # Deployment surfaces scoped to the SERVICE's path (not the whole repo).
+    # Deployment surfaces — BOTH scopes:
+    #   - service-scope: walks services/<svc>/ (the per-service infra convention)
+    #   - repo-scope: walks repo-root infrastructure/ infra/ terraform/ deploy/
+    #     k8s/ helm/ etc. (the CENTRALIZED-INFRA convention used by monorepos
+    #     like moolabs where one shared Terraform tree serves all services)
+    # PR #531 against moolabs shipped without any Terraform stub because the
+    # earlier service-only scan never saw infrastructure/terraform/ — fix
+    # restored by including repo-scope surfaces tagged scope="repo".
     service_path = repo_root / service["root"]
-    surfaces = scan_deployment_surfaces(service_path) if service_path.exists() else []
+    surfaces: list[DeploymentSurface] = []
+    if service_path.exists():
+        surfaces.extend(scan_deployment_surfaces(service_path, scope="service"))
+
+    # PR #7 review IMPORTANT (Challenge 3): when a service root lives UNDER one
+    # of the repo-level infra dirs (e.g. service at `deploy/myservice/`), the
+    # repo-level scan would re-detect the same files the service-scope scan
+    # already found — producing duplicate surfaces with conflicting scope tags
+    # (service→new_file AND repo→checklist_only for the SAME physical file).
+    # Drop any repo-scope surface whose path is under this service's root.
+    # NOTE: repo-scope paths are repo-relative (e.g. "deploy/myservice/x.tf")
+    # while service-scope paths are service-relative ("x.tf") — they never
+    # string-match, so we compare against the service ROOT prefix, not the
+    # service-scope path strings.
+    service_root_rel = service["root"].rstrip("/")
+    service_prefix = f"{service_root_rel}/"
+    for s in scan_repo_level_deployment_surfaces(repo_root):
+        if s.path == service_root_rel or s.path.startswith(service_prefix):
+            continue  # already covered by the service-scope scan above
+        surfaces.append(s)
+
+    # Gap-detection: when no infra surface (terraform / k8s / dockerfile)
+    # was found at EITHER scope, set infra_discovery_gap=True. The
+    # instrument layer surfaces this in the PR body as a DEVELOPER ACTION
+    # REQUIRED checklist asking where their IaC actually lives (covers
+    # non-standard paths like iac/, cdk/, pulumi/, or repos where Terraform
+    # is committed outside the conventional dirnames). Treats .env.example /
+    # docker-compose alone as INSUFFICIENT — they don't reach production
+    # secret-routing in most setups.
+    infra_kinds = {"terraform", "k8s", "dockerfile"}
+    has_infra = any(s.kind in infra_kinds for s in surfaces)
 
     return {
         "service_slug": service["slug"],
         "app_config": app_config,
+        "infra_discovery_gap": not has_infra,
         "deployment_surfaces": [
-            {"kind": s.kind, "path": s.path, "insert_kind": s.insert_kind}
+            {"kind": s.kind, "path": s.path,
+             "insert_kind": s.insert_kind, "scope": s.scope}
             for s in surfaces
         ],
     }
@@ -693,12 +825,28 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
                     v_str = str(v).replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'        {k}: "{v_str}"')
 
+            # PR #531 lesson: surface the gap when scanner found no infra
+            # (no terraform / k8s / dockerfile at either scope). The
+            # instrument layer reads this flag to emit a DEVELOPER ACTION
+            # REQUIRED checklist in the PR body — "where does your IaC
+            # live?" — covering non-standard paths like iac/, cdk/, pulumi/.
+            lines.append(
+                f"    infra_discovery_gap: "
+                f"{str(svc.get('infra_discovery_gap', False)).lower()}"
+            )
             if svc["deployment_surfaces"]:
                 lines.append(f"    deployment_surfaces:")
                 for s in svc["deployment_surfaces"]:
                     lines.append(f"      - kind: {s['kind']}")
-                    lines.append(f"        path: {s['path']}")
+                    # Quote path because customer-authored dir names can
+                    # contain YAML metacharacters (rare but defensive).
+                    path_safe = str(s['path']).replace('\\', '\\\\').replace('"', '\\"')
+                    lines.append(f'        path: "{path_safe}"')
                     lines.append(f"        insert_kind: {s['insert_kind']}")
+                    # scope distinguishes per-service (auto-modifiable)
+                    # from centralized-infra (CHECKLIST only — modifying
+                    # shared infra has cross-service blast radius).
+                    lines.append(f"        scope: {s.get('scope', 'service')}")
             else:
                 lines.append(f"    deployment_surfaces: []")
 

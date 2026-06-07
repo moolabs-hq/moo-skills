@@ -192,11 +192,36 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
       - terraform / k8s: emit a NEW file alongside (never modify existing)
       - dotenv_example:  append a single line to the existing file
       - dockerfile:      checklist only (security smell — never auto-edit)
+
+    Scope handling (PR-#531 fix):
+      - scope="service" — auto-modify-safe; emit the stub as normal.
+      - scope="repo"    — CENTRALIZED infra (one Terraform tree shared by
+        every service). Auto-modifying it would affect ALL services
+        simultaneously with cross-service blast radius. Downgrade to
+        "checklist_only" mode regardless of kind — the customer must wire
+        MOOLABS_API_KEY into the shared module by hand (typically into the
+        ECS task-definition's `secrets:` block in modules/ecs-service/).
     """
     out: list[dict] = []
     for s in surfaces or []:
         kind = s.get("kind")
         path = s.get("path", "")
+        scope = s.get("scope", "service")
+
+        if scope == "repo":
+            # Centralized infra: NEVER auto-emit a new file or append.
+            # Instead, surface a CHECKLIST entry naming the file the
+            # developer must edit. The instrument layer renders this into
+            # the PR body so the developer knows exactly where MOOLABS_API_KEY
+            # needs to be added in their existing modules.
+            out.append({
+                "kind": kind,
+                "source_path": path,
+                "mode": "checklist_only",
+                "scope": "repo",
+            })
+            continue
+
         if kind == "terraform":
             # Emit moolabs.tf alongside the detected variables.tf
             dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
@@ -205,6 +230,7 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
                 "source_path": path,
                 "emit_path": f"{dir_path}/moolabs.tf" if dir_path != "." else "moolabs.tf",
                 "mode": "new_file",
+                "scope": "service",
             })
         elif kind == "k8s":
             dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
@@ -213,6 +239,7 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
                 "source_path": path,
                 "emit_path": f"{dir_path}/secret-moolabs.yaml" if dir_path != "." else "secret-moolabs.yaml",
                 "mode": "new_file",
+                "scope": "service",
             })
         elif kind == "docker-compose":
             out.append({
@@ -220,6 +247,7 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
                 "source_path": path,
                 "emit_path": path,  # appending to existing
                 "mode": "append",
+                "scope": "service",
             })
         elif kind == "dotenv_example":
             out.append({
@@ -227,12 +255,14 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
                 "source_path": path,
                 "emit_path": path,  # appending to existing
                 "mode": "append",
+                "scope": "service",
             })
         elif kind == "dockerfile":
             out.append({
                 "kind": "dockerfile",
                 "source_path": path,
                 "mode": "checklist_only",
+                "scope": "service",
             })
     return out
 
@@ -244,6 +274,11 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
     stub_required = bool(app_config.get("stub_required", True))
     service_slug = service.get("service_slug", "")
     deployment_stubs = _plan_deployment_stubs(service.get("deployment_surfaces") or [])
+    # PR #531 gap-detection: when Phase A's scanner found no terraform/k8s/
+    # dockerfile at any scope, the inventory flags it. Carry it forward so
+    # the instrument layer can surface a DEVELOPER ACTION REQUIRED checklist
+    # in the PR body asking where the customer's IaC actually lives.
+    infra_discovery_gap = bool(service.get("infra_discovery_gap", False))
 
     if stub_required or pattern == "unrecognized":
         return {
@@ -253,6 +288,7 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
             "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
             "stub_emit_path": _STUB_EMIT_PATHS.get(language),
             "deployment_stubs": deployment_stubs,
+            "infra_discovery_gap": infra_discovery_gap,
         }
 
     accessor_map = {
@@ -269,6 +305,7 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
             "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
             "stub_emit_path": _STUB_EMIT_PATHS.get(language),
             "deployment_stubs": deployment_stubs,
+            "infra_discovery_gap": infra_discovery_gap,
         }
     import_path = {
         "python": _python_settings_import_path,
@@ -282,6 +319,7 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
         "api_key_accessor": accessor,
         "stub_emit_path": None,
         "deployment_stubs": deployment_stubs,
+        "infra_discovery_gap": infra_discovery_gap,
     }
 
 
@@ -342,6 +380,11 @@ def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
                 lines.append(f"    stub_emit_path: {_quote(svc['stub_emit_path'])}")
             else:
                 lines.append(f"    stub_emit_path: null")
+            # PR #531 gap-detection passthrough.
+            lines.append(
+                f"    infra_discovery_gap: "
+                f"{str(svc.get('infra_discovery_gap', False)).lower()}"
+            )
             stubs = svc.get("deployment_stubs", [])
             if not stubs:
                 lines.append(f"    deployment_stubs: []")
@@ -353,6 +396,9 @@ def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
                     if "emit_path" in s:
                         lines.append(f"        emit_path: {_quote(s['emit_path'])}")
                     lines.append(f"        mode: {s['mode']}")
+                    # scope: service (auto-modifiable) | repo (checklist only;
+                    # centralized infra has cross-service blast radius)
+                    lines.append(f"        scope: {s.get('scope', 'service')}")
     dest.write_text("\n".join(lines) + "\n")
 
 

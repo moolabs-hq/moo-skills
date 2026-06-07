@@ -382,6 +382,93 @@ class DeploymentSurfacePlan(unittest.TestCase):
         self.assertNotIn("emit_path", stubs[0])
 
 
+class RepoScopeSurfacePlan(unittest.TestCase):
+    """Regression guard for PR #531 fix — repo-scope (centralized infra)
+    surfaces must be downgraded to checklist_only. Auto-emitting a
+    moolabs.tf alongside `infrastructure/terraform/modules/secrets/
+    variables.tf` would commit a shared-infra change without the customer
+    realizing it affects every service simultaneously."""
+
+    def test_repo_scope_terraform_is_checklist_only(self):
+        service = {
+            "service_slug": "moo-arc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [
+                {"kind": "terraform",
+                 "path": "infrastructure/terraform/modules/secrets/variables.tf",
+                 "insert_kind": "variable_block_append",
+                 "scope": "repo"},
+            ],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        stubs = plan.get("deployment_stubs", [])
+        self.assertEqual(len(stubs), 1)
+        # repo-scope downgrades to checklist_only — NEVER auto-emit a
+        # moolabs.tf alongside centralized infra (cross-service blast radius).
+        self.assertEqual(stubs[0]["mode"], "checklist_only")
+        self.assertEqual(stubs[0]["scope"], "repo")
+        # No emit_path because no file is being written.
+        self.assertNotIn("emit_path", stubs[0])
+        # source_path preserved so the instrument layer can name the file
+        # the developer must edit by hand.
+        self.assertEqual(
+            stubs[0]["source_path"],
+            "infrastructure/terraform/modules/secrets/variables.tf",
+        )
+
+    def test_service_scope_terraform_still_auto_emits(self):
+        """Per-service infra (services/<svc>/infra/) is safe to auto-modify
+        — emit moolabs.tf as before."""
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [
+                {"kind": "terraform",
+                 "path": "services/svc/infra/terraform/variables.tf",
+                 "insert_kind": "variable_block_append",
+                 "scope": "service"},
+            ],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        stubs = plan.get("deployment_stubs", [])
+        self.assertEqual(stubs[0]["mode"], "new_file")
+        self.assertEqual(stubs[0]["scope"], "service")
+        self.assertEqual(
+            stubs[0]["emit_path"],
+            "services/svc/infra/terraform/moolabs.tf",
+        )
+
+    def test_infra_discovery_gap_propagates_to_plan(self):
+        """When the inventory sets infra_discovery_gap=True, the plan must
+        carry it forward so the instrument layer can surface the DEVELOPER
+        ACTION REQUIRED checklist in the PR body."""
+        service = {
+            "service_slug": "svc",
+            "infra_discovery_gap": True,
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertTrue(plan["infra_discovery_gap"])
+
+    def test_default_scope_is_service_for_back_compat(self):
+        """Inventories from before the scope field existed have no scope
+        key on each surface. Default to service-scope (the old behavior)."""
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [
+                # No "scope" key — pre-fix inventory shape
+                {"kind": "terraform", "path": "services/svc/infra/variables.tf",
+                 "insert_kind": "variable_block_append"},
+            ],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        stubs = plan.get("deployment_stubs", [])
+        # Falls back to service-scope auto-emit (preserves pre-fix behavior).
+        self.assertEqual(stubs[0]["mode"], "new_file")
+
+
 class BuildPlanFromInventory(unittest.TestCase):
     def test_build_plan_one_service(self):
         inventory = {
