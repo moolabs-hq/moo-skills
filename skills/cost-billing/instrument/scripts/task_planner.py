@@ -544,7 +544,16 @@ def build_tasks(
                 **entry,
                 "cost_workflow_ids": cost_workflow_ids,
                 **slug_consts,
-                "slugs_import_path": _slugs_import_path_for(primary_lang, product_slug),
+                # Round 2 LOW fix: when product_slug is empty, emit None
+                # rather than a trailing-underscore path like
+                # "app.services.moolabs.slugs_" — purely a tasks.yaml
+                # data-quality fix (rendered source is unaffected because
+                # all _const keys are None and the import block is gated).
+                "slugs_import_path": (
+                    _slugs_import_path_for(primary_lang, product_slug)
+                    if product_slug
+                    else None
+                ),
             }
             inserts.append(
                 Insert(
