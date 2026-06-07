@@ -547,14 +547,13 @@ def scan_deployment_surfaces(
 
         # Terraform
         if path.suffix == ".tf":
-            # Reusable `modules/` and account-bootstrap `accounts/` Terraform are
-            # NOT a service's env-var deployment point — only per-environment /
-            # service-level configs are. Skipping them avoids flooding the
-            # inventory with every module's variables.tf (v0.3 over-detection fix:
-            # a centralized infra/terraform tree was matching ~30 unrelated
-            # variables.tf). Scope further to the service at the instrument layer.
-            if "modules" in path.parts or "accounts" in path.parts:
-                continue
+            # NOTE: the repo-level scan intentionally finds ALL centralized
+            # terraform variable blocks (incl. modules/secrets) — that is the
+            # designed comprehensive surface inventory. In a large centralized
+            # infra this can be many files; SCOPING to the service's actual
+            # deployment point is the instrument layer's responsibility (config_wire
+            # / the codemod), NOT a blanket dir-skip here (which would drop the
+            # legitimate secrets module). See handoff: env-wiring scoping.
             text = path.read_text(errors="ignore")
             if re.search(r'variable\s+"[^"]+"\s*\{', text):
                 out.append(DeploymentSurface(
