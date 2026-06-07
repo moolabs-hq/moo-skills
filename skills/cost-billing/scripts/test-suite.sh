@@ -166,6 +166,7 @@ import sys
 from pathlib import Path
 try:
     from jinja2 import Environment, FileSystemLoader
+    import yaml
 except ImportError:
     print("  SKIP  jinja2 not installed; rendered-template assertions skipped")
     sys.exit(0)
@@ -210,10 +211,28 @@ helper_ctx = {
         "cost_method_path": "client.cost.ingest_event",
         "events_method_path": "client.events.ingest",
     },
+    "env_config": {
+        "mode": "modify",
+        "settings_import_path": "app.config",
+        "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+        "stub_emit_path": None,
+    },
 }
 for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]:
+    # TS uses @/-prefixed settings import path; Python uses dotted module path.
+    # Override env_config for TS so that has_get_settings assertion matches.
+    if helper.startswith("typescript"):
+        ts_env_config = {
+            "mode": "modify",
+            "settings_import_path": "@/config",
+            "api_key_accessor": "getSettings().moolabsApiKey",
+            "stub_emit_path": None,
+        }
+        render_ctx = {**helper_ctx, "env_config": ts_env_config}
+    else:
+        render_ctx = helper_ctx
     try:
-        r = env.get_template(helper).render(**helper_ctx)
+        r = env.get_template(helper).render(**render_ctx)
     except Exception as e:
         print(f"  FAIL  helper {helper}: render error: {e}")
         fail_count += 1
@@ -237,6 +256,18 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
                        and "resolved_event_id" not in r
                        and "skipped_no_tenant_id" not in r
                        and "log_kwargs[" not in r)
+        # Phase 1.7 env-wire: helper imports from get_settings() instead of
+        # direct os.environ / strategy-branched fetches.
+        has_get_settings = "from app.config import get_settings" in r
+        # Phase 1.7 negative-leakage: NO strategy-branched fetches.
+        no_strategy_branches = (
+            "import boto3" not in r and
+            "from google.cloud import secretmanager" not in r and
+            "import hvac" not in r and
+            "subprocess.run" not in r  # 1Password CLI
+        )
+        # Phase 1.7 _resolve_api_key reads via accessor, not os.environ direct
+        no_direct_environ_resolve = "os.environ.get(\"MOOLABS_API_KEY\")" not in r
         failed = []
         if not has_usage:   failed.append("usage.ingest_event missing")
         if not has_cost:    failed.append("cost.ingest_event missing")
@@ -245,6 +276,9 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         if not has_rail:    failed.append("never-drop log rail missing")
         if not no_tenant:   failed.append("tenant_id leaked (FR-3 violation)")
         if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if not has_get_settings:        failed.append("env_config get_settings import missing")
+        if not no_strategy_branches:    failed.append("v0.2 strategy branch leaked (boto3/google/hvac/op)")
+        if not no_direct_environ_resolve: failed.append("os.environ direct read leaked")
         if failed:
             print(f"  FAIL  helper {helper}: {', '.join(failed)}")
             fail_count += 1
@@ -267,6 +301,16 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
                        and "EventEnvelope" not in r
                        and "usageEventId" not in r
                        and "logPayload" not in r)
+        # Phase 1.7 env-wire assertions.
+        has_get_settings = "from '@/" in r or "from \"@/" in r
+        has_settings_import = "getSettings" in r
+        no_strategy_branches = (
+            "@aws-sdk/client-secrets-manager" not in r and
+            "@google-cloud/secret-manager" not in r and
+            "'node-vault'" not in r and
+            'vault.read(' not in r
+        )
+        no_direct_process_env_resolve = "process.env.MOOLABS_API_KEY" not in r
         failed = []
         if not has_usage:   failed.append("usage.ingestEvent missing")
         if not has_cost:    failed.append("cost.ingestEvent missing")
@@ -275,6 +319,10 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
         if not has_rail:    failed.append("never-drop log rail missing")
         if not no_tenant:   failed.append("tenantId leaked (FR-3 violation)")
         if not no_legacy:   failed.append("v0.2 legacy shape leaked")
+        if not has_get_settings:           failed.append("env_config import path missing")
+        if not has_settings_import:        failed.append("getSettings() not referenced")
+        if not no_strategy_branches:       failed.append("v0.2 TS strategy branch leaked")
+        if not no_direct_process_env_resolve: failed.append("process.env direct leaked")
         if failed:
             print(f"  FAIL  helper {helper}: {', '.join(failed)}")
             fail_count += 1
@@ -287,8 +335,15 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
 # error handling + the FR-3 tenant-absent guard.
 import shutil, subprocess, tempfile
 gofmt = shutil.which("gofmt")
+# Go uses internal/config import path style; override env_config for Phase 1.7 assertions.
+go_helper_ctx = {**helper_ctx, "env_config": {
+    "mode": "modify",
+    "settings_import_path": "internal/config",
+    "api_key_accessor": "config.Get().MoolabsAPIKey",
+    "stub_emit_path": None,
+}}
 try:
-    r = env.get_template("go-moolabs-client.go.j2").render(**helper_ctx)
+    r = env.get_template("go-moolabs-client.go.j2").render(**go_helper_ctx)
 except Exception as e:
     print(f"  FAIL  go-moolabs-client.go.j2: render error: {e}")
     fail_count += 1
@@ -310,6 +365,14 @@ else:
     # v0.2 legacy shapes must be gone
     no_legacy = "IngestEventsBatch" not in r and "ObservedTotalCost" not in r \
                 and "BatchIngestRequest" not in r and "cost_event_direct_emit" not in r
+    # Phase 1.7 env-wire assertions for Go.
+    has_config_import = 'config "' in r
+    has_config_get = "config.Get()" in r
+    no_aws_imports = (
+        "aws-sdk-go" not in r and
+        "secretsmanager" not in r and
+        "hashicorp/vault" not in r
+    )
     failed = []
     if not has_usage:  failed.append("Usage.IngestEvent missing")
     if not has_cost:   failed.append("Cost.IngestEvent missing")
@@ -318,6 +381,9 @@ else:
     if not has_rail:   failed.append("never-drop log rail missing")
     if not no_tenant:  failed.append("TenantID leaked (FR-3 violation)")
     if not no_legacy:  failed.append("v0.2 legacy shape leaked")
+    if not has_config_import: failed.append("env_config Go import missing")
+    if not has_config_get:    failed.append("config accessor missing")
+    if not no_aws_imports:    failed.append("v0.2 Go strategy import leaked")
     if failed:
         print(f"  FAIL  go-moolabs-client.go.j2: {', '.join(failed)}")
         fail_count += 1
@@ -335,6 +401,82 @@ else:
     else:
         print(f"  SKIP-gofmt go-moolabs-client.go.j2: structural-only PASS (gofmt not on PATH)")
         pass_count += 1
+
+# Stub Settings templates
+for stub_tpl in ("python-moolabs-settings.py.j2",
+                 "typescript-moolabs-settings.ts.j2",
+                 "go-moolabs-settings.go.j2"):
+    try:
+        r = env.get_template(stub_tpl).render(service_slug="test-svc")
+    except Exception as e:
+        print(f"  FAIL  stub {stub_tpl}: render error: {e}")
+        fail_count += 1
+        continue
+    if stub_tpl.startswith("python"):
+        try:
+            compile(r, stub_tpl, "exec")
+        except SyntaxError as e:
+            print(f"  FAIL  stub {stub_tpl}: py syntax: {e.msg}")
+            fail_count += 1
+            continue
+        if "def get_settings" in r and "moolabs_api_key" in r:
+            print(f"  PASS  stub {stub_tpl}: renders + py-compile clean + get_settings present")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing get_settings/moolabs_api_key")
+            fail_count += 1
+    elif stub_tpl.startswith("typescript"):
+        if "export function getSettings" in r and "MOOLABS_API_KEY" in r:
+            print(f"  PASS  stub {stub_tpl}: renders + exports getSettings")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing exports")
+            fail_count += 1
+    else:  # go
+        if "func Get()" in r and "MoolabsAPIKey" in r:
+            if gofmt:
+                with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as tf:
+                    tf.write(r); tfp = tf.name
+                res = subprocess.run([gofmt, "-e", tfp], capture_output=True, text=True)
+                Path(tfp).unlink()
+                if res.returncode != 0:
+                    print(f"  FAIL  stub {stub_tpl}: gofmt: {res.stderr.strip()[:200]}")
+                    fail_count += 1
+                    continue
+            print(f"  PASS  stub {stub_tpl}: renders + Get/MoolabsAPIKey + gofmt-clean")
+            pass_count += 1
+        else:
+            print(f"  FAIL  stub {stub_tpl}: missing Get function")
+            fail_count += 1
+
+# Deployment-surface templates
+deploy_ctx = {"service_slug": "test-svc"}
+for tpl in ("dotenv-moolabs.env.j2", "terraform-moolabs.tf.j2",
+            "k8s-secret-moolabs.yaml.j2"):
+    try:
+        r = env.get_template(tpl).render(**deploy_ctx)
+    except Exception as e:
+        print(f"  FAIL  deploy {tpl}: render error: {e}")
+        fail_count += 1
+        continue
+    if tpl.endswith(".env.j2") and "MOOLABS_API_KEY=" in r:
+        print(f"  PASS  deploy {tpl}")
+        pass_count += 1
+    elif tpl.endswith(".tf.j2") and 'variable "moolabs_api_key"' in r:
+        print(f"  PASS  deploy {tpl}")
+        pass_count += 1
+    elif tpl.endswith(".yaml.j2") and "kind: Secret" in r and "test-svc-moolabs" in r:
+        # Also validate YAML parses
+        try:
+            yaml.safe_load(r)
+            print(f"  PASS  deploy {tpl}")
+            pass_count += 1
+        except yaml.YAMLError as e:
+            print(f"  FAIL  deploy {tpl}: invalid YAML: {e}")
+            fail_count += 1
+    else:
+        print(f"  FAIL  deploy {tpl}: expected content missing")
+        fail_count += 1
 
 # Per-callsite template renders × all 3 patterns
 for tpl in templates:

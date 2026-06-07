@@ -40,10 +40,22 @@ import {
   type CostIngestEventArgs,
   type EventsIngestArgs,
 } from 'moolabs';
-{% if sdk_key_location.strategy == "aws_secrets_manager" %}import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-{% elif sdk_key_location.strategy == "gcp_secret_manager" %}import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
-{% elif sdk_key_location.strategy == "vault" %}import vault from 'node-vault';
-{% endif %}
+{# Phase 1.7 env-wire — see Python template's docstring. Same contract.
+
+   IMPORTANT: as of PR #4 round-2 fix, `_TS_PATTERN_ACCESSORS` in
+   config_wire.py is INTENTIONALLY EMPTY — all recognized TS patterns
+   (zod-env-schema / process-env-direct / env-var-library) route to
+   stub mode because their accessors don't compose with the unconditional
+   `getSettings` import below. The stub Settings template at
+   `_STUB_EMIT_PATHS["typescript"]` exports getSettings(), so the import
+   resolves correctly under stub mode (the only mode TS currently uses).
+
+   Future enhancement: pattern-aware template variants that import
+   `env` / bare consts for direct-export patterns. Until then, do NOT
+   re-add direct-export patterns to `_TS_PATTERN_ACCESSORS` without
+   also adding template branches — re-introducing them while this
+   import stays unconditional reproduces PR #4 review CRIT-2. #}
+import { getSettings } from '{{ env_config.settings_import_path }}';
 import { logger } from './logger'; // adapt to {{ service_slug }}'s existing logger import
 
 // Env-gated strict/lax mode — same var name as the Python and Go helpers for
@@ -56,64 +68,13 @@ const DEV_ENV_VAR = 'SDK_DEVELOPMENT';
 // Do NOT register a second provider.
 {% endif %}
 
-let _cachedApiKey: string | null = null;
 let _cachedClient: Moolabs | null = null;
 
+// The customer's Settings layer (or the generated stub at
+// {{ env_config.stub_emit_path if env_config.mode == "stub" else env_config.settings_import_path }})
+// owns secret resolution. This helper just reads the accessor.
 async function resolveApiKey(): Promise<string> {
-  if (_cachedApiKey !== null) return _cachedApiKey;
-  const env = process.env.APP_ENV ?? 'prod';
-{% if sdk_key_location.strategy == "aws_secrets_manager" %}
-  const secretId = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
-  try {
-    const sm = new SecretsManagerClient({ region: '{{ sdk_key_location.region | default("us-east-1") }}' });
-    const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    _cachedApiKey = resp.SecretString ?? '';
-    return _cachedApiKey;
-  } catch (exc) {
-    logger.error({ secretId, error: String(exc), policy: 'fail_open_silent_swallow' },
-                 'moolabs.sdk_key.resolution_failed');
-    _cachedApiKey = '';
-    return '';
-  }
-{% elif sdk_key_location.strategy == "gcp_secret_manager" %}
-  const secretId = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
-  try {
-    const sm = new SecretManagerServiceClient();
-    const [resp] = await sm.accessSecretVersion({ name: secretId });
-    _cachedApiKey = resp.payload?.data?.toString('utf-8') ?? '';
-    return _cachedApiKey;
-  } catch (exc) {
-    logger.error({ secretId, error: String(exc), policy: 'fail_open_silent_swallow' },
-                 'moolabs.sdk_key.resolution_failed');
-    _cachedApiKey = '';
-    return '';
-  }
-{% elif sdk_key_location.strategy == "vault" %}
-  const secretPath = `{{ sdk_key_location.secret_id_template }}`.replace('{env}', env);
-  try {
-    const v = vault({});
-    const resp = await v.read(`secret/data/${secretPath}`);
-    _cachedApiKey = resp?.data?.data?.api_key ?? '';
-    return _cachedApiKey;
-  } catch (exc) {
-    logger.error({ secretPath, error: String(exc), policy: 'fail_open_silent_swallow' },
-                 'moolabs.sdk_key.resolution_failed');
-    _cachedApiKey = '';
-    return '';
-  }
-{% elif sdk_key_location.strategy == "env_var" %}
-  _cachedApiKey = process.env.MOOLABS_API_KEY ?? '';
-  return _cachedApiKey;
-{% elif sdk_key_location.strategy == "custom" %}
-  try {
-    {{ sdk_key_read_pattern | indent(4) }}
-  } catch (exc) {
-    logger.error({ error: String(exc), policy: 'fail_open_silent_swallow' },
-                 'moolabs.sdk_key.resolution_failed');
-    _cachedApiKey = '';
-    return '';
-  }
-{% endif %}
+  return {{ env_config.api_key_accessor }};
 }
 
 async function getClient(): Promise<Moolabs> {

@@ -293,6 +293,51 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
+### Phase 1.7: Env-wire orchestrator (NEW v0.3 env-routing migration)
+
+Driven by `scripts/config_wire.py`. Reads
+`.moolabs/customer-context/env-routing-inventory.yaml` (produced by Phase A
+of cost-billing-discovery) and produces
+`.moolabs/customer-context/config-wiring-plan.yaml` describing the per-service
+env-wiring decisions.
+
+For each service:
+
+- **mode = "modify"** (scanner recognized the customer's pattern at
+  medium+ confidence): the helper template imports `get_settings` from
+  the customer's existing config module path and reads the API key via
+  the language-specific accessor expression (e.g.
+  `get_settings().moolabs_api_key.get_secret_value()` for pydantic-settings
+  v2; `env.MOOLABS_API_KEY` for zod schemas; `config.Get().MoolabsAPIKey`
+  for Go envconfig).
+
+- **mode = "stub"** (scanner unrecognized OR low confidence): the helper
+  template imports `get_settings` from a generated stub Settings file
+  (`app/services/moolabs_settings.py` / `src/services/moolabs-settings.ts`
+  / `internal/moolabsconfig/settings.go`). The stub is the SIMPLEST possible
+  Settings exposure for MOOLABS_API_KEY only — the customer merges into
+  their real config layer or accepts as-is.
+
+Deployment-surface stubs are emitted per service alongside the helper
+generation:
+
+- `.env.example` — line `MOOLABS_API_KEY=` appended to existing file
+- `<infra_dir>/moolabs.tf` — new Terraform variable + commented SSM stub
+- `<infra_dir>/secret-moolabs.yaml` — new k8s Secret manifest with REVIEWER
+  CHECKLIST comments and `placeholder` value
+- `Dockerfile` — checklist comment only (never auto-edit ENV lines —
+  baked-in secrets are a security smell)
+
+`task_planner.py` reads `config-wiring-plan.yaml` and emits an
+`env_wire_tasks:` block into the tasks.yaml output. The codemod consumes
+both the per-file callsite Tasks and the per-service env-wire tasks.
+
+The v0.2-era strategy-branched `_resolve_api_key()` (boto3 / google.cloud
+secretmanager / hvac / op CLI) is GONE. The customer's Settings class owns
+secret resolution; the helper just reads the accessor. Customers using
+Vault for their other secrets already have their Settings class configured
+to pull from Vault on construction — the helper doesn't need to know.
+
 ### Phase 2: Generate the per-service `moolabs_client.py` helper (MANDATORY, ONCE per service)
 
 **This MUST run before any call-site insert.** The codemod generates exactly ONE helper file per service that owns all SDK and OTel-span emission. Every call-site insert in Phase 2b imports from this helper — never instantiates `Moolabs(api_key=...)` inline.

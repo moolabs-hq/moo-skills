@@ -1,0 +1,31 @@
+// Package moolabsconfig — generated stub Settings for {{ service_slug }}.
+//
+// Phase A's env_loader_scan.py could not recognize an existing config
+// pattern (viper / envconfig / os.Getenv) in this service. Merge into
+// your real config package, or accept as-is.
+package moolabsconfig
+
+import (
+	"os"
+	"sync"
+)
+
+type Settings struct {
+	MoolabsAPIKey string
+}
+
+var (
+	_instance *Settings
+	_once     sync.Once
+)
+
+// Get returns the singleton stub Settings — reads MOOLABS_API_KEY from
+// env once and caches.
+func Get() *Settings {
+	_once.Do(func() {
+		_instance = &Settings{
+			MoolabsAPIKey: os.Getenv("MOOLABS_API_KEY"),
+		}
+	})
+	return _instance
+}
