@@ -35,7 +35,7 @@
  */
 
 import {
-  Moolabs,
+  type Moolabs,
   type UsageIngestEventArgs,
   type CostIngestEventArgs,
   type EventsIngestArgs,
@@ -79,15 +79,29 @@ async function resolveApiKey(): Promise<string> {
 
 async function getClient(): Promise<Moolabs> {
   if (_cachedClient !== null) return _cachedClient;
+  // Lazy dynamic import so this module loads without the SDK installed (the
+  // codemod adds no deps; matches the Python helper's lazy import). The static
+  // `import type { Moolabs }` above is erased at compile time.
+  const { Moolabs } = await import('moolabs');
   _cachedClient = new Moolabs({ apiKey: await resolveApiKey() });
   return _cachedClient;
+}
+
+// Defense-in-depth: never let an API key reach logs/exceptions verbatim if an SDK
+// error echoes it (matches the Python + Go helpers; the central log redaction
+// does not cover the moo_* key format).
+function scrubSecrets(s: string): string {
+  return s.replace(
+    /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]+|\bwhsec_[A-Za-z0-9_]+|\bmoo_[a-z]+_[A-Za-z0-9_]+/g,
+    '[REDACTED]',
+  );
 }
 
 // Single env-gated decision point. Strict (SDK_DEVELOPMENT non-empty) -> throw
 // so the developer fixes the call site. Lax (default / prod) -> structured-log
 // recovery rail; never silently drop.
 function handleEmitErr(eventClass: string, fields: Record<string, unknown>, err: unknown): void {
-  const errMsg = err instanceof Error ? err.message : String(err);
+  const errMsg = scrubSecrets(err instanceof Error ? err.message : String(err));
   if (process.env[DEV_ENV_VAR]) {
     throw new Error(
       `moolabsclient: ${eventClass} emission failed (SDK_DEVELOPMENT mode — unset to swallow): ${errMsg}`,
