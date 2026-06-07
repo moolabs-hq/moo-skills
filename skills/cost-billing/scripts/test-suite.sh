@@ -806,6 +806,57 @@ else:
     # Fixture not present — skip (not a failure if Phase D hasn't merged)
     pass
 
+# customer-fixture-centralized-infra: regression guard for PR #531 root
+# cause. Verifies the scanner now detects BOTH service-scope surfaces
+# (under services/moo-arc/) AND repo-scope surfaces (under
+# infrastructure/terraform/). Without the fix, the repo-scope terraform
+# files would be invisible.
+centralized = suite_root / "examples" / "customer-fixture-centralized-infra"
+if centralized.is_dir():
+    try:
+        scan_scripts_dir = str(suite_root / "discovery" / "scripts")
+        sys.path.insert(0, scan_scripts_dir)
+        # Re-import path inside this block so the import is local + cleanup-safe.
+        import env_loader_scan as _els  # noqa: E402
+        repo_root = centralized / "customer-repo"
+        service = {"slug": "moo-arc", "root": "services/moo-arc", "language": "python"}
+        entry = _els._service_entry(
+            repo_root, service, repo_root / "services" / "moo-arc", catalog=[]
+        )
+        scopes = {(s["kind"], s["scope"]) for s in entry["deployment_surfaces"]}
+        # Service-scope (must be detected)
+        expected_service = {
+            ("dotenv_example", "service"),
+            ("dockerfile", "service"),
+            ("docker-compose", "service"),
+        }
+        # Repo-scope (PR #531 reproducer — MUST be detected for fix to hold)
+        expected_repo = {("terraform", "repo")}
+        missing_service = expected_service - scopes
+        missing_repo = expected_repo - scopes
+        if missing_service:
+            print(f"  FAIL  centralized-infra fixture: missing service-scope {missing_service}")
+            fail_count += 1
+        elif missing_repo:
+            print(f"  FAIL  centralized-infra fixture: missing repo-scope {missing_repo} "
+                  f"— PR #531 regression!")
+            fail_count += 1
+        elif entry["infra_discovery_gap"]:
+            print(f"  FAIL  centralized-infra fixture: infra_discovery_gap should be False "
+                  f"(terraform + dockerfile found)")
+            fail_count += 1
+        else:
+            print(f"  PASS  centralized-infra fixture: service+repo scopes both detected, "
+                  f"no gap flag")
+            pass_count += 1
+        sys.path.remove(scan_scripts_dir)
+    except Exception as e:
+        print(f"  FAIL  centralized-infra fixture: scan error: {type(e).__name__}: {e}")
+        fail_count += 1
+else:
+    # Fixture not present — skip.
+    pass
+
 # Planner refuse-to-run gate: example attribution-bindings must satisfy it.
 # v0.3.0-rc1 (FR-3): tenant_id is NOT required by the helpers or the planner —
 # the SDK derives tenant identity server-side from the API key. consumer_agent

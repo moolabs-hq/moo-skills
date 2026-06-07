@@ -581,6 +581,16 @@ Default lenses (use these AND any others the codebase profile suggests):
     defaults activate new code paths on customers who upgrade without
     touching their YAML. The default's RUNTIME IMPACT matters, not just
     its parseability. See verbose reference below.
+15. Deployment-surface coverage gap — for any PR that emits a moolabs_client
+    helper / Settings module, the customer must also be able to ROUTE
+    MOOLABS_API_KEY from secret store → runtime env var. Verify the PR
+    either (a) emits/CHECKLISTs every infra surface the customer actually
+    uses (Terraform / k8s / docker-compose / Dockerfile), or (b) explicitly
+    surfaces `infra_discovery_gap: true` with a DEVELOPER ACTION REQUIRED
+    section in the PR body asking where their IaC lives. A PR that ships
+    only the helper without any deployment-surface stub for a customer
+    KNOWN to have Terraform/k8s is shipping broken (the env var never
+    reaches the running container). See verbose reference below.
 
 Report each finding as: severity (CRITICAL / IMPORTANT / MINOR / NIT),
 file:line, what the bug is, why it's wrong, and a suggested minimal fix.
@@ -672,6 +682,49 @@ when reversible (cache warming, log volume).
 **This lens is derived from the cost-billing v0.3 migration's actual
 adversarial review — Phase A's config_wire.py default-empty-string
 audit found the same bug pattern.**
+
+#### Deployment-surface coverage gap
+
+**Pattern (catch):** A PR that emits a moolabs_client / Settings helper
+must ALSO ensure the customer can route `MOOLABS_API_KEY` from secret
+store → runtime env var. The skill scans for deployment surfaces
+(Terraform, k8s, docker-compose, .env.example, Dockerfile) and emits
+either auto-modify stubs (service-scope) or CHECKLIST entries
+(repo-scope / centralized infra). A PR that ships ONLY the helper
+without any deployment-surface stub or checklist for a customer KNOWN
+to have IaC is shipping broken — the env var the helper reads will
+never be present at runtime.
+
+**Root cause (caught in PR #531 against moolabs):** the scanner was
+scoped to `services/<svc>/` only and missed centralized infra at
+`infrastructure/terraform/`. The fix scans BOTH scopes and sets
+`infra_discovery_gap: true` when nothing is found, so the instrument
+layer surfaces a DEVELOPER ACTION REQUIRED checklist.
+
+**How to check:**
+- Inspect `env-routing-inventory.yaml` → each service's
+  `deployment_surfaces`. Cross-reference against the customer's repo:
+  do they have `infrastructure/`, `infra/`, `terraform/`, `tf/`,
+  `deploy/`, `k8s/`, `helm/`, etc.? If yes but `deployment_surfaces`
+  is empty → CRITICAL gap.
+- If `infra_discovery_gap: true` is set, check whether the PR body
+  contains a DEVELOPER ACTION REQUIRED section asking where the IaC
+  lives. Missing → IMPORTANT.
+- For repo-scope surfaces in the inventory, the corresponding entry
+  in `config-wiring-plan.yaml > deployment_stubs` MUST have
+  `mode: checklist_only` (not `new_file`). Auto-emitting a moolabs.tf
+  into centralized infra modifies a shared module that affects every
+  service — cross-service blast radius.
+
+**Severity:** CRITICAL when the customer has IaC and the PR ships zero
+deployment-surface stubs/checklists (env var never reaches runtime → the
+emitted helper is dead code). IMPORTANT when the gap flag is set but
+the PR body lacks the DEVELOPER ACTION REQUIRED section.
+
+**This lens is derived from PR #531 (moolabs/moo-arc) — the scanner
+missed `infrastructure/terraform/` entirely and the PR shipped without
+any Terraform/k8s wiring, leaving the developer to manually figure out
+how to route MOOLABS_API_KEY through their ECS task definitions.**
 
 ## Phase 3: Verify and fix confirmed bugs
 
