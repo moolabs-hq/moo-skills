@@ -384,6 +384,15 @@ def build_slug_index(inventory: dict) -> dict[str, dict[str, dict[str, str]]]:
     return index
 
 
+def _default_product_slug(index: dict[str, dict[str, dict[str, str]]]) -> str:
+    """Fallback product when an inventory entry carries no ``product_slug``: the
+    sole product in the slug index (the common single-product case). Returns ""
+    when the index has zero or >=2 products (multi-product requires an explicit
+    per-entry product_slug). Fixes the v0.3 slug-resolution-returns-None gap where
+    discovery emits entries without product_slug -> "" -> every lookup misses."""
+    return next(iter(index)) if len(index) == 1 else ""
+
+
 @dataclass
 class SlugsEmitTask:
     """One slugs-emit task per product. Renders slugs-<lang>.j2 to
@@ -546,7 +555,7 @@ def build_tasks(
             # templates can render `event_type=EVENT_TYPE_X` instead of
             # `event_type="x.y"`. None values trigger the template's
             # inline-literal fallback path.
-            product_slug = entry.get("product_slug", "")
+            product_slug = entry.get("product_slug") or _default_product_slug(slug_index)
             slug_consts = resolve_slug_constants(
                 slug_index,
                 product_slug=product_slug,
@@ -716,7 +725,7 @@ def emit_tasks_yaml(
         for st in slugs_emit_tasks:
             lines.append(f"  - task_id: {st.task_id}")
             lines.append(f"    product_slug: {st.product_slug}")
-            safe_gen_at = st.generated_at.replace("\\", "\\\\").replace('"', '\\"')
+            safe_gen_at = str(st.generated_at).replace("\\", "\\\\").replace('"', '\\"')
             lines.append(f'    generated_at: "{safe_gen_at}"')
             # The constants block is rendered as a nested mapping.
             lines.append("    constants:")
