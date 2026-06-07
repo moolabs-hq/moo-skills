@@ -635,7 +635,8 @@ from the per-product slugs module — NOT inline string literals.
   the top.
 - Smoke assertion `no_event_type_literal` / `no_meter_slug_literal`
   should fire.
-- BOTH single-quote AND double-quote leaks must be checked for TS.
+- BOTH single-quote AND double-quote leaks must be checked for any
+  language that supports both quote styles (TS, JS, Python).
 
 **Severity:** CRITICAL — a literal leak means the slugs module isn't
 the source of truth; renaming a slug in the inventory won't propagate

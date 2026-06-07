@@ -774,17 +774,19 @@ for tpl in templates:
         print(f"  PASS  {tpl}[{pat}]")
         pass_count += 1
 
-# Phase D: customer-fixture-env-routing presence check
-import os
-phase_d_fixture = "skills/cost-billing/examples/customer-fixture-env-routing"
-if os.path.isdir(phase_d_fixture):
+# Phase D: customer-fixture-env-routing presence check.
+# Round 1 review HIGH fix: use suite_root (absolute path from sys.argv[1])
+# instead of CWD-relative. Previously, invoking test-suite.sh from any
+# directory other than the repo root silently skipped this entire fence.
+phase_d_fixture = suite_root / "examples" / "customer-fixture-env-routing"
+if phase_d_fixture.is_dir():
     files_required = [
-        f"{phase_d_fixture}/customer-repo/app/settings.py",
-        f"{phase_d_fixture}/inventories/slug-inventory.yaml",
-        f"{phase_d_fixture}/inventories/attribution-bindings.yaml",
-        f"{phase_d_fixture}/customer-context/04-final.signed.yaml",
+        phase_d_fixture / "customer-repo" / "app" / "settings.py",
+        phase_d_fixture / "inventories" / "slug-inventory.yaml",
+        phase_d_fixture / "inventories" / "attribution-bindings.yaml",
+        phase_d_fixture / "customer-context" / "04-final.signed.yaml",
     ]
-    missing = [f for f in files_required if not os.path.exists(f)]
+    missing = [str(f) for f in files_required if not f.exists()]
     if missing:
         print(f"  FAIL  phase-d fixture: missing {missing}")
         fail_count += 1
@@ -792,7 +794,7 @@ if os.path.isdir(phase_d_fixture):
         # Validate slug-inventory.yaml round-trips
         try:
             import yaml
-            data = yaml.safe_load(open(files_required[1]).read())
+            data = yaml.safe_load(files_required[1].read_text())
             assert "products" in data and len(data["products"]) == 1
             assert data["products"][0]["product_slug"] == "billing"
             print(f"  PASS  phase-d fixture: all 4 files present + slug-inventory parses")

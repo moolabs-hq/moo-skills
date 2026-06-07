@@ -90,9 +90,15 @@ class E2EPhaseDFixture(unittest.TestCase):
                 #    this ("if only one merges, the test asserts whichever is
                 #    present") but the verbatim Step 1 test passes the flag
                 #    unconditionally. Argparse rejects → returncode=2.
+                # 3. "REFUSING TO RUN" — task_planner's pre-flight gate
+                #    (attribution-bindings missing required keys). Round-1
+                #    review LOW fix: future fixture edits could null a
+                #    required binding (customer_id / request_id); the gate
+                #    fires with returncode=2 + "REFUSING TO RUN" on stderr.
                 if (
                     "no tasks built" in result.stderr
                     or "unrecognized arguments" in result.stderr
+                    or "REFUSING TO RUN" in result.stderr
                 ):
                     return  # graceful
                 self.fail(
