@@ -344,7 +344,9 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
     lines: list[str] = []
     lines.append(f"service_slug: {service_slug}")
     lines.append(f"framework: {framework}")
-    lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
+    # Quote generated_at so PyYAML safe_load keeps it a string, not a datetime
+    # (PR #8 review #3-sibling — same bug class as task_planner/config_wire).
+    lines.append(f'generated_at: "{datetime.now(timezone.utc).isoformat()}"')
     lines.append("bindings:")
     for key in ATTRIBUTION_KEYS:
         b = bindings.get(key)

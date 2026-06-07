@@ -618,7 +618,9 @@ def yaml_dump(snapshot: Snapshot, dest: Path) -> None:
     for the customer's codemod environment. Output is hand-formatted for
     readability + diff-friendliness."""
     lines: list[str] = []
-    lines.append(f"generated_at: {snapshot.generated_at}")
+    # Quote generated_at so PyYAML safe_load keeps it a string, not a datetime
+    # (PR #8 review #3-sibling — same bug class as task_planner/config_wire).
+    lines.append(f'generated_at: "{snapshot.generated_at}"')
     lines.append("sdk_versions:")
     for lang, meta in snapshot.sdk_versions.items():
         lines.append(f"  {lang}:")

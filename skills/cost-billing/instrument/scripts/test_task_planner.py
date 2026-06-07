@@ -526,6 +526,31 @@ class SlugResolutionRobustToMissingProductSlug(unittest.TestCase):
                                          workflow_id="x.y")
         self.assertEqual(eff, "default")
 
+    def test_value_in_two_products_warns_and_takes_first(self):
+        """PR #8 review 2.1: when a slug value appears in >1 product (should be
+        impossible given slug_inventory's duplicate guard, but defensive), the
+        value-search must WARN and take the first owner — not crash, not pick
+        silently. Locks the documented first-wins design choice."""
+        import io
+        import contextlib
+        inventory = {"products": [
+            {"product_slug": "arc", "constants": {
+                "EVENT_TYPE": [{"name": "DUP", "value": "shared.dup"}],
+                "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+            }},
+            {"product_slug": "meter", "constants": {
+                "EVENT_TYPE": [{"name": "DUP", "value": "shared.dup"}],
+                "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+            }},
+        ]}
+        idx = tp.build_slug_index(inventory)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            owner = tp._product_owning_value(idx, "EVENT_TYPE", "shared.dup")
+        # First-wins (dict insertion order preserves "arc" first).
+        self.assertEqual(owner, "arc")
+        self.assertIn("multiple products", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

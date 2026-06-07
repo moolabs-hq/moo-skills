@@ -810,7 +810,9 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
     """Hand-rolled YAML emit for env-routing-inventory.yaml. Avoids PyYAML
     runtime dep for the customer codemod environment."""
     lines: list[str] = []
-    lines.append(f"generated_at: {inventory['generated_at']}")
+    # Quote generated_at so PyYAML safe_load keeps it a string, not a datetime
+    # (PR #8 review #3-sibling — same bug class as task_planner/config_wire).
+    lines.append(f'generated_at: "{inventory["generated_at"]}"')
     lines.append(f"granularity: {inventory['granularity']}")
     lines.append(f"granularity_source: {inventory['granularity_source']}")
     if not inventory["services"]:
