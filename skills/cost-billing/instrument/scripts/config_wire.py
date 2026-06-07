@@ -55,14 +55,19 @@ def load_env_routing_inventory(path: Path) -> dict:
 # Per-service plan derivation
 # ──────────────────────────────────────────────────────────────────────
 
-# Maps each pattern_id → (mode-when-recognized, accessor template).
-# Accessor template uses {{settings_call}} as a placeholder for the language-
-# specific get_settings() call site.
+# Maps each pattern_id → accessor expression. Only patterns whose accessor
+# composes with the helper template's `from <import_path> import get_settings`
+# contract are listed here. Patterns absent from this map route to stub mode
+# via `accessor_map.get(pattern) is None` in plan_service_env_wire.
+#
+# python-decouple and python-dotenv-os-getenv are intentionally absent — they
+# are flat module-level patterns with no get_settings() class. The helper
+# template's import shape is incompatible; these route to stub mode (which
+# emits a pydantic-settings BaseSettings stub the customer can adopt). Future
+# enhancement: pattern-aware template variants for direct-export patterns.
 _PYTHON_PATTERN_ACCESSORS = {
     "python-pydantic-settings-v2": "get_settings().moolabs_api_key.get_secret_value()",
     "python-pydantic-v1-settings": "get_settings().moolabs_api_key.get_secret_value()",
-    "python-decouple":            "MOOLABS_API_KEY",
-    "python-dotenv-os-getenv":    "MOOLABS_API_KEY",
 }
 
 
@@ -87,16 +92,25 @@ def _python_settings_import_path(file_path: str, service_slug: str = "") -> str:
     return ".".join(parts)
 
 
-_TS_PATTERN_ACCESSORS = {
-    "ts-zod-env-schema":      "env.MOOLABS_API_KEY",
-    "ts-process-env-direct":  "MOOLABS_API_KEY",
-    "ts-env-var-library":     "MOOLABS_API_KEY",
-}
+# All three TS patterns are intentionally absent — the helper template imports
+# `getSettings` (typescript-moolabs-client.ts.j2:44) but none of the recognized
+# patterns export a getSettings function:
+#   - ts-zod-env-schema: exports `env` (a zod-parsed object)
+#   - ts-process-env-direct: exports a const `MOOLABS_API_KEY`
+#   - ts-env-var-library: exports a const `MOOLABS_API_KEY`
+# All three route to stub mode (which emits a getSettings() wrapper template
+# the customer can adopt). Future enhancement: pattern-aware template variants
+# for direct-export patterns.
+_TS_PATTERN_ACCESSORS: dict[str, str] = {}
 
+# go-viper requires importing viper as a separate dependency (not the
+# customer's `config` package the helper template imports), so it doesn't
+# compose with the template. go-os-getenv uses stdlib `os` directly but
+# leaves the `config` import unused — Go's `imported and not used` is a
+# compile error. Both route to stub mode. go-envconfig works because it
+# uses the customer's config package via the imported `config` alias.
 _GO_PATTERN_ACCESSORS = {
-    "go-viper":      'viper.GetString("moolabs_api_key")',
     "go-envconfig":  "config.Get().MoolabsAPIKey",
-    "go-os-getenv":  'os.Getenv("MOOLABS_API_KEY")',
 }
 
 
@@ -308,13 +322,19 @@ def _quote(value: str) -> str:
 
 def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
     lines: list[str] = []
-    lines.append(f"generated_at: {plan['generated_at']}")
+    # Quote generated_at so PyYAML safe_load keeps it as a string (unquoted
+    # ISO-8601 is auto-coerced to a datetime object — latent for now since no
+    # consumer reads this field, but quoting future-proofs round-trip equality).
+    lines.append(f"generated_at: {_quote(plan['generated_at'])}")
     if not plan.get("services"):
         lines.append("services: []")
     else:
         lines.append("services:")
         for svc in plan["services"]:
-            lines.append(f"  - service_slug: {svc['service_slug']}")
+            # service_slug is customer-authored input (from Phase A inventory);
+            # quote it to defend against slugs containing YAML metacharacters
+            # like `:` or `#`. mode is a hardcoded enum, safe unquoted.
+            lines.append(f"  - service_slug: {_quote(svc['service_slug'])}")
             lines.append(f"    mode: {svc['mode']}")
             lines.append(f"    settings_import_path: {_quote(svc['settings_import_path'])}")
             lines.append(f"    api_key_accessor: {_quote(svc['api_key_accessor'])}")

@@ -94,7 +94,10 @@ class PythonWireTargetDispatch(unittest.TestCase):
         self.assertEqual(plan["mode"], "modify")
         self.assertEqual(plan["settings_import_path"], "app.settings")
 
-    def test_python_decouple(self):
+    def test_python_decouple_routes_to_stub(self):
+        """Direct-export pattern (decouple) — accessor would be a bare
+        identifier the helper template doesn't import. Routes to stub mode
+        instead (PR #4 review CRIT-1 fix)."""
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -109,11 +112,16 @@ class PythonWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="python")
-        self.assertEqual(plan["mode"], "modify")
-        # decouple exposes module-level constants — accessor is direct import
-        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+        self.assertEqual(
+            plan["api_key_accessor"],
+            "get_settings().moolabs_api_key.get_secret_value()",
+        )
 
-    def test_python_dotenv_os_getenv(self):
+    def test_python_dotenv_os_getenv_routes_to_stub(self):
+        """Same root cause as decouple — dotenv-os-getenv is a flat module
+        pattern; stub mode is the correct path (PR #4 review CRIT-1 fix)."""
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -128,12 +136,23 @@ class PythonWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="python")
-        self.assertEqual(plan["mode"], "modify")
-        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
 
 
 class TypeScriptWireTargetDispatch(unittest.TestCase):
-    def test_zod_env_schema(self):
+    """All three recognized TS patterns route to stub mode.
+
+    The helper template (typescript-moolabs-client.ts.j2) unconditionally
+    imports `getSettings` and renders the accessor as the body of
+    resolveApiKey(). None of the recognized TS patterns export a
+    getSettings function — they export `env` (zod), or a const
+    `MOOLABS_API_KEY` (process-env-direct / env-var-library). Modify mode
+    for these patterns would produce TS compile errors AND runtime
+    ReferenceError. Stub mode emits a getSettings() wrapper the customer
+    can adopt. PR #4 review CRIT-2 fix."""
+
+    def test_zod_env_schema_routes_to_stub(self):
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -148,12 +167,11 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
-        self.assertEqual(plan["mode"], "modify")
-        # Convention: TS env modules export via @/-aliased path
-        self.assertEqual(plan["settings_import_path"], "@/env")
-        self.assertEqual(plan["api_key_accessor"], "env.MOOLABS_API_KEY")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "@/services/moolabs-settings")
+        self.assertEqual(plan["api_key_accessor"], "getSettings().MOOLABS_API_KEY")
 
-    def test_process_env_direct(self):
+    def test_process_env_direct_routes_to_stub(self):
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -168,11 +186,10 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
-        self.assertEqual(plan["mode"], "modify")
-        self.assertEqual(plan["settings_import_path"], "@/config")
-        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "@/services/moolabs-settings")
 
-    def test_env_var_library(self):
+    def test_env_var_library_routes_to_stub(self):
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -187,12 +204,14 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
-        self.assertEqual(plan["mode"], "modify")
-        self.assertEqual(plan["api_key_accessor"], "MOOLABS_API_KEY")
+        self.assertEqual(plan["mode"], "stub")
 
 
 class GoWireTargetDispatch(unittest.TestCase):
-    def test_viper(self):
+    def test_viper_routes_to_stub(self):
+        """go-viper needs `import viper` in the helper template, but the
+        template only imports the customer's `config` alias. Routes to
+        stub mode (PR #4 review CRIT-3 fix)."""
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -207,13 +226,14 @@ class GoWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="go")
-        self.assertEqual(plan["mode"], "modify")
-        # Go convention: import the package containing the config struct
-        self.assertEqual(plan["settings_import_path"], "internal/config")
-        # viper uses GetString("moolabs_api_key")
-        self.assertEqual(plan["api_key_accessor"], 'viper.GetString("moolabs_api_key")')
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "internal/moolabsconfig")
 
     def test_envconfig(self):
+        """go-envconfig is the only Go pattern that works in modify mode.
+        Customer's config package exports Get() returning a struct with
+        MoolabsAPIKey — composes correctly with the template's `config`
+        import alias."""
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -230,10 +250,13 @@ class GoWireTargetDispatch(unittest.TestCase):
         plan = cw.plan_service_env_wire(service, language="go")
         self.assertEqual(plan["mode"], "modify")
         self.assertEqual(plan["settings_import_path"], "internal/config")
-        # envconfig uses struct field — accessor via config.Get().MoolabsAPIKey
         self.assertEqual(plan["api_key_accessor"], "config.Get().MoolabsAPIKey")
 
-    def test_go_os_getenv(self):
+    def test_go_os_getenv_routes_to_stub(self):
+        """go-os-getenv uses stdlib os directly — the customer's config
+        package isn't actually used by the accessor expression, leaving the
+        `config` import dead. Go's `imported and not used` is a compile
+        error. Routes to stub mode (PR #4 review CRIT-3 fix)."""
         service = {
             "service_slug": "svc",
             "app_config": {
@@ -248,8 +271,8 @@ class GoWireTargetDispatch(unittest.TestCase):
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="go")
-        self.assertEqual(plan["mode"], "modify")
-        self.assertEqual(plan["api_key_accessor"], 'os.Getenv("MOOLABS_API_KEY")')
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "internal/moolabsconfig")
 
 
 class StubModeFallback(unittest.TestCase):
@@ -452,6 +475,89 @@ class YamlEmit(unittest.TestCase):
                 parsed["services"][0]["api_key_accessor"],
                 accessor_with_bs,
             )
+
+
+class AccessorRuntimeRegression(unittest.TestCase):
+    """Regression guard against PR #4 review C-1/C-2/C-3. Every accessor in
+    every _LANG_PATTERN_ACCESSORS map must compose with the helper template's
+    import contract — i.e. when the helper renders `return <accessor>`, the
+    accessor must be a valid expression in the helper's scope (`get_settings`
+    is imported; nothing else).
+
+    Earlier accessors like `"MOOLABS_API_KEY"` or `viper.GetString(...)`
+    rendered to expressions referencing undefined names. py-compile / gofmt
+    passed (syntactically valid) but the rendered helper crashed at runtime
+    with NameError / undefined: viper. This test would have caught the bug
+    by executing the rendered _resolve_api_key with a mocked get_settings.
+    """
+
+    def test_every_python_accessor_executes_without_nameerror(self):
+        """For every pattern in _PYTHON_PATTERN_ACCESSORS, render the helper
+        and execute _resolve_api_key. Mocked get_settings returns an object
+        compatible with the accessor expression."""
+        from jinja2 import Environment, FileSystemLoader
+        tpl_dir = Path(__file__).resolve().parents[1] / "assets" / "codemod-templates"
+        env = Environment(loader=FileSystemLoader(str(tpl_dir)))
+        for pattern, accessor in cw._PYTHON_PATTERN_ACCESSORS.items():
+            with self.subTest(pattern=pattern):
+                ctx = {
+                    'service_slug': 'svc',
+                    'signoff_chain_hashes': [],
+                    'sdk_pinned_version': 'v0.3.0-rc1',
+                    'telemetry': {'mode': 'greenfield'},
+                    'generated_at': '2026-06-06',
+                    'env_config': {
+                        'mode': 'modify',
+                        'settings_import_path': 'mock.settings',
+                        'api_key_accessor': accessor,
+                        'stub_emit_path': None,
+                    },
+                }
+                rendered = env.get_template('python-moolabs-client.py.j2').render(**ctx)
+                # Stub external imports so the module loads in isolation.
+                rendered = rendered.replace(
+                    "from mock.settings import get_settings",
+                    "class _MS:\n"
+                    "    class _Key:\n"
+                    "        def get_secret_value(self):\n"
+                    "            return 'mock-key'\n"
+                    "    moolabs_api_key = _Key()\n"
+                    "def get_settings():\n"
+                    "    return _MS()",
+                ).replace(
+                    "import structlog",
+                    "structlog = type('structlog', (), {'get_logger': lambda *a, **k: None})()",
+                ).replace(
+                    "from moolabs import Moolabs",
+                    "Moolabs = type('Moolabs', (), {})",
+                )
+                ns: dict = {}
+                exec(compile(rendered, f'<{pattern}>', 'exec'), ns)
+                result = ns['_resolve_api_key']()
+                self.assertEqual(
+                    result, 'mock-key',
+                    f"_resolve_api_key for pattern {pattern} returned {result!r}",
+                )
+
+    def test_python_decouple_NOT_in_accessor_map(self):
+        """C-1 regression guard: python-decouple's accessor was a bare
+        identifier (NameError). It must NOT be in the accessor map — the
+        absence routes it to stub mode."""
+        self.assertNotIn("python-decouple", cw._PYTHON_PATTERN_ACCESSORS)
+        self.assertNotIn("python-dotenv-os-getenv", cw._PYTHON_PATTERN_ACCESSORS)
+
+    def test_no_ts_patterns_in_accessor_map(self):
+        """C-2 regression guard: all 3 TS patterns produced TS compile
+        errors AND runtime ReferenceError. Map must be empty until
+        pattern-aware TS template variants exist."""
+        self.assertEqual(cw._TS_PATTERN_ACCESSORS, {})
+
+    def test_go_viper_and_os_getenv_NOT_in_accessor_map(self):
+        """C-3 regression guard: go-viper needed a separate viper import,
+        go-os-getenv left the config import unused. Both routed to stub."""
+        self.assertNotIn("go-viper", cw._GO_PATTERN_ACCESSORS)
+        self.assertNotIn("go-os-getenv", cw._GO_PATTERN_ACCESSORS)
+        self.assertIn("go-envconfig", cw._GO_PATTERN_ACCESSORS)
 
 
 if __name__ == "__main__":

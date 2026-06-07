@@ -481,8 +481,13 @@ def emit_tasks_yaml(tasks: list[Task], dest: Path, env_wire_tasks: list[EnvWireT
     if env_wire_tasks:
         lines.append("env_wire_tasks:")
         for t in env_wire_tasks:
-            lines.append(f"  - task_id: {t.task_id}")
-            lines.append(f"    service_slug: {t.service_slug}")
+            # task_id and service_slug are derived from customer-authored
+            # service slugs from the Phase A inventory; quote them to defend
+            # against YAML metacharacters. mode is a hardcoded enum.
+            safe_tid = t.task_id.replace('\\', '\\\\').replace('"', '\\"')
+            safe_slug = t.service_slug.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'  - task_id: "{safe_tid}"')
+            lines.append(f'    service_slug: "{safe_slug}"')
             lines.append(f"    mode: {t.mode}")
             safe_import = t.settings_import_path.replace('\\', '\\\\').replace('"', '\\"')
             safe_accessor = t.api_key_accessor.replace('\\', '\\\\').replace('"', '\\"')
