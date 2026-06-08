@@ -111,15 +111,13 @@ properties:
   compliance:
     type: object
     properties:
+      # Finance owns the regulatory REGIMES only. The sensitive-data categories
+      # they imply are enumerated at the CPO stage (02-cpo >
+      # sensitive_data_categories) and translated to field paths at the engineer
+      # stage (04-final > pii_field_blocklist). See shared/chain-handoff.md.
       regimes:
         type: array
         items: { type: string, enum: [SOC2, HIPAA, GDPR, FedRAMP-Moderate, FedRAMP-High, PCI-DSS, CCPA, none, other] }
-      pii_field_blocklist:
-        type: array
-        items: { type: string }
-      phi_field_blocklist:
-        type: array
-        items: { type: string }
 
   deployment:
     type: object

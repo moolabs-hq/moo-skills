@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-cpo
 description: >-
-  Stage 2 of 4 in the Cost+Billing bootstrap chain. Runs on the CPO's machine only. Reads the finance-stage signed YAML as mandatory input. Interactively asks 7-9 questions about org-level product context — company name + product/vertical names (multi-product split if any), product documentation source(s) (folders, URLs, MCP-accessible collections, multiple sources OK), top features customer-enumerated, internal-only / not-billable callouts, end-user terminology, billable-output terminology, unique customer concepts the framework doesn't model. NEVER assumes. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff (checks for hallucinated features vs finance assumptions). Exports a signed YAML the CPO emails/Slacks/Drives to the team-product PM. Triggers on "CPO bootstrap", "product strategy bootstrap", "stage 2 bootstrap", "cost-billing CPO stage".
+  Stage 2 of 4 in the Cost+Billing bootstrap chain. Runs on the CPO's machine only. Reads the finance-stage signed YAML as mandatory input. Interactively asks 8-10 questions about org-level product context — company name + product/vertical names (multi-product split if any), product documentation source(s) (folders, URLs, MCP-accessible collections, multiple sources OK), top features customer-enumerated, internal-only / not-billable callouts, sensitive-data categories the product handles (PII/PHI policy — product-domain knowledge, informed by finance's compliance regimes; the engineer later translates to field paths), end-user terminology, billable-output terminology, unique customer concepts the framework doesn't model. NEVER assumes. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff (checks for hallucinated features vs finance assumptions). Exports a signed YAML the CPO emails/Slacks/Drives to the team-product PM. Triggers on "CPO bootstrap", "product strategy bootstrap", "stage 2 bootstrap", "cost-billing CPO stage".
 license: MIT
 metadata:
   author: Moolabs
@@ -82,6 +82,11 @@ Refuse-to-run if:
 
 ### Q5 — Internal-only / not-billable callouts
 > "Are there features that exist in your code but should **NOT** be billable? Internal admin tools, debug endpoints, free-forever utilities, internal-only dashboards? List them so downstream stages don't propose pricing or instrumentation for them."
+
+### Q5b — Sensitive-data categories (PII/PHI policy)
+> "Finance recorded these compliance regimes: `<regimes from 01-finance>`. Which CATEGORIES of data does your product handle that are regulated-sensitive under them and must NEVER be logged as span attributes by the Moolabs SDK? Answer in product terms — e.g. customer/debtor contact info (emails, phones, addresses), payment/bank details, full LLM prompt/response bodies, government IDs, health data. You know what data your product processes — that's the product fact captured here. You do NOT need field names: the team engineer (Stage 4) translates each category into concrete field paths against the real handlers. If HIPAA is among the regimes, flag which categories are PHI specifically (the codemod guards those more strictly — refuses indirect references too)."
+
+(Why this is a CPO question, not finance: which data the product handles is product-domain knowledge — the CFO owns the regulatory *regime* (which laws bind us), but only the product owner knows the product processes debtor contact / prompt bodies / etc. The field paths are the engineer's. Three-way split — regime=CFO, categories=CPO, paths=engineer — fixed 2026-06-08 after a dogfood run.)
 
 ### Q6 — End-user terminology
 > "What do **YOU call your customer's customer**? Examples: 'user', 'agent', 'developer', 'tenant', 'workspace', 'organization', 'subject'. This term flows through every codemod insert and review surface; pick what feels right to you."
@@ -192,6 +197,13 @@ product:
   doc_sources: []
   top_features: []                # 5-10 entries
   internal_only_features: []
+
+# Q5b — sensitive-data POLICY (product-domain). Categories of data the product
+# handles that are regulated-sensitive under finance's regimes. The engineer
+# (Stage 4) translates these to field paths (04-final > pii_field_blocklist).
+sensitive_data:
+  categories: []                  # e.g. [debtor-contact-info, payment-details, llm-prompt-response]
+  phi_categories: []              # only if HIPAA in finance regimes
 
 terminology:
   end_user_term: ""

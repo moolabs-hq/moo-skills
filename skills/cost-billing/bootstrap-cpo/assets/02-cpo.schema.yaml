@@ -88,6 +88,20 @@ properties:
         type: array
         items: { type: string }
 
+  # Q5b — sensitive-data POLICY (product-domain). Which data CATEGORIES the
+  # product handles that are regulated-sensitive under finance's regimes. The
+  # engineer (Stage 4) translates these categories into concrete field paths
+  # (04-final > pii_field_blocklist) that the codemod's PII guard consumes.
+  sensitive_data:
+    type: object
+    properties:
+      categories:
+        type: array
+        items: { type: string }   # e.g. debtor-contact-info, payment-details, llm-prompt-response
+      phi_categories:
+        type: array
+        items: { type: string }   # only if HIPAA in finance regimes; guarded more strictly
+
   terminology:
     type: object
     properties:

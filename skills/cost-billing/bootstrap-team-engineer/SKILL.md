@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-team-engineer
 description: >-
-  Stage 4 of 4 (FINAL) in the Cost+Billing bootstrap chain. Runs on the IC team engineer's machine. Reads finance + CPO + team-product signed YAMLs as mandatory inputs. Interactively asks ~12-15 questions about the technical surface — primary repo path, multi-repo shape, sub-services to target/exclude, languages + frameworks, build + test commands, branch strategy, primary tracer + secondary instrumentation, request-context propagation pattern, attribute prefix collisions, agent surface + active LLM, MCP inventory + per-task selection + restrictions, Moolabs SDK key location + read pattern. Region/env/tenancy come from finance — engineer only confirms technical source. NEVER assumes. ONE question at a time. Skill R reviews draft BEFORE human signoff. Produces the consolidated customer-context/ that downstream discovery/instrument/drift-lint read. Triggers on "engineer bootstrap", "team engineer bootstrap", "stage 4 bootstrap", "final bootstrap".
+  Stage 4 of 4 (FINAL) in the Cost+Billing bootstrap chain. Runs on the IC team engineer's machine. Reads finance + CPO + team-product signed YAMLs as mandatory inputs. Interactively asks ~12-15 questions about the technical surface — primary repo path, multi-repo shape, sub-services to target/exclude, languages + frameworks, build + test commands, branch strategy, primary tracer + secondary instrumentation, request-context propagation pattern, attribute prefix collisions, agent surface + active LLM, MCP inventory + per-task selection + restrictions, Moolabs SDK key location + read pattern, and PII/PHI field-path translation (maps the CPO's sensitive-data categories to concrete handler field paths/regex the codemod's PII guard consumes — data-model knowledge only the engineer has). Region/env/tenancy come from finance — engineer only confirms technical source. NEVER assumes. ONE question at a time. Skill R reviews draft BEFORE human signoff. Produces the consolidated customer-context/ that downstream discovery/instrument/drift-lint read. Triggers on "engineer bootstrap", "team engineer bootstrap", "stage 4 bootstrap", "final bootstrap".
 license: MIT
 metadata:
   author: Moolabs
@@ -218,6 +218,11 @@ whether to scan each service independently or only the shared path.
 >
 > The codemod inserts this exactly."
 
+### Q15b — PII/PHI field-path translation
+> "The CPO recorded these regulated-sensitive data CATEGORIES for this product: `<sensitive_data.categories from 02-cpo>` (PHI: `<phi_categories>`). For each category, give the concrete FIELD PATHS / regex in YOUR handlers that hold that data — e.g. `request.body.debtor_email`, `*.ssn`, `debtor.phone`, `messages[*].content`. You're the only one who knows the data model, so this translation is yours. I add these to the codemod's PII guard: any inserted span attribute name/value matching the list is refused (PHI paths get the stricter guard — indirect references too). If a category has no matching field in your handlers, say so (it's logged as covered-by-absence)."
+
+(This is the engineer half of the PII split: the CPO owns the *categories* policy [`02-cpo > sensitive_data.categories`]; finance owns the *regime*; YOU own the field-path translation — the codemod consumes the paths, not the categories. Added 2026-06-08 after a dogfood run flagged the CFO being asked for field regex it can't author.)
+
 ---
 
 ## Workflow — 6 phases
@@ -263,7 +268,10 @@ After signoff, take `.moolabs/chain/04-final-<service-slug>.signed.yaml` and wri
 ├── telemetry-stack.yaml           (from engineer Q6-Q9)
 ├── terminology.yaml               (from CPO Q6-Q9 + team-product Q4-Q6)
 ├── mcp-config.yaml                (from engineer Q10-Q13)
-├── integration-config.yaml        (from finance Q9-Q12 + engineer Q14-Q15)
+├── integration-config.yaml        (region/env/tenancy from finance Q7-Q10; SDK key from engineer Q14-Q15;
+│                                    pii_field_blocklist + phi_field_blocklist from engineer Q15b — the
+│                                    field-path translation of CPO Q5b sensitive_data.categories; the
+│                                    codemod's PII guard reads the blocklist from here)
 ├── per-feature-spec.yaml          (NEW — from team-product Q2-Q9)
 └── bootstrap-log.yaml             (chain provenance — all 4 stages summarized)
 ```

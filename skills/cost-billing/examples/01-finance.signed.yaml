@@ -57,9 +57,10 @@ pricing_model:
       overage_handling: warn_at_80pct
 
 compliance:
+  # Regimes only — the sensitive-data categories these imply are enumerated at
+  # the CPO stage (02-cpo > sensitive_data_categories), field paths at the
+  # engineer stage (04-final > pii_field_blocklist).
   regimes: [SOC2, GDPR]
-  pii_field_blocklist: [email, phone, full_name, ip_address]
-  phi_field_blocklist: []
 
 deployment:
   regions:
