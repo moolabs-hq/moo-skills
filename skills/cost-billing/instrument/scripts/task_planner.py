@@ -932,23 +932,37 @@ def build_tasks(
 
 
 def _coerce_derivation(refund_unit: dict) -> dict:
-    """H (dogfood 2026-06-08): `refund_unit.derivation` is rendered as
-    `value={{ entry.refund_unit.derivation }}` — a Python expression — so it MUST
-    be a numeric scalar. Discovery sometimes stores prose
-    ("1 apply_remittance completion"); extract the leading number (default 1) and
-    preserve the original prose under `derivation_note` for the human reviewer."""
+    """The template renders `value={{ entry.refund_unit.derivation }}` as a BARE
+    expression. Per usage-events.schema.yaml `derivation` is a runtime EXPRESSION
+    that computes the quantity at emit time (e.g. "response.usage.completion_tokens",
+    "len(text.split())"), NOT a fixed scalar. So (round-5 review — the original H
+    fix wrongly collapsed every expression to 1, silently under-recording usage):
+
+      - numeric value / numeric string  -> emit the number (`value=N`);
+      - a string that is VALID code      -> emit it VERBATIM (it is the expression);
+      - prose that is NOT valid code (moo-arc's "1 apply_remittance completion")
+        -> can't compile; extract a leading count if present, stash the prose in
+        `derivation_note`, and FLAG `derivation_needs_review` so the placeholder
+        quantity is LOUD, not silently wrong.
+    """
     deriv = refund_unit.get("derivation")
     if not isinstance(deriv, str):
-        return refund_unit  # already numeric (or absent) — leave it
-    m = re.match(r"\s*(\d+(?:\.\d+)?)", deriv)
-    if m:
-        scalar: float | int = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
-    else:
-        scalar = 1
-    out = {**refund_unit, "derivation": scalar}
-    if deriv.strip() != str(scalar):
-        out["derivation_note"] = deriv
-    return out
+        return refund_unit  # already numeric (or absent) — value=<n>
+    s = deriv.strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return {**refund_unit, "derivation": float(s) if "." in s else int(s)}
+    import ast
+    try:
+        ast.parse(s, mode="eval")
+        return refund_unit  # valid runtime expression — emit verbatim
+    except SyntaxError:
+        pass  # prose / not valid code — coerce to a placeholder + flag
+    m = re.match(r"(\d+(?:\.\d+)?)\b", s)
+    scalar: float | int = (
+        (float(m.group(1)) if "." in m.group(1) else int(m.group(1))) if m else 1
+    )
+    return {**refund_unit, "derivation": scalar, "derivation_note": deriv,
+            "derivation_needs_review": True}
 
 
 def _yaml_scalar(v: Any) -> str:
@@ -992,15 +1006,15 @@ def emit_tasks_yaml(
         lines.append(f"    framework: {t.framework}")
         lines.append(f"    language: {t.language}")
         lines.append(f"    template: {t.template}")
-        lines.append(f'    helper_import: "{t.helper_import}"')
+        # _yaml_scalar quotes+escapes via repr. The TypeScript helper_import is
+        # `import { ... } from "@/services/moolabs-client";` — literal double
+        # quotes that, emitted raw inside a double-quoted scalar, made tasks.yaml
+        # unparseable for EVERY TS service (round-5 review). The same applies to
+        # snapshot/attribution string values that may carry quotes.
+        lines.append(f"    helper_import: {_yaml_scalar(t.helper_import)}")
         lines.append("    snapshot_capabilities:")
         for k, v in t.snapshot_capabilities.items():
-            if v is None:
-                lines.append(f"      {k}: null")
-            elif isinstance(v, bool):
-                lines.append(f"      {k}: {str(v).lower()}")
-            else:
-                lines.append(f'      {k}: "{v}"')
+            lines.append(f"      {k}: {_yaml_scalar(v)}")
         lines.append("    inserts:")
         for ins in t.inserts:
             lines.append(f"      - line: {ins.line}")
@@ -1008,10 +1022,9 @@ def emit_tasks_yaml(
             lines.append(f"        attribution_keys: [{', '.join(ins.attribution_keys)}]")
             lines.append("        attribution_sources:")
             for k, v in ins.attribution_sources.items():
-                if v is None:
-                    lines.append(f"          {k}: null")
-                else:
-                    lines.append(f'          {k}: "{v}"')
+                # _yaml_scalar escapes binding expressions like req.headers["x"]
+                # (literal quotes) — raw emission broke tasks.yaml parsing.
+                lines.append(f"          {k}: {_yaml_scalar(v)}")
             lines.append("        entry:")
             for k, v in ins.entry.items():
                 if isinstance(v, dict):

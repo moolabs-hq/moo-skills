@@ -870,6 +870,23 @@ class DerivationCoercion(unittest.TestCase):
         out = tp._coerce_derivation({"unit": "x", "derivation": "per session"})
         self.assertEqual(out["derivation"], 1)
         self.assertEqual(out["derivation_note"], "per session")
+        self.assertTrue(out["derivation_needs_review"])
+
+    def test_runtime_expression_emitted_verbatim(self):
+        # round-5: derivation is a runtime EXPRESSION (usage-events schema); a valid
+        # expression MUST emit verbatim into value=<expr>, NOT collapse to 1.
+        for expr in ("response.usage.completion_tokens", "len(text.split())",
+                     "req.body.tokens"):
+            out = tp._coerce_derivation({"unit": "x", "derivation": expr})
+            self.assertEqual(out["derivation"], expr, f"{expr} must stay verbatim")
+            self.assertNotIn("derivation_note", out)
+            self.assertNotIn("derivation_needs_review", out)
+
+    def test_prose_is_flagged_for_review(self):
+        out = tp._coerce_derivation(
+            {"unit": "x", "derivation": "1 apply_remittance completion"})
+        self.assertEqual(out["derivation"], 1)
+        self.assertTrue(out["derivation_needs_review"])
 
     def test_build_tasks_coerces_prose_derivation(self):
         usage_inv = {"entries": [{
@@ -950,6 +967,49 @@ class CostKindAndValueMissing(unittest.TestCase):
             attribution_defaults={"customer_id": "x", "request_id": "y"},
             attribution_overrides=[], slug_inventory=None)
         self.assertFalse(tasks[0].inserts[0].entry["cost_value_missing"])
+
+
+class EmitTasksYamlEscaping(unittest.TestCase):
+    """round-5 CRITICAL: the main tasks block emitted quote-bearing string values
+    (helper_import, attribution bindings) WITHOUT escaping, so a TypeScript service
+    (helper_import = `import {...} from "@/services/moolabs-client";`) produced a
+    tasks.yaml that yaml.safe_load couldn't parse at all."""
+
+    def _emit_reload(self, language, framework, attribution_defaults):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        usage_inv = {"entries": [{"file": "src/x", "line": 5,
+                                  "workflow_id": "a.b.c", "event_type": "a.b",
+                                  "product_slug": "p"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": [language], "frameworks": [framework]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}}, signed,
+            {"language": language, "framework": framework},
+            attribution_defaults=attribution_defaults, attribution_overrides=[],
+            slug_inventory=None)
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "tasks.yaml"
+            tp.emit_tasks_yaml(tasks, dest)
+            text = dest.read_text()
+            return yaml.safe_load(text)  # raises ScannerError if unescaped
+
+    def test_typescript_tasks_yaml_parses(self):
+        # TS helper_import carries literal double-quotes.
+        reloaded = self._emit_reload("typescript", "express",
+                                     {"customer_id": "req.user.id", "request_id": "r"})
+        hi = reloaded["tasks"][0]["helper_import"]
+        self.assertIn("from", hi)
+        self.assertIn('"@/services/moolabs-client"', hi)  # quotes survived intact
+
+    def test_quote_bearing_attribution_binding_parses(self):
+        reloaded = self._emit_reload(
+            "python", "fastapi",
+            {"customer_id": 'req.headers["x-customer"]', "request_id": "r"})
+        srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
+        self.assertEqual(srcs["customer_id"], 'req.headers["x-customer"]')
 
 
 if __name__ == "__main__":
