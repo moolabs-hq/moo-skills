@@ -32,5 +32,35 @@ class PydanticSubclassDetector(unittest.TestCase):
             self.assertFalse(detect(f, f.read_text(), [Path(tmp)]))
 
 
+class ImportRules(unittest.TestCase):
+    def test_python_package_app_layout(self):
+        emit_dir, import_path = st.IMPORT_RULES["python_package"](
+            "services/svc/app/config.py", "moolabs_settings", "moolabs")
+        self.assertEqual(emit_dir, "services/svc/app")
+        self.assertEqual(import_path, "app.moolabs_settings")
+
+    def test_python_package_src_layout(self):
+        emit_dir, import_path = st.IMPORT_RULES["python_package"](
+            "src/myapp/config.py", "moolabs_settings", "billing")
+        self.assertEqual(emit_dir, "src/myapp")
+        self.assertEqual(import_path, "myapp.moolabs_settings")
+
+    def test_python_package_flat(self):
+        emit_dir, import_path = st.IMPORT_RULES["python_package"](
+            "config.py", "moolabs_settings", "billing")
+        self.assertEqual(emit_dir, "")
+        self.assertEqual(import_path, "moolabs_settings")
+
+    def test_go_module_sibling(self):
+        emit_dir, import_path = st.IMPORT_RULES["go_module"](
+            "internal/conf/config.go", "moolabs_settings", "billing")
+        self.assertEqual(emit_dir, "internal/conf")
+
+    def test_ts_alias_sibling(self):
+        emit_dir, import_path = st.IMPORT_RULES["ts_alias"](
+            "src/config.ts", "moolabs-settings", "billing")
+        self.assertEqual(emit_dir, "src")
+
+
 if __name__ == "__main__":
     unittest.main()

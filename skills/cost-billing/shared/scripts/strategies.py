@@ -244,3 +244,42 @@ def pydantic_settings_subclass(
 
 
 DETECTORS = {"pydantic_settings_subclass": pydantic_settings_subclass}
+
+
+# ── Import-path rules (de-hardcoded artifact placement) ─────────────────
+# Each rule: (config_file, basename, product) -> (emit_dir, import_path).
+# Artifacts are placed beside the DETECTED config file; `src/` is a package
+# root marker (stripped from the python import path).
+
+_PY_ROOT_MARKERS = {"src"}
+
+
+def python_package(config_file: str, basename: str, product: str) -> tuple[str, str]:
+    p = config_file.replace("\\", "/")
+    parts = p.split("/")
+    emit_dir = "/".join(parts[:-1])
+    # The IMMEDIATE parent directory is the package; `src/` is stripped as a
+    # package-root marker so a `src/config.py` layout imports flat.
+    pkg_parts = [seg for seg in parts[:-1] if seg not in _PY_ROOT_MARKERS]
+    last = pkg_parts[-1] if pkg_parts else ""
+    dotted = f"{last}.{basename}" if last else basename
+    return emit_dir, dotted
+
+
+def go_module(config_file: str, basename: str, product: str) -> tuple[str, str]:
+    p = config_file.replace("\\", "/")
+    emit_dir = "/".join(p.split("/")[:-1])
+    return emit_dir, emit_dir  # go import path resolved against go.mod by caller
+
+
+def ts_alias(config_file: str, basename: str, product: str) -> tuple[str, str]:
+    p = config_file.replace("\\", "/")
+    emit_dir = "/".join(p.split("/")[:-1])
+    return emit_dir, f"./{basename}"
+
+
+IMPORT_RULES = {
+    "python_package": python_package,
+    "go_module": go_module,
+    "ts_alias": ts_alias,
+}
