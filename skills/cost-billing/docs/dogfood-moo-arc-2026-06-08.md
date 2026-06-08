@@ -285,3 +285,142 @@ gap** — the transitive base-resolution needs cross-package search or a stub fa
 "unusable until A+B" conclusion is superseded. The PII/PHI blocklist also moved to a
 3-way ownership split (regime=Finance / categories=CPO / field-paths=Engineer) after a
 separate role-assignment finding in the same dogfood session.
+
+---
+
+## Addendum 2 — INSTRUMENT phase (Phase 8) raw-template findings, 2026-06-08
+
+After A/B/C landed, the chain ran clean through discovery (Phase 6 env-routing flips to
+`python-pydantic-settings-subclass`, stub mode, correct emit paths) and the
+`holistic-pre-codemod` gate (`clean-with-accepted-risks`, UNBLOCKED). The instrument
+**helper** template (`python-moolabs-client.py.j2`) renders + `py_compile`s CLEAN.
+
+Then, rendering the **callsite** templates deterministically through the skill's own
+jinja env (NOT hand-authoring) surfaced four codemod-side defects. **All four were
+hidden in every prior round because the callsites were hand-authored** — the
+template-bypass this very retro flagged. Result: **0 of 8 moo-arc inserts produce
+compilable code from the raw templates.**
+
+### E — CRITICAL: callsite templates reference `entry.idempotency_anchor` unconditionally; discovery only sets it for cost-only
+
+**Where (ALL SIX callsite templates, both usage-only AND sibling-pair branches):**
+`assets/codemod-templates/`: `python-fastapi.j2:44,83` · `python-django.j2:30,65` ·
+`python-flask.j2:28,63` · `typescript-express.j2:28,65` · `typescript-nestjs.j2:27,61` ·
+`typescript-nextjs.j2:28,62` — each emits
+`# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})`.
+
+**Root cause:** discovery populates `idempotency_anchor` **only on cost-events-inventory
+(cost-only) entries**. usage-events-inventory entries have NO `idempotency_anchor`. Under
+the skill's StrictUndefined jinja env, every usage-only / sibling-pair insert raises
+`jinja2.exceptions.UndefinedError: 'dict object' has no attribute 'idempotency_anchor'`.
+
+**Impact:** 7/8 moo-arc inserts (all usage-only) fail to render. Affects EVERY framework
+and EVERY customer (all 6 templates), not just fastapi/moo-arc.
+
+**Fix:** guard the reference in all 6 templates, e.g.
+`{% if entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }})
+{% endif %}` — OR have `task_planner` populate a default `idempotency_anchor` on usage
+entries (the heuristic `{handler}.{id}.{epoch}` the SKILL.md already describes). Add a
+render-smoke test that renders each template against a usage-only AND a cost-only fixture.
+
+### F — CRITICAL: `task_planner` writes Python `None` as YAML bareword `None`, which reloads as the string `"None"`
+
+**Where:** `scripts/task_planner.py` hand-rolls tasks.yaml (`dest.write_text("\n".join(lines)+"\n")`
+at ~L988; `lines` built with f-strings) instead of `yaml.safe_dump`. For `*_const` fields
+that resolved to `None` it emits the bareword: `event_type_const: None`,
+`provider_const: None`, `span_type_const: None` (confirmed in raw planner output across
+acute/arc/meter/bff entries).
+
+**Root cause:** YAML null is `null`/`~`/empty — **not** `None`. `yaml.safe_load` reads the
+bareword `None` back as the **string** `"None"`. The callsite templates then see a *truthy*
+`"None"` in `{% if entry.event_type_const %}` and emit it as a Python identifier.
+
+**Impact (cost-only `llm_helpers` — the one insert that survived E):** renders
+`from app.slugs_arc import (\n    None,\n    FEATURE_KEY_SHARED,\n    None,\n)` →
+**SyntaxError (`None` is a keyword)**, plus `event_type=None`. So even the surviving render
+does not compile.
+
+**Fix:** `task_planner` must emit `null` (or omit the key) for None-valued consts — prefer
+serializing the consts via `yaml.safe_dump` so None→`null` is automatic. Defensive
+secondary: templates should treat the string `"None"` as falsy.
+
+### G — HIGH (discovery/inventory gap): cost-only LLMPort entry has no cost-value source
+
+**Where:** cost-events-inventory entry `arc.shared.llmport-call` (rendered at
+`llm_helpers.py:209`) carries `cost_dimension: llm_tokens` but **no `cost_micros_source`**,
+and the template reads `entry.cost_kind` (not `cost_dimension`). `event_type_const` is also
+absent.
+
+**Impact:** even after E+F, the rendered `emit_cost_event_safe` carries
+`spans=[{"span_id": …}]` — **no `cost_micros`, no `kind`** — and `event_type=None`. The cost
+lane conveys no actual cost. This is the consolidation point for 5 workflows, so the entire
+cost signal for moo-arc LLM spend is empty.
+
+**Fix:** discovery must capture the per-call cost source for `call_llm_json` (the DeepInfra
+response usage/cost) into `cost_micros_source` (+ token counts), and either rename
+`cost_dimension`→`cost_kind` or have the template/planner read both. Route via discovery
+`--refresh` + CFO/PM (mirrors PR #528's "faithful-to-inventory → informational for CFO/PM").
+
+### H — MEDIUM: `refund_unit.derivation` stores prose, not the usage scalar
+
+**Where:** usage-events-inventory `refund_unit.derivation` values like
+`"1 apply_remittance completion (post-success)"`, `"1 _send_sms() completion"`. Template
+renders `value={{ entry.refund_unit.derivation }}` → `value=1 apply_remittance completion …`
+= **SyntaxError**.
+
+**Fix:** store `derivation: 1` (numeric scalar the template documents as "the usage scalar")
+plus a separate `derivation_note:` for the prose; OR have `task_planner` extract the leading
+scalar. (For this dogfood render the leading integer was coerced so the other findings could
+be isolated, and each coercion was flagged.)
+
+### Instrument-phase net
+
+| # | Severity | Owner | One-line fix |
+|---|----------|-------|--------------|
+| **E** | CRITICAL | skill (all 6 callsite templates) | guard `{% if entry.idempotency_anchor %}` (or planner sets a default) |
+| **F** | CRITICAL | skill (`task_planner.py` YAML emit) | emit `null`/omit for None consts (prefer `yaml.safe_dump`) |
+| **G** | HIGH | discovery + CFO/PM | capture `cost_micros_source` for the LLMPort cost entry; map `cost_dimension`→`cost_kind` |
+| **H** | MEDIUM | discovery/planner | `derivation` = numeric scalar + separate note |
+
+**Verified-good in this phase:** the env-routing flip (Addendum 1), the **helper** template
+(renders + `py_compile` CLEAN), `render_artifacts` stub/slugs/deployment dispatch (mode=stub,
+`app/moolabs_settings.py`, `app/slugs_arc.py`, terraform→checklist), and the gate cascade.
+The break is isolated to the **callsite templates (E)** + **task_planner None serialization (F)**,
+with two upstream data gaps (G, H). Once E+F are fixed in the skill folder and reinstalled,
+re-run `/cost-billing-instrument --service moo-arc` and the 8 inserts should render +
+`py_compile`; G+H should be addressed via a discovery `--refresh` so the cost lane + value
+scalars are real.
+
+---
+
+## Resolution status — Addendum 2 (2026-06-08, fixed)
+
+All four fixed; the end-to-end render check (build_tasks → emit tasks.yaml →
+reload → render under StrictUndefined → `py_compile`) now passes for the moo-arc
+shape — the dogfood measured **0/8**, it is now **green**.
+
+| # | Status | Resolution |
+|---|--------|-----------|
+| **E** | ✅ FIXED | All 6 callsite templates guard the idempotency_anchor REVIEW line with `{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}` (the bare `{% if %}` test itself raises under StrictUndefined when the key is absent — `is defined` is the safe idiom). |
+| **F** | ✅ FIXED | `task_planner` serializes None via a new `_yaml_scalar` helper (None→`null`, bool→lowercase, str→repr) in the `entry:` block — so a None const round-trips to Python `None`, not the truthy string `"None"`. |
+| **G** | ✅ FIXED (deterministic parts) | `task_planner` maps `cost_dimension`→`cost_kind` (the template reads `cost_kind`), guarantees the optional `cost_micros_source` key exists, and sets a loud `cost_value_missing: true` flag (+ a stderr WARNING) on any cost-bearing entry with no cost-value source. **DATA HANDOFF (discovery + CFO/PM):** actually capturing the per-call cost (e.g. the LLM response usage → `cost_micros_source`) still requires a discovery `--refresh` + CFO/PM routing — the flag makes the gap loud until that lands. |
+| **H** | ✅ FIXED | `task_planner._coerce_derivation` extracts the leading numeric scalar from a prose `refund_unit.derivation` ("1 apply_remittance completion" → `1`) and preserves the prose under `derivation_note`. |
+
+**Two latent siblings of E, surfaced by the new end-to-end render check** (both
+the same class — an absent optional entry key raising under StrictUndefined —
+and both would have blocked the moo-arc render right after E):
+- `attribution_sources.{customer_id,request_id,consumer_agent}` are referenced
+  directly; moo-arc's bindings omitted `consumer_agent`. Fix: the producer
+  (`_resolve_sources_for_file`) now guarantees all three canonical keys (None for
+  absent) — the template contract is "each key present (expression or None)".
+- `entry.cost_micros_source` (G) and `entry.refund_unit` (deref'd unguarded on
+  usage/sibling) are now guaranteed in `enriched_entry` (None / a `{unit,
+  derivation:1}` default respectively).
+
+**The deeper fix — the test gap that hid all of this:** the suite's Phase-7
+render-smoke used a *tolerant* jinja env + a fully-populated fixture, so it never
+exercised StrictUndefined against the *sparse* entry shapes discovery actually
+produces. New `instrument/scripts/test_codemod_templates.py` renders every
+callsite template under **StrictUndefined** against realistic sparse fixtures
+(usage-only with no idempotency_anchor; cost-only with no cost value) + a full
+build→emit→render→`py_compile` e2e on the moo-arc shape. Smoke 125→127.

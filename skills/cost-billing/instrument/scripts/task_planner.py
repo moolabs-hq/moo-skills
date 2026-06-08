@@ -333,12 +333,24 @@ def _load_attribution_bindings(path: Path) -> tuple[dict[str, str | None], list[
     return defaults, overrides
 
 
+# Attribution keys the callsite templates reference directly — must always be
+# present in attribution_sources (value or None) for the StrictUndefined render.
+_TEMPLATE_ATTRIBUTION_KEYS = ("customer_id", "request_id", "consumer_agent")
+
+
 def _resolve_sources_for_file(
     file_path: str,
     defaults: dict[str, str | None],
     overrides: list[dict[str, Any]],
 ) -> dict[str, str | None]:
-    """Apply per-file override on top of service-level defaults."""
+    """Apply per-file override on top of service-level defaults.
+
+    The callsite templates reference attribution_sources.{customer_id, request_id,
+    consumer_agent} directly. Under the codemod's StrictUndefined jinja env an
+    ABSENT key raises UndefinedError (sibling of dogfood finding E — found via the
+    end-to-end render check). The template contract is "each key is present — a
+    Python expression or None", so guarantee the canonical keys exist here rather
+    than depending on what the attribution-bindings happened to populate."""
     resolved = dict(defaults)
     for ov in overrides:
         if ov.get("file") != file_path:
@@ -346,6 +358,8 @@ def _resolve_sources_for_file(
         for key, val in (ov.get("bindings") or {}).items():
             if isinstance(val, dict):
                 resolved[key] = val.get("source")
+    for key in _TEMPLATE_ATTRIBUTION_KEYS:
+        resolved.setdefault(key, None)
     return resolved
 
 
@@ -785,15 +799,43 @@ def build_tasks(
                 event_type=entry.get("event_type"),
                 workflow_id=wf,
             )
+            # Dogfood finding G: the callsite template reads `entry.cost_kind`,
+            # but discovery inventories sometimes name it `cost_dimension`. Map
+            # one to the other so the cost-lane `kind` actually renders.
+            effective_cost_kind = entry.get("cost_kind") or entry.get("cost_dimension")
             slug_consts = resolve_slug_constants(
                 slug_index,
                 product_slug=product_slug,
                 event_type=entry.get("event_type"),
                 workflow_id=wf,
-                cost_kind=entry.get("cost_kind"),
+                cost_kind=effective_cost_kind,
             )
+            # Dogfood finding G: a cost-bearing entry with no cost-value source
+            # renders a cost event carrying NO cost_micros — the cost signal is
+            # silently empty. Flag it LOUDLY (in tasks.yaml + a stderr warning) so
+            # the reviewer / adversarial-review sees it. Capturing the real per-call
+            # cost (e.g. the LLM response usage) is a discovery --refresh + CFO/PM
+            # task — the flag makes the gap visible until that lands.
+            cost_value_missing = (
+                pattern in ("cost-only", "sibling-pair")
+                and not entry.get("cost_micros_source")
+            )
+            if cost_value_missing:
+                sys.stderr.write(
+                    f"WARNING: cost-bearing entry {wf!r} at "
+                    f"{file_path}:{entry.get('line')} has no cost_micros_source — "
+                    f"the rendered cost lane carries no cost_micros (dogfood finding "
+                    f"G). Flagged cost_value_missing: true; capture the per-call "
+                    f"cost via a discovery --refresh.\n"
+                )
             enriched_entry = {
                 **entry,
+                "cost_kind": effective_cost_kind,
+                # Guarantee the optional cost-value key EXISTS (None when absent)
+                # so the template's `{% if entry.cost_micros_source %}` guard works
+                # under StrictUndefined — an ABSENT key would raise (sibling of E).
+                "cost_micros_source": entry.get("cost_micros_source"),
+                "cost_value_missing": cost_value_missing,
                 "cost_workflow_ids": cost_workflow_ids,
                 **slug_consts,
                 # Task 12: derive the per-callsite slugs import path from the
@@ -807,6 +849,19 @@ def build_tasks(
                     primary_lang, product_slug, anchor
                 ),
             }
+            # Dogfood finding H: the usage-only / sibling-pair templates render
+            # `value={{ entry.refund_unit.derivation }}` as a Python expression
+            # (UNGUARDED deref), so derivation MUST be a numeric scalar AND
+            # refund_unit MUST be a dict. Coerce prose ("1 apply_remittance
+            # completion") to its leading number, keep the prose under
+            # derivation_note, and — since those two patterns deref it without a
+            # guard — guarantee a dict with derivation:1 when discovery omitted it
+            # (sibling of E under StrictUndefined). cost-only never reads refund_unit.
+            _ru = entry.get("refund_unit")
+            if isinstance(_ru, dict):
+                enriched_entry["refund_unit"] = _coerce_derivation(_ru)
+            elif pattern in ("usage-only", "sibling-pair"):
+                enriched_entry["refund_unit"] = {"unit": "event", "derivation": 1}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
@@ -849,6 +904,43 @@ def build_tasks(
             )
         )
     return tasks
+
+
+def _coerce_derivation(refund_unit: dict) -> dict:
+    """H (dogfood 2026-06-08): `refund_unit.derivation` is rendered as
+    `value={{ entry.refund_unit.derivation }}` — a Python expression — so it MUST
+    be a numeric scalar. Discovery sometimes stores prose
+    ("1 apply_remittance completion"); extract the leading number (default 1) and
+    preserve the original prose under `derivation_note` for the human reviewer."""
+    deriv = refund_unit.get("derivation")
+    if not isinstance(deriv, str):
+        return refund_unit  # already numeric (or absent) — leave it
+    m = re.match(r"\s*(\d+(?:\.\d+)?)", deriv)
+    if m:
+        scalar: float | int = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+    else:
+        scalar = 1
+    out = {**refund_unit, "derivation": scalar}
+    if deriv.strip() != str(scalar):
+        out["derivation_note"] = deriv
+    return out
+
+
+def _yaml_scalar(v: Any) -> str:
+    """Serialize a scalar as a YAML token for the hand-rolled emitter.
+
+    None -> `null`, NOT the Python bareword `None` — `yaml.safe_load` reloads the
+    bareword as the STRING "None", which is truthy in the callsite templates'
+    `{% if entry.event_type_const %}` guard and produces `from app.slugs import None`
+    (SyntaxError). bool -> lowercase `true`/`false`; str -> repr (single-quoted,
+    valid YAML); everything else -> str. (dogfood 2026-06-08, finding F.)"""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return repr(v)
+    return str(v)
 
 
 def emit_tasks_yaml(
@@ -900,14 +992,12 @@ def emit_tasks_yaml(
                 if isinstance(v, dict):
                     lines.append(f"          {k}:")
                     for sk, sv in v.items():
-                        lines.append(f"            {sk}: {sv!r}" if isinstance(sv, str) else f"            {sk}: {sv}")
+                        lines.append(f"            {sk}: {_yaml_scalar(sv)}")
                 elif isinstance(v, list):
-                    inline = ", ".join(repr(x) if isinstance(x, str) else str(x) for x in v)
+                    inline = ", ".join(_yaml_scalar(x) for x in v)
                     lines.append(f"          {k}: [{inline}]")
-                elif isinstance(v, str):
-                    lines.append(f"          {k}: {v!r}")
                 else:
-                    lines.append(f"          {k}: {v}")
+                    lines.append(f"          {k}: {_yaml_scalar(v)}")
         lines.append("    audit:")
         for k, v in t.audit.items():
             lines.append(f"      {k}: {v}")
