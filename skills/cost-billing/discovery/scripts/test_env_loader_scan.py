@@ -1335,5 +1335,24 @@ class RegistryDrivenScan(unittest.TestCase):
             self.assertEqual(res.pattern_id, "python-pydantic-settings-subclass")
 
 
+class DerivedPathsInInventory(unittest.TestCase):
+    def test_app_config_carries_node_and_derived_paths(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp); svc = repo / "services" / "svc"
+            (svc / "app").mkdir(parents=True)
+            (svc / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    api: str\n")
+            entry = els._service_entry(
+                repo, {"slug": "svc", "root": "services/svc", "language": "python"},
+                svc, catalog=None)
+            ac = entry["app_config"]
+            self.assertEqual(ac["node_id"], "python-pydantic-settings-v2")
+            self.assertTrue(ac["emit_path"].endswith("services/svc/app/moolabs_settings.py"))
+            self.assertEqual(ac["import_path"], "app.moolabs_settings")
+
+
 if __name__ == "__main__":
     unittest.main()

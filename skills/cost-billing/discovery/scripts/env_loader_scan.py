@@ -940,34 +940,112 @@ def scan_repo_level_deployment_surfaces(repo_root: Path) -> list[DeploymentSurfa
 # Inventory build
 # ──────────────────────────────────────────────────────────────────────
 
+# File extension per language — used to spell the derived emit artifact's
+# filename (basename + ext). Mirrors the language axis of _EXTENSION_BY_LANGUAGE
+# but yields the SINGLE canonical write extension (not the candidate-match set).
+_EMIT_EXT_BY_LANGUAGE = {
+    "python": ".py",
+    "typescript": ".ts",
+    "go": ".go",
+}
+
+# Conventional fallback (service-relative) emit dir + import path per language,
+# used ONLY when no config is detected (unrecognized). Matches the framework
+# nodes' emit.fallback_dir convention so a detected-vs-fallback artifact lands
+# in the same place a recognized config would route to.
+_FALLBACK_EMIT_BY_LANGUAGE = {
+    "python": ("app/services", "moolabs_settings", "app.services.moolabs_settings"),
+    "typescript": ("src/services", "moolabs_settings", "@/services/moolabs_settings"),
+    "go": ("internal/moolabsconfig", "settings", "internal/moolabsconfig"),
+}
+
+
+def _derive_emit_path(service_root_rel: str, emit_dir_rel: str, filename: str) -> str:
+    """Join service_root + service-relative emit dir + filename into a single
+    forward-slash repo-relative path, collapsing empty segments. A flat layout
+    (emit_dir_rel == "") yields service_root/filename."""
+    parts = [seg for seg in (service_root_rel.rstrip("/"), emit_dir_rel, filename) if seg]
+    return "/".join(parts)
+
+
 def _service_entry(
     repo_root: Path,
     service: dict,
     scan_root: Path,
-    catalog: list[Pattern],
+    catalog=None,
 ) -> dict:
-    """Build one services[] entry from a scan_service result + deployment
-    surfaces under the service's path."""
+    """Build one services[] entry from a registry scan result + deployment
+    surfaces under the service's path.
+
+    Detection runs off the framework-capability tree (scan_service_via_registry)
+    so each entry carries the winning node's id AND the DERIVED artifact paths
+    (emit_path / import_path) computed via the node's emit rule. The legacy
+    `catalog` arg is accepted but IGNORED — existing callers still pass one;
+    Task 9 removes the parameter."""
     language = service.get("language", "python")
+    service_root_rel = service["root"]
     # search_roots include the repo root so a Settings base imported from a
     # shared repo-level package (outside the service tree) still resolves for
     # the transitive pydantic-settings detection (Dogfood #1a).
-    result = scan_service(
-        scan_root, language, catalog, search_roots=[scan_root, repo_root]
+    result = scan_service_via_registry(
+        scan_root, language, search_roots=[scan_root, repo_root]
     )
 
     if result is None:
+        # No config detected → fallback artifact placement (spec: "fallback only
+        # when no config detected"). The per-language conventional dir matches
+        # the framework nodes' emit.fallback_dir.
+        fb_dir, fb_basename, fb_import = _FALLBACK_EMIT_BY_LANGUAGE.get(
+            language, _FALLBACK_EMIT_BY_LANGUAGE["python"]
+        )
+        ext = _EMIT_EXT_BY_LANGUAGE.get(language, ".py")
         app_config = {
             "pattern": "unrecognized",
+            "node_id": "",
             "confidence": "none",
             "evidence": [],
             "stub_required": True,
+            "emit_path": _derive_emit_path(service_root_rel, fb_dir, fb_basename + ext),
+            "import_path": fb_import,
         }
     else:
         rel_file = str(Path(result.file).relative_to(repo_root)) \
             if Path(result.file).is_relative_to(repo_root) else result.file
+        node_id = result.pattern_id
+
+        # Locate the winning node in the registry to read its emit rule. The
+        # scan already loaded the registry; re-load here (load_registry re-globs
+        # + re-parses the node files — Task 9 can thread the loaded registry
+        # through to avoid the second load) and find the node by id within the
+        # service's language.
+        reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+        node = next(
+            (n for n in reg.get(language, {}).values() if n.id == node_id), None
+        )
+
+        emit_path = None
+        import_path = None
+        if node is not None:
+            # SERVICE-RELATIVE config path: result.file lives under scan_root
+            # (the scan rglob'd it), so relative_to(scan_root) is safe. Using
+            # scan_root (NOT a service["root"] prefix-strip) is correct for
+            # repo-wide granularity where scan_root = repo_root/shared_config_path
+            # and result.file is NOT under services/<svc>/.
+            service_rel = str(Path(result.file).relative_to(scan_root))
+            basename = node.emit["artifact_basename"]
+            emit_dir_rel, import_path = strategies.IMPORT_RULES[
+                node.emit["import_rule"]
+            ](service_rel, basename, "")
+            ext = _EMIT_EXT_BY_LANGUAGE.get(language, ".py")
+            emit_path = _derive_emit_path(
+                service_root_rel, emit_dir_rel, basename + ext
+            )
+
         app_config = {
-            "pattern": result.pattern_id,
+            # Keep `pattern` == node_id for back-compat with consumers that read
+            # `pattern`; expose `node_id` as the canonical new field too.
+            "pattern": node_id,
+            "node_id": node_id,
             "file": rel_file,
             "line_to_insert": result.line_to_insert,
             "confidence": result.confidence,
@@ -975,6 +1053,8 @@ def _service_entry(
             "evidence": result.evidence,
             "stub_required": result.confidence == "low",
             "wire_target": result.wire_target,
+            "emit_path": emit_path,
+            "import_path": import_path,
         }
 
     # Deployment surfaces — BOTH scopes:
@@ -1110,6 +1190,13 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
             ac = svc["app_config"]
             lines.append(f"    app_config:")
             lines.append(f"      pattern: {ac['pattern']}")
+            # node_id is the canonical framework-tree node id. Presence-guarded
+            # (`in`, not truthiness) so the unrecognized branch's empty-string
+            # node_id still emits as `node_id: ""`, and hand-built test dicts
+            # that omit it don't KeyError.
+            if "node_id" in ac:
+                nid = str(ac["node_id"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      node_id: "{nid}"')
             if ac.get("file"):
                 lines.append(f"      file: {ac['file']}")
                 lines.append(f"      line_to_insert: {ac['line_to_insert']}")
@@ -1134,6 +1221,16 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
                 for k, v in ac["wire_target"].items():
                     v_str = str(v).replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'        {k}: "{v_str}"')
+            # Derived artifact placement (Task 8): emit_path is the REPO-relative
+            # path the codemod writes the Settings artifact to; import_path is how
+            # the customer's code imports it. Presence-guarded so hand-built test
+            # dicts that omit them don't KeyError. Quote both (paths/dotted ids).
+            if "emit_path" in ac:
+                ep = str(ac["emit_path"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      emit_path: "{ep}"')
+            if "import_path" in ac:
+                ip = str(ac["import_path"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      import_path: "{ip}"')
 
             # PR #531 lesson: surface the gap when scanner found no infra
             # (no terraform / k8s / dockerfile at either scope). The
