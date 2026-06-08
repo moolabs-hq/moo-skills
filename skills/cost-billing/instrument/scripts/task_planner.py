@@ -34,6 +34,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# The de-hardcoded import-path rules live in the shared framework-capability
+# tree (shared/scripts/strategies.py), exposed via IMPORT_RULES. The slugs-path
+# helpers below reuse them — same sys.path-insert pattern as config_wire /
+# env_loader_scan so all three layers resolve the same shared module.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+import strategies  # noqa: E402
+
+# Language → (IMPORT_RULES key, file extension) for the slugs-path derivation.
+_SLUGS_LANG_RULE: dict[str, tuple[str, str]] = {
+    "python": ("python_package", "py"),
+    "typescript": ("ts_alias", "ts"),
+    "go": ("go_module", "go"),
+}
+
 # Template selection per (language, framework). Stays aligned with the
 # helper templates checked into assets/codemod-templates/.
 # Go is P0 (Decision #2 reversed 2026-05-28): the go-stdlib.j2 callsite template
@@ -452,11 +466,19 @@ def _effective_product_slug(
 @dataclass
 class SlugsEmitTask:
     """One slugs-emit task per product. Renders slugs-<lang>.j2 to
-    <slugs_emit_path> based on the inventory's per-product constants."""
+    <slugs_emit_path> based on the inventory's per-product constants.
+
+    slugs_emit_path (repo-relative) is derived from the SERVICE's stub anchor
+    via slugs_paths_from_stub (a sibling of the env-wire stub module), so the
+    slugs file lands in the SAME package as the customer's real config — NOT a
+    hardcoded app/services/moolabs/ dir. None when no single stub anchor is
+    available (modify mode / multi-service ambiguity); render_artifacts then
+    falls back to its legacy convention."""
     task_id: str
     product_slug: str
     constants: dict          # per-category {name, value} lists from slug-inventory
     generated_at: str        # from slug-inventory.yaml
+    slugs_emit_path: str | None = None
 
 
 def resolve_slug_constants(
@@ -501,19 +523,75 @@ def resolve_slug_constants(
     }
 
 
-def build_slugs_emit_tasks(inventory: dict) -> list[SlugsEmitTask]:
-    """One slugs-emit task per product in the inventory."""
+def stub_anchor(env_wire_tasks: list[EnvWireTask] | None) -> tuple[str, str] | None:
+    """Pick the (stub_emit_path, settings_import_path) anchor that products'
+    slugs modules hang off of — a REAL customer location, never a hardcode.
+
+    The inventory carries NO product→service edge, so we can't map a product to
+    the specific service whose package its slugs belong in. Returns:
+      - (stub_emit_path, settings_import_path) of the FIRST stub-mode env-wire
+        task with a non-null stub_emit_path ;
+      - None ONLY when there are zero stubs (every service is modify mode → no
+        stub file to anchor on).
+
+    MULTI-SERVICE LIMITATION (documented, NOT a hardcode): when 2+ services are
+    stubbed, all products' slugs anchor on the FIRST service's stub package.
+    This is a customer-derived best-effort — strictly better than the old
+    `app/services/moolabs` literal (PR #11 review F2). A product whose callsites
+    live in a DIFFERENT service imports slugs from the first service's package,
+    which only resolves if that package is importable repo-wide. The correct fix
+    is a product→service edge so each product anchors on ITS service's stub;
+    tracked as a follow-up. Only the zero-stub (all-modify) case falls through to
+    the legacy convention.
+    """
+    if not env_wire_tasks:
+        return None
+    for t in env_wire_tasks:
+        if t.mode == "stub" and t.stub_emit_path:
+            return (t.stub_emit_path, t.settings_import_path or "")
+    return None
+
+
+def build_slugs_emit_tasks(
+    inventory: dict,
+    language: str = "python",
+    anchor: tuple[str, str] | None = None,
+) -> list[SlugsEmitTask]:
+    """One slugs-emit task per product in the inventory.
+
+    When ``anchor`` (the service's stub (emit_path, import_path)) is provided
+    AND the language is python, each task's ``slugs_emit_path`` is derived as a
+    SIBLING of the stub via ``slugs_paths_from_stub`` — landing the slugs file in
+    the customer's real config package. Otherwise ``slugs_emit_path`` stays None
+    and render_artifacts falls back to its legacy convention.
+
+    The python gate MUST match the import gate in ``_slugs_import_for_entry``
+    (PR #11 review IMP-1): the basename/dotted swap is python-shaped and would
+    corrupt TS ``@/`` aliases / Go slash paths, so TS/Go keep the legacy path on
+    BOTH the emit and the import side — emitting anchor-derived here while the
+    import stays legacy wrote the slugs module where no callsite imports it.
+    Anchor-derived TS/Go paths are a follow-up (needs ts_alias/go_module
+    emit+import derivation through strategies.IMPORT_RULES). ``language`` selects
+    the file extension for the swapped basename."""
     out: list[SlugsEmitTask] = []
     generated_at = inventory.get("generated_at", "")
+    _rule, ext = _SLUGS_LANG_RULE.get(language, _SLUGS_LANG_RULE["python"])
     for idx, product in enumerate(inventory.get("products") or [], start=1):
         slug = product.get("product_slug", "")
         if not slug:
             continue
+        slugs_emit_path: str | None = None
+        if anchor is not None and language == "python":
+            stub_emit, stub_import = anchor
+            slugs_emit_path, _imp = slugs_paths_from_stub(
+                stub_emit, stub_import, slug, ext
+            )
         out.append(SlugsEmitTask(
             task_id=f"slugs_emit_{idx:03d}_{slug}",
             product_slug=slug,
             constants=product.get("constants") or {},
             generated_at=generated_at,
+            slugs_emit_path=slugs_emit_path,
         ))
     return out
 
@@ -533,6 +611,68 @@ def _slugs_import_path_for(language: str, product_slug: str) -> str:
     return f"app.services.moolabs.slugs_{safe}"
 
 
+def slugs_import_path(language: str, product: str, anchor_dir: str) -> str:
+    """Derive the per-product slugs import path from a SERVICE-RELATIVE anchor
+    directory (the dir holding the service's detected config/stub module).
+
+    The slugs module lives in that same directory under basename
+    `slugs_<product_safe>`. We build a pseudo config-file path in that dir and
+    run the shared `strategies.IMPORT_RULES[<rule>]` so the import path follows
+    the exact same convention as the env-wire stub placement (src/ stripping,
+    nested-package dotting, etc.) — no duplicated path logic here.
+    """
+    safe = (product or "").replace("-", "_")
+    rule_name, ext = _SLUGS_LANG_RULE.get(language, _SLUGS_LANG_RULE["python"])
+    basename = f"slugs_{safe}"
+    pseudo = f"{anchor_dir}/{basename}.{ext}" if anchor_dir else f"{basename}.{ext}"
+    _emit_dir, import_path = strategies.IMPORT_RULES[rule_name](pseudo, basename, product)
+    return import_path
+
+
+def slugs_paths_from_stub(
+    stub_emit_path: str, stub_import_path: str, product: str, ext: str,
+) -> tuple[str, str]:
+    """Derive a product's slugs (emit_path, import_path) as a sibling of the
+    service's stub module — a BASENAME SWAP, not a re-derivation.
+
+    - emit_path: same directory as ``stub_emit_path`` with basename
+      ``slugs_<product_safe>.<ext>`` (e.g.
+      ``services/svc/src/myapp/moolabs_settings.py`` ->
+      ``services/svc/src/myapp/slugs_billing.py``).
+    - import_path: ``stub_import_path`` with its LAST dotted segment replaced by
+      ``slugs_<product_safe>`` (e.g. ``myapp.moolabs_settings`` ->
+      ``myapp.slugs_billing``; a bare ``moolabs_settings`` -> ``slugs_billing``).
+    """
+    safe = (product or "").replace("-", "_")
+    basename = f"slugs_{safe}"
+    emit_p = (stub_emit_path or "").replace("\\", "/")
+    parts = emit_p.split("/")
+    parts[-1] = f"{basename}.{ext}"
+    emit_path = "/".join(parts)
+
+    dotted = (stub_import_path or "").split(".")
+    dotted[-1] = basename
+    import_path = ".".join(dotted)
+    return emit_path, import_path
+
+
+def _slugs_import_for_entry(
+    language: str, product_slug: str, anchor: tuple[str, str] | None,
+) -> str | None:
+    """Per-callsite slugs import path. Returns None when product_slug is empty
+    (the import block is gated off downstream). When a stub ``anchor`` is
+    available AND the language is python, derive the import as a sibling of the
+    stub module (its real package); otherwise fall back to the legacy hardcoded
+    convention. The dotted last-segment swap is python-shaped — it corrupts TS
+    ``@/`` aliases and Go slash paths — so TS/Go always use the legacy path."""
+    if not product_slug:
+        return None
+    if anchor is not None and language == "python":
+        _emit, imp = slugs_paths_from_stub(anchor[0], anchor[1], product_slug, "py")
+        return imp
+    return _slugs_import_path_for(language, product_slug)
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -543,6 +683,7 @@ def build_tasks(
     attribution_defaults: dict[str, str | None] | None = None,
     attribution_overrides: list[dict[str, Any]] | None = None,
     slug_inventory: dict[str, Any] | None = None,
+    anchor: tuple[str, str] | None = None,
 ) -> list[Task]:
     """Group inventory entries by file, emit one task per file.
 
@@ -553,6 +694,14 @@ def build_tasks(
     identifier) instead of `event_type="x.y"` (string literal). Without
     this wiring, the constants are never set and every callsite falls
     back to the literal — defeating the slugs-as-source-of-truth contract.
+
+    Task 12: the per-callsite slugs_import_path is derived from the SERVICE's
+    stub ``anchor`` (its (emit_path, import_path)) via a basename swap, so the
+    import targets the slugs module that actually gets emitted beside the
+    customer's real config. Stub-anchored derivation is Python-only — a dotted
+    last-segment swap is wrong for TS (``@/`` aliases) and Go (slash paths), so
+    those languages, and the no-anchor case, fall back to the legacy
+    convention in ``_slugs_import_path_for``.
     """
     output_input_index = _build_output_input_index(output_input_map)
     slug_index = build_slug_index(slug_inventory or {"products": []})
@@ -634,15 +783,15 @@ def build_tasks(
                 **entry,
                 "cost_workflow_ids": cost_workflow_ids,
                 **slug_consts,
-                # Round 2 LOW fix: when product_slug is empty, emit None
-                # rather than a trailing-underscore path like
-                # "app.services.moolabs.slugs_" — purely a tasks.yaml
-                # data-quality fix (rendered source is unaffected because
-                # all _const keys are None and the import block is gated).
-                "slugs_import_path": (
-                    _slugs_import_path_for(primary_lang, product_slug)
-                    if product_slug
-                    else None
+                # Task 12: derive the per-callsite slugs import path from the
+                # SERVICE's stub anchor (basename swap on the stub's import
+                # path) when one is available + python; else the legacy
+                # convention. Empty product_slug -> None (the import block is
+                # gated off downstream, so this is purely a tasks.yaml
+                # data-quality choice — rendered source is unaffected because
+                # all _const keys are None too).
+                "slugs_import_path": _slugs_import_for_entry(
+                    primary_lang, product_slug, anchor
                 ),
             }
             inserts.append(
@@ -800,6 +949,15 @@ def emit_tasks_yaml(
             lines.append(f"    product_slug: {st.product_slug}")
             safe_gen_at = str(st.generated_at).replace("\\", "\\\\").replace('"', '\\"')
             lines.append(f'    generated_at: "{safe_gen_at}"')
+            # Task 12: repo-relative emit path of the slugs module, derived
+            # from the service's stub anchor (sibling of the customer's real
+            # config). null when no single stub anchor was available — Task 13
+            # (render_artifacts) then falls back to its legacy convention.
+            if st.slugs_emit_path:
+                safe_emit = str(st.slugs_emit_path).replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'    slugs_emit_path: "{safe_emit}"')
+            else:
+                lines.append("    slugs_emit_path: null")
             # The constants block is rendered as a nested mapping.
             lines.append("    constants:")
             for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
@@ -887,22 +1045,42 @@ def main(argv: list[str] | None = None) -> int:
     # entry.event_type_const stays None and templates fall back to inline
     # string literals — defeating Phase C's slugs-as-source-of-truth contract.
     slug_inv = load_slug_inventory(Path(args.slug_inventory))
+
+    # Task 12: build env-wire tasks FIRST (was after build_tasks) so the
+    # service's stub anchor — its (emit_path, import_path) — is available to
+    # both the per-callsite slugs import path (build_tasks) and the per-product
+    # slugs_emit_path (build_slugs_emit_tasks). Both derive from the SAME anchor
+    # so the emitted slugs file's package matches the import that references it.
+    env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
+    anchor = stub_anchor(env_wire_tasks)
+
+    # Mirror build_tasks' primary-language selection so build_slugs_emit_tasks
+    # picks the right file extension (py/ts/go) for the swapped slugs basename.
+    repo = signed.get("repo", {}) if isinstance(signed, dict) else {}
+    languages = repo.get("languages", []) if isinstance(repo, dict) else []
+    primary_lang = (
+        languages[0] if languages
+        else (repo_profile.get("language", "python")
+              if isinstance(repo_profile, dict) else "python")
+    )
+
     tasks = build_tasks(
         cost_inv, usage_inv, omap, snapshot, signed, repo_profile,
         attribution_defaults=attribution_defaults,
         attribution_overrides=attribution_overrides,
         slug_inventory=slug_inv,
+        anchor=anchor,
     )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
         return 1
 
-    # Phase 1.7 env-wire tasks (Phase B).
-    env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
     # Phase 1.8 slugs-emit tasks (Phase C). slug_inv was loaded BEFORE
     # build_tasks above so build_tasks could resolve per-callsite slug
-    # constants — reuse the same inventory here.
-    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv)
+    # constants — reuse the same inventory here. Task 12: pass the language +
+    # stub anchor so each task's slugs_emit_path lands beside the customer's
+    # real config (None when no single anchor — render_artifacts falls back).
+    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv, primary_lang, anchor)
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

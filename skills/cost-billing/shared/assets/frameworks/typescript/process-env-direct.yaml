@@ -1,0 +1,18 @@
+id: ts-process-env-direct
+language: typescript
+framework: process-env-direct
+detection:
+  kind: regex
+  import_signals: []
+  structural_signals: ["process\\.env\\.[A-Z_]+"]
+  detector: ""
+  priority: 70
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs-settings
+  anchor: detected_config_dir
+  import_rule: ts_alias
+  fallback_dir: "src/services"
+scripts: ["config_wire", "render_artifacts"]

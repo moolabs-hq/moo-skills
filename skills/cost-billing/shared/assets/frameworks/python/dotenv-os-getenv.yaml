@@ -1,0 +1,18 @@
+id: python-dotenv-os-getenv
+language: python
+framework: dotenv-os-getenv
+detection:
+  kind: regex
+  import_signals: ["from\\s+dotenv\\s+import\\s+load_dotenv", "load_dotenv\\("]
+  structural_signals: ["os\\.(getenv|environ\\.get|environ\\[)"]
+  detector: ""
+  priority: 70
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]

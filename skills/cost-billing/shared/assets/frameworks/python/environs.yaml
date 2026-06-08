@@ -1,0 +1,18 @@
+id: python-environs
+language: python
+framework: environs
+detection:
+  kind: regex
+  import_signals: ["from\\s+environs\\s+import\\s+Env"]
+  structural_signals: ["Env\\(\\)", "env\\.(str|int|bool|list)\\("]
+  detector: ""
+  priority: 78
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]

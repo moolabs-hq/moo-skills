@@ -44,11 +44,13 @@ import {
 
    IMPORTANT: as of PR #4 round-2 fix, `_TS_PATTERN_ACCESSORS` in
    config_wire.py is INTENTIONALLY EMPTY — all recognized TS patterns
-   (zod-env-schema / process-env-direct / env-var-library) route to
+   (zod-env-schema / process-env-direct / env-var-library / convict) route to
    stub mode because their accessors don't compose with the unconditional
-   `getSettings` import below. The stub Settings template at
-   `_STUB_EMIT_PATHS["typescript"]` exports getSettings(), so the import
-   resolves correctly under stub mode (the only mode TS currently uses).
+   `getSettings` import below. The stub Settings module exports getSettings()
+   and is emitted at the inventory-derived `emit_path` (beside the detected
+   config). The import below is `env_config.settings_import_path` — a `@/`-
+   aliased ABSOLUTE path (strategies.ts_alias), so it resolves to the stub from
+   this helper's location regardless of where the config lives.
 
    Future enhancement: pattern-aware template variants that import
    `env` / bare consts for direct-export patterns. Until then, do NOT

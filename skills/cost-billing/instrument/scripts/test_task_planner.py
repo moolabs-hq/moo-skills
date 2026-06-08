@@ -552,5 +552,225 @@ class SlugResolutionRobustToMissingProductSlug(unittest.TestCase):
         self.assertIn("multiple products", stderr.getvalue())
 
 
+class SlugsPathFromImportRule(unittest.TestCase):
+    def test_slugs_import_path_uses_strategies_rule(self):
+        # anchor_dir is the SERVICE-RELATIVE dir of the detected config; src/ is stripped
+        path = tp.slugs_import_path("python", "billing", anchor_dir="src/myapp")
+        self.assertEqual(path, "myapp.slugs_billing")
+
+    def test_slugs_import_path_app_layout(self):
+        self.assertEqual(tp.slugs_import_path("python", "billing", anchor_dir="app"),
+                         "app.slugs_billing")
+
+    def test_slugs_emit_path_from_stub(self):
+        # given the service's stub emit_path, the slugs file is a sibling
+        emit, imp = tp.slugs_paths_from_stub(
+            "services/svc/src/myapp/moolabs_settings.py", "myapp.moolabs_settings",
+            "billing", "py")
+        self.assertEqual(emit, "services/svc/src/myapp/slugs_billing.py")
+        self.assertEqual(imp, "myapp.slugs_billing")
+
+    def test_slugs_paths_from_stub_bare_import_segment(self):
+        # a bare (no-dot) stub import → whole segment replaced
+        emit, imp = tp.slugs_paths_from_stub(
+            "moolabs_settings.py", "moolabs_settings", "billing", "py")
+        self.assertEqual(emit, "slugs_billing.py")
+        self.assertEqual(imp, "slugs_billing")
+
+    def test_slugs_paths_from_stub_hyphenated_product(self):
+        # hyphens in product → underscores in both basename + import segment
+        emit, imp = tp.slugs_paths_from_stub(
+            "app/moolabs_settings.py", "app.moolabs_settings", "my-product", "py")
+        self.assertEqual(emit, "app/slugs_my_product.py")
+        self.assertEqual(imp, "app.slugs_my_product")
+
+
+class StubAnchorDerivation(unittest.TestCase):
+    """Task 12: stub_anchor picks the SOLE stub-mode env-wire task with a
+    non-null stub_emit_path. Zero or >1 distinct stub → None (legacy fallback),
+    since the inventory carries no product→service edge to disambiguate."""
+
+    def _stub(self, slug, emit, imp, mode="stub"):
+        return tp.EnvWireTask(
+            task_id=f"ew_{slug}", service_slug=slug, mode=mode,
+            settings_import_path=imp, api_key_accessor="a",
+            stub_emit_path=emit, deployment_stubs=[],
+        )
+
+    def test_single_stub_yields_anchor(self):
+        ewt = [self._stub("svc", "services/svc/src/myapp/moolabs_settings.py",
+                           "myapp.moolabs_settings")]
+        self.assertEqual(
+            tp.stub_anchor(ewt),
+            ("services/svc/src/myapp/moolabs_settings.py", "myapp.moolabs_settings"),
+        )
+
+    def test_no_env_wire_tasks_returns_none(self):
+        self.assertIsNone(tp.stub_anchor(None))
+        self.assertIsNone(tp.stub_anchor([]))
+
+    def test_all_modify_mode_returns_none(self):
+        # modify mode has no stub file to swap on → no anchor.
+        ewt = [self._stub("svc", None, "app.config", mode="modify")]
+        self.assertIsNone(tp.stub_anchor(ewt))
+
+    def test_multiple_distinct_stubs_anchors_on_first_not_hardcode(self):
+        # F2: multi-service must anchor on a REAL customer stub (the FIRST),
+        # NEVER fall back to the app/services/moolabs literal.
+        ewt = [
+            self._stub("a", "services/a/app/moolabs_settings.py", "a.moolabs_settings"),
+            self._stub("b", "services/b/app/moolabs_settings.py", "b.moolabs_settings"),
+        ]
+        anchor = tp.stub_anchor(ewt)
+        self.assertEqual(anchor, ("services/a/app/moolabs_settings.py", "a.moolabs_settings"))
+        self.assertNotIn("app/services/moolabs", anchor[0])
+
+    def test_duplicate_stub_path_collapses_to_single_anchor(self):
+        # same stub_emit_path twice (idempotent) → still a single anchor.
+        ewt = [
+            self._stub("a", "app/moolabs_settings.py", "app.moolabs_settings"),
+            self._stub("a2", "app/moolabs_settings.py", "app.moolabs_settings"),
+        ]
+        self.assertEqual(
+            tp.stub_anchor(ewt), ("app/moolabs_settings.py", "app.moolabs_settings"))
+
+
+class BuildSlugsEmitTasksAnchor(unittest.TestCase):
+    """Task 12: with a stub anchor, each SlugsEmitTask.slugs_emit_path is a
+    sibling of the stub (real config package); without one it stays None so
+    render_artifacts falls back to its legacy convention."""
+
+    def _inv(self):
+        return {"generated_at": "2026-06-06T00:00:00+00:00",
+                "products": [{"product_slug": "billing", "constants": {}}]}
+
+    def test_anchor_sets_slugs_emit_path(self):
+        anchor = ("services/svc/src/myapp/moolabs_settings.py", "myapp.moolabs_settings")
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", anchor)
+        self.assertEqual(tasks[0].slugs_emit_path,
+                         "services/svc/src/myapp/slugs_billing.py")
+
+    def test_no_anchor_leaves_slugs_emit_path_none(self):
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", None)
+        self.assertIsNone(tasks[0].slugs_emit_path)
+
+    def test_legacy_default_signature_still_works(self):
+        # build_slugs_emit_tasks(inventory) — language/anchor default → no path.
+        tasks = tp.build_slugs_emit_tasks(self._inv())
+        self.assertIsNone(tasks[0].slugs_emit_path)
+        self.assertEqual(tasks[0].product_slug, "billing")
+
+    def test_typescript_emit_stays_none_matching_import_gate(self):
+        # IMP-1: TS/Go slugs EMIT must be gated to legacy exactly like the
+        # IMPORT (_slugs_import_for_entry is python-only) — else the slugs file
+        # is written where no TS callsite imports it. Anchor-derived TS/Go is a
+        # follow-up; until then emit AND import both use the legacy convention.
+        anchor = ("src/moolabs-settings.ts", "@/moolabs-settings")
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "typescript", anchor)
+        self.assertIsNone(tasks[0].slugs_emit_path)
+        # The per-callsite import is also legacy for TS → emit + import agree.
+        self.assertEqual(
+            tp._slugs_import_for_entry("typescript", "billing", anchor),
+            tp._slugs_import_path_for("typescript", "billing"))
+
+    def test_go_emit_stays_none_matching_import_gate(self):
+        anchor = ("internal/conf/settings.go", "internal/conf")
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "go", anchor)
+        self.assertIsNone(tasks[0].slugs_emit_path)
+
+
+class BuildTasksAnchorDerivedImport(unittest.TestCase):
+    """Task 12: build_tasks' per-callsite slugs_import_path is anchor-derived
+    for Python (so the import targets the slugs module emitted beside the
+    stub), but falls back to the legacy convention for TS/Go (a dotted swap
+    corrupts @/ aliases / slash paths)."""
+
+    _slug_inv = {"products": [{"product_slug": "billing", "constants": {
+        "EVENT_TYPE": [{"name": "SEAT_ASSIGNED", "value": "seat.assigned"}],
+        "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": []}}]}
+
+    def test_python_callsite_import_is_anchor_derived(self):
+        usage_inv = {"entries": [{
+            "file": "services/svc/src/myapp/seat.py", "line": 10,
+            "workflow_id": "seat.assigned", "event_type": "seat.assigned",
+            "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=self._slug_inv,
+            anchor=("services/svc/src/myapp/moolabs_settings.py",
+                    "myapp.moolabs_settings"))
+        self.assertEqual(
+            tasks[0].inserts[0].entry["slugs_import_path"], "myapp.slugs_billing")
+
+    def test_typescript_callsite_import_falls_back_to_legacy(self):
+        usage_inv = {"entries": [{
+            "file": "src/seat.ts", "line": 5,
+            "workflow_id": "seat.assigned", "event_type": "seat.assigned",
+            "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["typescript"], "frameworks": ["express"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "typescript", "framework": "express"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=self._slug_inv,
+            anchor=("src/moolabs-settings.ts", "@/moolabs-settings"))
+        self.assertEqual(
+            tasks[0].inserts[0].entry["slugs_import_path"],
+            "@/services/moolabs/slugs_billing")
+
+    def test_no_anchor_python_uses_legacy(self):
+        usage_inv = {"entries": [{
+            "file": "app/seat.py", "line": 10,
+            "workflow_id": "seat.assigned", "event_type": "seat.assigned",
+            "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=self._slug_inv, anchor=None)
+        self.assertEqual(
+            tasks[0].inserts[0].entry["slugs_import_path"],
+            "app.services.moolabs.slugs_billing")
+
+
+class EmitTasksYamlSlugsEmitPath(unittest.TestCase):
+    """Task 12: emit_tasks_yaml writes slugs_emit_path into each
+    slugs_emit_tasks entry (quoted), or null when absent, so Task 13
+    (render_artifacts) can read it for the slugs file destination."""
+
+    def test_slugs_emit_path_round_trips(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "tasks.yaml"
+            sets = [tp.SlugsEmitTask(
+                task_id="slugs_emit_001_billing", product_slug="billing",
+                constants={}, generated_at="2026-06-06T00:00:00+00:00",
+                slugs_emit_path="services/svc/src/myapp/slugs_billing.py")]
+            tp.emit_tasks_yaml([], out, slugs_emit_tasks=sets)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["slugs_emit_tasks"][0]["slugs_emit_path"],
+                "services/svc/src/myapp/slugs_billing.py")
+
+    def test_absent_slugs_emit_path_serializes_as_null(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "tasks.yaml"
+            sets = [tp.SlugsEmitTask(
+                task_id="slugs_emit_001_billing", product_slug="billing",
+                constants={}, generated_at="2026-06-06T00:00:00+00:00",
+                slugs_emit_path=None)]
+            tp.emit_tasks_yaml([], out, slugs_emit_tasks=sets)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertIsNone(parsed["slugs_emit_tasks"][0]["slugs_emit_path"])
+
+
 if __name__ == "__main__":
     unittest.main()

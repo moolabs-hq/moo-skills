@@ -1,0 +1,18 @@
+id: ts-convict
+language: typescript
+framework: convict
+detection:
+  kind: regex
+  import_signals: ["import\\s+convict\\s+from\\s+['\"]convict['\"]", "from\\s+['\"]convict['\"]"]
+  structural_signals: ["convict\\(\\{"]
+  detector: ""
+  priority: 90
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs-settings
+  anchor: detected_config_dir
+  import_rule: ts_alias
+  fallback_dir: "src/services"
+scripts: ["config_wire", "render_artifacts"]

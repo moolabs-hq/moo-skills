@@ -510,6 +510,37 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
 
 **Task granularity = per file.** Atomic commit boundary, single rendering pass per file (so `python -m py_compile` can verify the file before the task completes), parallelizable across files. Per-callsite would over-fragment; per-service would re-introduce the big-context problem the Codex review caught.
 
+### Phase 2c-render: Emit env-wiring, slugs, and deployment artifacts (DETERMINISTIC — run the driver, do NOT hand-author)
+
+**Why this exists** (added 2026-06-08 after the moo-arc dogfood caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
+
+Run the deterministic render driver — it enumerates every template referenced by `tasks.yaml`'s `env_wire_tasks` / `slugs_emit_tasks` and renders each to the customer repo:
+
+```bash
+python scripts/render_artifacts.py \
+    --tasks .moolabs/codemod/tasks.yaml \
+    --repo-root <customer-repo-root>
+# add --dry-run first to print the manifest without writing
+```
+
+It is driven by the winning framework node + the DERIVED paths in the
+inventory. Run each service's node `scripts` in order — `scripts/dispatch.py`
+is the helper that gates this ("pick the specific framework context, run only
+its scripts"). Today every config-axis node declares the same
+`scripts: ["config_wire", "render_artifacts"]`, so you run both per service; the
+per-node `scripts` list becomes selective when a later framework (e.g. a
+deployment-framework node) declares a different set — divergence is then a node
+data change, not a code change. Emit paths are **derived from the customer's
+detected config location** (`env-routing-inventory`'s
+`emit_path`/`import_path`), NEVER hardcoded `app/services/`.
+
+It emits, honoring each deployment stub's `mode`:
+- **stub Settings module** (`<lang>-moolabs-settings.<ext>.j2` → the inventory's `emit_path`, beside the detected config) — only when the node's `wiring.mode` is `stub`.
+- **per-product slugs modules** (`slugs-<lang>.j2` → the same package as the service's stub, i.e. the derived `slugs_emit_path`, NOT a hardcoded `app/services/moolabs/`) — one per `slugs_emit_task`. **Two known limitations to surface to the developer when they apply:** (a) *multi-service* — the inventory has no product→service edge, so when 2+ services are stubbed, ALL products' slugs anchor on the FIRST stubbed service's package; a product whose callsites live in a different service must have its slugs module moved into that service's package (or made importable repo-wide). (b) *TS/Go* — per-product slugs path derivation is python-only today; TS/Go fall back to the legacy `services/moolabs/` convention on BOTH the emit and the import side (so they stay consistent, just not customer-layout-derived).
+- **deployment stubs** — `new_file` writes (e.g. `terraform-moolabs.tf.j2` → `moolabs.tf`), but NEVER clobbers a customer-authored file (a pre-existing file without the `/cost-billing-instrument` generated marker is skipped to the PR checklist); `append` appends to the existing file **idempotently** (skips if `MOOLABS_API_KEY` is already present); `checklist_only` (and any kind with no shipped template, i.e. `docker-compose` / `Dockerfile`) writes nothing and is surfaced as a PR-body checklist item.
+
+**Do NOT hand-author any artifact the driver renders.** The templates are the source of truth; the language is inferred from the service's tasks and the emit paths are node-derived from the detected config. The helper module (`moolabs_client.*`) is the one artifact rendered separately (Phase 2 above) — everything else flows through this driver. After it runs, Phase 2d applies the per-callsite code inserts.
+
 ### Phase 2d: Dispatch tasks to focused subagent contexts
 
 For each task in `tasks.yaml`, fire a subagent via the `Agent` tool with `subagent_type=general-purpose` and a focused prompt:

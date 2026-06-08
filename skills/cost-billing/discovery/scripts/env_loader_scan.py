@@ -8,13 +8,14 @@ recognized pattern (or stub_required=true when none found) and the
 deployment-surface insertion points (Terraform, k8s, docker-compose,
 .env.example).
 
-Pattern catalog lives at shared/assets/env-loader-patterns.yaml.
+Detection is driven by the framework-capability tree (the framework-node
+registry) at shared/assets/frameworks/<lang>/<fw>.yaml — the single source of
+truth for env-loader patterns.
 
 Usage:
     python env_loader_scan.py \\
         --signed-yaml .moolabs/chain/04-final.signed.yaml \\
         --customer-context-dir .moolabs/customer-context \\
-        --catalog skills/cost-billing/shared/assets/env-loader-patterns.yaml \\
         [--repo-root .]
 """
 
@@ -27,69 +28,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The transitive pydantic-settings base-resolution detector lives in the shared
+# framework-capability tree (shared/scripts/strategies.py), exposed via its
+# DETECTORS registry. env_loader_scan reuses it through a thin ScanResult shim.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+import strategies  # noqa: E402
+import framework_registry  # noqa: E402
 
-# ──────────────────────────────────────────────────────────────────────
-# Catalog loading
-# ──────────────────────────────────────────────────────────────────────
-
-@dataclass
-class Pattern:
-    id: str
-    language: str
-    detection_signal: str
-    import_signals: list[str]
-    structural_signals: list[str]
-    wire_target: dict[str, str]
-    priority: int
-
-
-def load_pattern_catalog(path: Path) -> list[Pattern]:
-    """Load env-loader-patterns.yaml. Uses PyYAML when available, falls back
-    to a minimal hand-rolled parser otherwise (matches sdk_snapshot.py's
-    no-runtime-dep approach for the codemod environment).
-    """
-    try:
-        import yaml
-        data = yaml.safe_load(path.read_text())
-    except ImportError:
-        data = _hand_rolled_yaml_load(path)
-
-    out: list[Pattern] = []
-    for entry in data.get("patterns", []):
-        out.append(Pattern(
-            id=entry["id"],
-            language=entry["language"],
-            detection_signal=entry["detection_signal"],
-            import_signals=list(entry.get("import_signals", []) or []),
-            structural_signals=list(entry.get("structural_signals", []) or []),
-            wire_target=entry["wire_target"],
-            priority=int(entry.get("priority", 50)),
-        ))
-    return out
-
-
-def group_patterns_by_language(patterns: list[Pattern]) -> dict[str, list[Pattern]]:
-    """Group patterns by language, sorted by priority descending within each."""
-    by_lang: dict[str, list[Pattern]] = {"python": [], "typescript": [], "go": []}
-    for p in patterns:
-        by_lang.setdefault(p.language, []).append(p)
-    for lang in by_lang:
-        by_lang[lang].sort(key=lambda p: -p.priority)
-    return by_lang
-
-
-def _hand_rolled_yaml_load(path: Path) -> dict:
-    """Minimal YAML reader for the pattern catalog when PyYAML is absent.
-    Only supports the catalog's known shape; not a general YAML parser.
-    """
-    # Phase A leans on PyYAML being available in the test environment (smoke
-    # already imports yaml). This fallback is here so the script can run in
-    # a customer's codemod environment that lacks PyYAML — Phase B's instrument
-    # side will revisit this.
-    raise NotImplementedError(
-        "PyYAML required for env_loader_scan.py in Phase A. "
-        "Install pyyaml or run from the smoke environment."
-    )
+# Framework-capability tree node files. load_registry(_FRAMEWORKS_DIR) returns
+# {language: {framework: Node}}; each Node carries detection.kind ("regex" |
+# "code"), detection.import_signals/structural_signals/priority (regex nodes),
+# and detection.detector (code nodes — a key into strategies.DETECTORS).
+_FRAMEWORKS_DIR = Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -108,7 +58,7 @@ class ScanResult:
     wire_target: dict[str, str] = field(default_factory=dict)
 
 
-# Confidence-band thresholds. Matches catalog comment.
+# Confidence-band thresholds.
 _HIGH_THRESHOLD = 0.85
 _MEDIUM_THRESHOLD = 0.50
 _LOW_THRESHOLD = 0.30
@@ -257,60 +207,42 @@ def _go_insert_line(text: str, opening_pattern: str) -> int:
     return matching[-1]
 
 
-def scan_file(path: Path, patterns: list[Pattern]) -> ScanResult | None:
-    """Scan a single file against the patterns. Return the highest-confidence
-    match, or None if no pattern reaches the LOW threshold."""
-    try:
-        text = path.read_text(errors="ignore")
-    except OSError:
+# ──────────────────────────────────────────────────────────────────────
+# Transitive pydantic-settings detection (Dogfood #1a) — moved to
+# shared/scripts/strategies.py (DETECTORS registry). The detection LOGIC now
+# lives there and returns a bool; this thin shim reconstructs the ScanResult
+# that the registry scan expects, using the local _python_insert_line for the
+# class's insertion line. See strategies._first_transitive_settings_class.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _detect_settings_subclass(
+    path: Path, text: str, search_roots: list[Path],
+) -> ScanResult | None:
+    """If `path` defines a class that transitively extends BaseSettings via a
+    project base (resolved across files), return a high-confidence
+    python-pydantic-settings-subclass ScanResult, else None. Classes that
+    extend BaseSettings DIRECTLY are left to the precise v1/v2 regex patterns
+    (which carry the modify-mode accessor).
+
+    Detection is delegated to strategies; this shim wraps the matched class +
+    bases back into the ScanResult shape the registry scan consumes."""
+    match = strategies._first_transitive_settings_class(path, text, search_roots)
+    if match is None:
         return None
-
-    best: ScanResult | None = None
-    best_score: float = 0.0
-
-    for p in patterns:
-        import_score, import_evidence = _signal_score(text, p.import_signals)
-        struct_score, struct_evidence = _signal_score(text, p.structural_signals)
-
-        # Combine: structural weighted higher than imports.
-        # Both → 0.95 (high); structural only → 0.65 (medium);
-        # import only → 0.35 (low); neither → 0.0
-        if import_score > 0 and struct_score > 0:
-            score = 0.95
-        elif struct_score > 0:
-            score = 0.65
-        elif import_score > 0:
-            score = 0.35
-        else:
-            score = 0.0
-
-        if score < _LOW_THRESHOLD:
-            continue
-
-        if score > best_score:
-            best_score = score
-            # For class-based Python patterns, derive insertion line from the class
-            line_to_insert = 1
-            if p.structural_signals:
-                if p.language == "python":
-                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
-                elif p.language == "typescript":
-                    line_to_insert = _ts_insert_line(text, p.structural_signals[0])
-                elif p.language == "go":
-                    line_to_insert = _go_insert_line(text, p.structural_signals[0])
-                else:
-                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
-            best = ScanResult(
-                pattern_id=p.id,
-                file=str(path),
-                line_to_insert=line_to_insert,
-                confidence=_band(score),
-                confidence_score=score,
-                evidence=import_evidence + struct_evidence,
-                wire_target=p.wire_target,
-            )
-
-    return best
+    cname, bases = match
+    line = _python_insert_line(text, rf"class\s+{re.escape(cname)}\s*\(")
+    return ScanResult(
+        pattern_id="python-pydantic-settings-subclass",
+        file=str(path),
+        line_to_insert=line,
+        confidence="high",
+        confidence_score=0.95,
+        evidence=[
+            f"class {cname}({', '.join(bases)}) -> BaseSettings (transitive)"
+        ],
+        wire_target={"kind": "add_pydantic_settings_field"},
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -331,24 +263,187 @@ _SKIP_DIRS = frozenset({
 })
 
 
-def scan_service(
+def _is_excluded_candidate(path: Path) -> bool:
+    """Path-only candidate-exclusion predicate used by
+    scan_service_via_registry. Returns True iff `path` must NOT be considered as
+    the customer's app-config source.
+
+    NOTE: caller still applies `path.is_file()` (first) and the per-language
+    extension filter inline — those aren't path-name-only and don't belong
+    in this predicate.
+
+    Excludes:
+      - any segment in _SKIP_DIRS (vendored deps, build dirs, VCS, caches)
+      - test / smoke files across ALL languages (a stray env access in a
+        test must never outrank the real settings module)
+      - the skill's OWN previously-emitted artifacts
+        (moolabs_settings.* / moolabs_client.* / slugs_*.*) — else a re-run
+        would wire the codemod into its own output (circular)
+    """
+    if any(part in _SKIP_DIRS for part in path.parts):
+        return True
+    _nm = path.name
+    if (
+        _nm.startswith("test_")                                  # py
+        or _nm == "conftest.py"                                  # py
+        or re.search(r"_test\.(py|go)$", _nm)                    # py / go
+        or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
+        or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
+    ):
+        return True
+    if (
+        re.match(r"^moolabs_settings\.(py|ts|go)$", _nm)
+        or re.match(r"^moolabs_client\.(py|ts|go)$", _nm)
+        or re.match(r"^slugs_[\w-]+\.(py|ts|go)$", _nm)
+    ):
+        return True
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Registry-driven scan (framework-capability tree)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Drives off framework_registry Nodes (shared/assets/frameworks/<lang>/<fw>.yaml)
+# — the single source of truth for env-loader detection. Reuses the
+# _signal_score banding, the code-detector fallback, the _is_excluded_candidate
+# exclusions, and the tiebreak (confidence_score desc -> detection.priority desc
+# -> path depth asc).
+
+
+def scan_file_via_registry(
+    path: Path,
+    language: str,
+    nodes: list | None = None,
+    search_roots: list[Path] | None = None,
+) -> ScanResult | None:
+    """Scan a single file against the language's framework-tree Nodes. Returns
+    the best ScanResult (whose pattern_id is the winning node's id), or None.
+
+    Two-phase:
+      1. REGEX nodes, evaluated priority-desc, banded by _signal_score:
+         import + structural -> 0.95 (high); structural-only -> 0.65 (medium);
+         import-only -> 0.35 (low); below _LOW_THRESHOLD -> skip. Strict-greater
+         keeps the first node on a score tie (so the higher-priority node wins).
+      2. CODE nodes, run only as a fallback when no regex node reached the HIGH
+         band (best is None or best.confidence_score < _HIGH_THRESHOLD), and
+         only replacing when strictly greater. The detector
+         (strategies.DETECTORS[...]) returns bool; the matched class name (for
+         line_to_insert) and bases come from _first_transitive_settings_class.
+    """
+    if nodes is None:
+        reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+        nodes = list(reg.get(language, {}).values())
+    if not nodes:
+        return None
+
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return None
+
+    regex_nodes = [n for n in nodes if n.detection.get("kind") == "regex"]
+    code_nodes = [n for n in nodes if n.detection.get("kind") == "code"]
+
+    # Phase 1 — regex band scoring, highest priority first (so a same-score tie
+    # is won by the higher-priority node, since we keep on strict-greater).
+    regex_nodes.sort(key=lambda n: -int(n.detection.get("priority", 0)))
+
+    best: ScanResult | None = None
+    best_score: float = 0.0
+
+    for node in regex_nodes:
+        import_signals = list(node.detection.get("import_signals", []) or [])
+        structural_signals = list(node.detection.get("structural_signals", []) or [])
+        import_score, import_evidence = _signal_score(text, import_signals)
+        struct_score, struct_evidence = _signal_score(text, structural_signals)
+
+        if import_score > 0 and struct_score > 0:
+            score = 0.95
+        elif struct_score > 0:
+            score = 0.65
+        elif import_score > 0:
+            score = 0.35
+        else:
+            score = 0.0
+
+        if score < _LOW_THRESHOLD:
+            continue
+
+        if score > best_score:
+            best_score = score
+            line_to_insert = 1
+            if structural_signals:
+                if language == "python":
+                    line_to_insert = _python_insert_line(text, structural_signals[0])
+                elif language == "typescript":
+                    line_to_insert = _ts_insert_line(text, structural_signals[0])
+                elif language == "go":
+                    line_to_insert = _go_insert_line(text, structural_signals[0])
+                else:
+                    line_to_insert = _python_insert_line(text, structural_signals[0])
+            best = ScanResult(
+                pattern_id=node.id,
+                file=str(path),
+                line_to_insert=line_to_insert,
+                confidence=_band(score),
+                confidence_score=score,
+                evidence=import_evidence + struct_evidence,
+                wire_target={},
+            )
+
+    # Phase 2 — code detectors, only when no regex node reached the HIGH band.
+    if best is None or best.confidence_score < _HIGH_THRESHOLD:
+        for node in code_nodes:
+            detector_name = node.detection.get("detector")
+            detector = strategies.DETECTORS.get(detector_name)
+            if detector is None:
+                continue
+            roots = search_roots or [path.parent]
+            if not detector(path, text, roots):
+                continue
+            # Recover the matched class name for the insertion line. The
+            # detectors are bool-returning; _first_transitive_settings_class
+            # gives back (class_name, bases) for the same match.
+            match = strategies._first_transitive_settings_class(path, text, roots)
+            line_to_insert = 1
+            evidence: list[str] = []
+            if match is not None:
+                cname, bases = match
+                line_to_insert = _python_insert_line(
+                    text, rf"class\s+{re.escape(cname)}\s*\("
+                )
+                evidence = [
+                    f"class {cname}({', '.join(bases)}) -> BaseSettings (transitive)"
+                ]
+            sub = ScanResult(
+                pattern_id=node.id,
+                file=str(path),
+                line_to_insert=line_to_insert,
+                confidence="high",
+                confidence_score=0.95,
+                evidence=evidence,
+                wire_target={},
+            )
+            if best is None or sub.confidence_score > best.confidence_score:
+                best = sub
+
+    return best
+
+
+def scan_service_via_registry(
     service_root: Path,
     language: str,
-    catalog: list[Pattern],
+    search_roots: list[Path] | None = None,
 ) -> ScanResult | None:
-    """Walk a service directory and return the best env-loader-pattern match
-    found, or None if no file passes the LOW threshold.
-
-    Conflict resolution (sort_key order):
-      1. Highest confidence_score wins.
-      2. Among equal scores, highest catalog priority wins.
-      3. Among equal priority, the SHALLOWEST path wins (closest to the
-         service root = most canonical config location).
-         e.g. `app/config.py` beats `app/legacy/old_config.py`.
+    """Walk a service directory and return the best framework-tree node match,
+    or None. Exclusions (_is_excluded_candidate), per-language extension filter,
+    and tiebreak (confidence_score desc -> node detection.priority desc -> path
+    depth asc).
     """
-    by_lang = group_patterns_by_language(catalog)
-    patterns = by_lang.get(language, [])
-    if not patterns:
+    reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+    nodes = list(reg.get(language, {}).values())
+    if not nodes:
         return None
 
     extensions = _EXTENSION_BY_LANGUAGE.get(language, ())
@@ -359,36 +454,24 @@ def scan_service(
     for path in service_root.rglob("*"):
         if not path.is_file():
             continue
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        # Test files are NEVER the canonical app-config source — across ALL
-        # supported languages (Python/TS/JS/Go) a stray env access in a test
-        # (os.getenv / process.env / os.Getenv) must not outrank the real
-        # settings module. (Fixes the v0.3 misdetection of a test file over the
-        # real config when the real Settings extends a custom base the pattern's
-        # structural signal doesn't match.)
-        _nm = path.name
-        if (
-            _nm.startswith("test_")                                  # py
-            or _nm == "conftest.py"                                  # py
-            or re.search(r"_test\.(py|go)$", _nm)                    # py / go
-            or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
-            or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
-        ):
+        if _is_excluded_candidate(path):
             continue
         if path.suffix not in extensions:
             continue
-        hit = scan_file(path, patterns)
+        hit = scan_file_via_registry(
+            path, language, nodes=nodes,
+            search_roots=search_roots or [service_root],
+        )
         if hit is not None:
             candidates.append(hit)
 
     if not candidates:
         return None
 
-    # Sort by: confidence_score desc, then by priority of the matched
-    # pattern desc, then by path depth asc (shallower path = more canonical
-    # config location).
-    priority_by_id = {p.id: p.priority for p in catalog}
+    # Priority comes straight from each node's detection.priority — the code
+    # subclass node carries its declared 85 (no setdefault hack needed; the
+    # node IS in the registry now, unlike the old catalog).
+    priority_by_id = {n.id: int(n.detection.get("priority", 0)) for n in nodes}
 
     def sort_key(r: ScanResult) -> tuple:
         depth = r.file.count("/")
@@ -659,29 +742,124 @@ def scan_repo_level_deployment_surfaces(repo_root: Path) -> list[DeploymentSurfa
 # Inventory build
 # ──────────────────────────────────────────────────────────────────────
 
+# File extension per language — used to spell the derived emit artifact's
+# filename (basename + ext). Mirrors the language axis of _EXTENSION_BY_LANGUAGE
+# but yields the SINGLE canonical write extension (not the candidate-match set).
+_EMIT_EXT_BY_LANGUAGE = {
+    "python": ".py",
+    "typescript": ".ts",
+    "go": ".go",
+}
+
+# Conventional fallback (service-relative) emit dir + import path per language,
+# used ONLY when no config is detected (unrecognized). Matches the framework
+# nodes' emit.fallback_dir convention so a detected-vs-fallback artifact lands
+# in the same place a recognized config would route to.
+_FALLBACK_EMIT_BY_LANGUAGE = {
+    "python": ("app/services", "moolabs_settings", "app.services.moolabs_settings"),
+    "typescript": ("src/services", "moolabs_settings", "@/services/moolabs_settings"),
+    "go": ("internal/moolabsconfig", "settings", "internal/moolabsconfig"),
+}
+
+
+def _derive_emit_path(service_root_rel: str, emit_dir_rel: str, filename: str) -> str:
+    """Join service_root + service-relative emit dir + filename into a single
+    forward-slash repo-relative path, collapsing empty segments. A flat layout
+    (emit_dir_rel == "") yields service_root/filename."""
+    parts = [seg for seg in (service_root_rel.rstrip("/"), emit_dir_rel, filename) if seg]
+    return "/".join(parts)
+
+
 def _service_entry(
     repo_root: Path,
     service: dict,
     scan_root: Path,
-    catalog: list[Pattern],
+    catalog=None,
 ) -> dict:
-    """Build one services[] entry from a scan_service result + deployment
-    surfaces under the service's path."""
+    """Build one services[] entry from a registry scan result + deployment
+    surfaces under the service's path.
+
+    Detection runs off the framework-capability tree (scan_service_via_registry)
+    so each entry carries the winning node's id AND the DERIVED artifact paths
+    (emit_path / import_path) computed via the node's emit rule. The legacy
+    `catalog` arg is accepted but IGNORED — existing callers still pass one;
+    Task 9 removes the parameter."""
     language = service.get("language", "python")
-    result = scan_service(scan_root, language, catalog)
+    service_root_rel = service["root"]
+    # Emit/import anchor = the scan_root's repo-relative path, NOT service["root"].
+    # In per-service granularity these are equal (scan_root == repo_root/service
+    # root). In repo-wide granularity scan_root == repo_root/shared_config_path,
+    # and the stub must land beside the SHARED config (where its import resolves),
+    # not under each service tree — otherwise emit_path and import_path describe
+    # different trees and the customer-side import fails (PR #11 review F1).
+    scan_root_rel = (
+        str(scan_root.relative_to(repo_root))
+        if scan_root.is_relative_to(repo_root)
+        else service_root_rel
+    )
+    # search_roots include the repo root so a Settings base imported from a
+    # shared repo-level package (outside the service tree) still resolves for
+    # the transitive pydantic-settings detection (Dogfood #1a).
+    result = scan_service_via_registry(
+        scan_root, language, search_roots=[scan_root, repo_root]
+    )
 
     if result is None:
+        # No config detected → fallback artifact placement (spec: "fallback only
+        # when no config detected"). The per-language conventional dir matches
+        # the framework nodes' emit.fallback_dir.
+        fb_dir, fb_basename, fb_import = _FALLBACK_EMIT_BY_LANGUAGE.get(
+            language, _FALLBACK_EMIT_BY_LANGUAGE["python"]
+        )
+        ext = _EMIT_EXT_BY_LANGUAGE.get(language, ".py")
         app_config = {
             "pattern": "unrecognized",
+            "node_id": "",
             "confidence": "none",
             "evidence": [],
             "stub_required": True,
+            "emit_path": _derive_emit_path(scan_root_rel, fb_dir, fb_basename + ext),
+            "import_path": fb_import,
         }
     else:
         rel_file = str(Path(result.file).relative_to(repo_root)) \
             if Path(result.file).is_relative_to(repo_root) else result.file
+        node_id = result.pattern_id
+
+        # Locate the winning node in the registry to read its emit rule. The
+        # scan already loaded the registry; re-load here (load_registry re-globs
+        # + re-parses the node files — Task 9 can thread the loaded registry
+        # through to avoid the second load) and find the node by id within the
+        # service's language.
+        reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+        node = next(
+            (n for n in reg.get(language, {}).values() if n.id == node_id), None
+        )
+
+        emit_path = None
+        import_path = None
+        if node is not None:
+            # SCAN-ROOT-RELATIVE config path: result.file lives under scan_root
+            # (the scan rglob'd it), so relative_to(scan_root) is safe. The
+            # import rule strips package-root markers (src/) from this; the emit
+            # path re-anchors the SAME scan-root-relative dir under scan_root_rel
+            # so emit_path and import_path always describe ONE consistent tree
+            # (correct in both per-service and repo-wide granularity — F1).
+            service_rel = str(Path(result.file).relative_to(scan_root))
+            basename = node.emit["artifact_basename"]
+            emit_dir_rel, import_path = strategies.IMPORT_RULES[
+                node.emit["import_rule"]
+            ](service_rel, basename, "")
+            ext = _EMIT_EXT_BY_LANGUAGE.get(language, ".py")
+            emit_path = _derive_emit_path(
+                scan_root_rel, emit_dir_rel, basename + ext
+            )
+
         app_config = {
-            "pattern": result.pattern_id,
+            # Keep `pattern` == node_id for back-compat with consumers that read
+            # `pattern`; expose `node_id` as the canonical new field too.
+            "pattern": node_id,
+            "node_id": node_id,
             "file": rel_file,
             "line_to_insert": result.line_to_insert,
             "confidence": result.confidence,
@@ -689,6 +867,8 @@ def _service_entry(
             "evidence": result.evidence,
             "stub_required": result.confidence == "low",
             "wire_target": result.wire_target,
+            "emit_path": emit_path,
+            "import_path": import_path,
         }
 
     # Deployment surfaces — BOTH scopes:
@@ -747,12 +927,15 @@ def _service_entry(
 def build_inventory(
     repo_root: Path,
     services: list[dict],
-    catalog: list[Pattern],
     granularity: str,
     granularity_source: str,
     shared_config_path: str | None,
+    catalog=None,
 ) -> dict:
     """Build the env-routing-inventory dict that will be YAML-emitted.
+
+    Detection is registry-driven via _service_entry. The trailing `catalog`
+    arg is accepted for back-compat with existing callers but IGNORED.
 
     Granularity behavior:
       - per-service:  scan each service's root independently
@@ -765,6 +948,10 @@ def build_inventory(
                       see the degradation happened.
       - TBD:          per-service best-effort with granularity_source flag
     """
+    # Drop any stale source-file index from a prior in-process scan (F3): the
+    # index is keyed by path only, so a server-style caller re-scanning a mutated
+    # tree must start fresh. Within this run the index is rebuilt once per root.
+    strategies.clear_index_cache()
     if granularity == "repo-wide" and shared_config_path:
         scan_root = repo_root / shared_config_path
         service_entries: list[dict] = []
@@ -824,8 +1011,22 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
             ac = svc["app_config"]
             lines.append(f"    app_config:")
             lines.append(f"      pattern: {ac['pattern']}")
+            # node_id is the canonical framework-tree node id. Presence-guarded
+            # (`in`, not truthiness) so the unrecognized branch's empty-string
+            # node_id still emits as `node_id: ""`, and hand-built test dicts
+            # that omit it don't KeyError.
+            if "node_id" in ac:
+                nid = str(ac["node_id"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      node_id: "{nid}"')
             if ac.get("file"):
-                lines.append(f"      file: {ac['file']}")
+                # Quote+escape: `file` is an arbitrary customer FS path. Emitting
+                # it unquoted lets a legal path like `v #2/config.py` lose ` #...`
+                # to PyYAML's comment rule (SILENT truncation) — that corrupted
+                # path then flows into task_planner's modify-mode insert target
+                # (PR #11 review round 5). The sibling emit_path/import_path are
+                # already quoted; match them.
+                f_safe = str(ac['file']).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      file: "{f_safe}"')
                 lines.append(f"      line_to_insert: {ac['line_to_insert']}")
                 lines.append(f"      confidence: {ac['confidence']}")
                 lines.append(f"      confidence_score: {ac['confidence_score']}")
@@ -848,6 +1049,16 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
                 for k, v in ac["wire_target"].items():
                     v_str = str(v).replace('\\', '\\\\').replace('"', '\\"')
                     lines.append(f'        {k}: "{v_str}"')
+            # Derived artifact placement (Task 8): emit_path is the REPO-relative
+            # path the codemod writes the Settings artifact to; import_path is how
+            # the customer's code imports it. Presence-guarded so hand-built test
+            # dicts that omit them don't KeyError. Quote both (paths/dotted ids).
+            if "emit_path" in ac:
+                ep = str(ac["emit_path"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      emit_path: "{ep}"')
+            if "import_path" in ac:
+                ip = str(ac["import_path"]).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      import_path: "{ip}"')
 
             # PR #531 lesson: surface the gap when scanner found no infra
             # (no terraform / k8s / dockerfile at either scope). The
@@ -920,12 +1131,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
-    ap.add_argument("--catalog", required=True, help="path to env-loader-patterns.yaml")
     ap.add_argument("--repo-root", default=".")
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
-    catalog = load_pattern_catalog(Path(args.catalog))
     services, granularity, granularity_source, shared_config_path = \
         parse_services_and_granularity(Path(args.signed_yaml))
 
@@ -939,7 +1148,6 @@ def main(argv: list[str] | None = None) -> int:
     inventory = build_inventory(
         repo_root=repo_root,
         services=services,
-        catalog=catalog,
         granularity=granularity,
         granularity_source=granularity_source,
         shared_config_path=shared_config_path,

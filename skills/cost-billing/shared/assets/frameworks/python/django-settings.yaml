@@ -1,0 +1,21 @@
+id: python-django-settings
+language: python
+framework: django-settings
+detection:
+  kind: regex
+  import_signals: ["from\\s+django", "import\\s+django"]
+  # INSTALLED_APPS / SECRET_KEY are django-settings-specific. Bare DATABASES was
+  # dropped — a non-config constants module can have DATABASES = [...] and would
+  # otherwise false-match at high confidence (PR #11 review F6).
+  structural_signals: ["INSTALLED_APPS\\s*=", "SECRET_KEY\\s*="]
+  detector: ""
+  priority: 75
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]
