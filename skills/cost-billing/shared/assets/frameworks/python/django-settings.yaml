@@ -1,0 +1,18 @@
+id: python-django-settings
+language: python
+framework: django-settings
+detection:
+  kind: regex
+  import_signals: ["from\\s+django", "import\\s+django"]
+  structural_signals: ["(SECRET_KEY|INSTALLED_APPS|DATABASES)\\s*="]
+  detector: ""
+  priority: 75
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]

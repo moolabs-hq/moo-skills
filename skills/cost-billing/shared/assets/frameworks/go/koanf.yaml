@@ -1,0 +1,18 @@
+id: go-koanf
+language: go
+framework: koanf
+detection:
+  kind: regex
+  import_signals: ["github.com/knadh/koanf"]
+  structural_signals: ["koanf\\.New\\(", "k\\.Load\\("]
+  detector: ""
+  priority: 80
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: settings
+  anchor: detected_config_dir
+  import_rule: go_module
+  fallback_dir: "internal/moolabsconfig"
+scripts: ["config_wire", "render_artifacts"]
