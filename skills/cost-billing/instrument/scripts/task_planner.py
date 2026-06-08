@@ -876,6 +876,17 @@ def build_tasks(
                 enriched_entry["refund_unit"] = _coerce_derivation(_ru)
             elif pattern in ("usage-only", "sibling-pair"):
                 enriched_entry["refund_unit"] = {"unit": "event", "derivation": 1}
+            # Round-4 CRITICAL: the REVIEW comment derefs idempotency_anchor.confidence,
+            # but the cost-events schema marks `confidence` OPTIONAL on the anchor
+            # object (no required list). The `is defined and entry.idempotency_anchor`
+            # guard only checks the PARENT, so a schema-conformant anchor
+            # {handler, path_param} passes the guard then raises UndefinedError on the
+            # confidence SUB-key under StrictUndefined (sibling of the event_type
+            # CRITICAL — a two-level deref the parent guard doesn't cover). Guarantee
+            # the sub-key on any entry that carries an anchor.
+            _anchor = enriched_entry.get("idempotency_anchor")
+            if isinstance(_anchor, dict) and "confidence" not in _anchor:
+                enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),

@@ -136,6 +136,13 @@ class CallsiteRenderSmoke(unittest.TestCase):
                     self._assert_py_compiles(out, f"{tpl} {pattern} no-event_type")
                     self.assertNotIn('"None"', out)          # no bareword-None literal
                     self.assertIn("api.completion.openai-chat", out)  # workflow_id fallback
+            # TS got the identical event_type fallback fix — render-check it too
+            # (can't py_compile TS here; assert no crash + no 'None' literal).
+            for tpl in _TS_TEMPLATES:
+                with self.subTest(tpl=tpl, pattern=pattern):
+                    out = self._render(tpl, entry)
+                    self.assertNotIn("'None'", out)
+                    self.assertIn("api.completion.openai-chat", out)
 
     def test_python_sibling_pair_renders_and_compiles(self):
         for tpl in _PY_TEMPLATES:
@@ -260,6 +267,51 @@ class EndToEndPipeline(unittest.TestCase):
         flagged = any(i["entry"].get("cost_value_missing")
                       for t in reloaded["tasks"] for i in t["inserts"])
         self.assertTrue(flagged, "cost_value_missing must be flagged for the LLMPort entry")
+
+    def test_anchor_without_confidence_renders(self):
+        # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
+        # the `is defined and entry.idempotency_anchor` guard checks the PARENT, so a
+        # conformant anchor {handler, path_param} (no confidence) crashed the REVIEW
+        # comment deref under StrictUndefined. The producer now guarantees the
+        # sub-key. This goes build_tasks->emit->reload->render->py_compile on a
+        # sibling-pair cost entry whose anchor omits confidence.
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        import task_planner as tp
+        import io
+        import contextlib
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
+        cost_inv = {"entries": [{
+            "file": "app/x.py", "line": 5, "workflow_id": "a.b.c",
+            "classification": "sibling-pair", "product_slug": "p",
+            "cost_dimension": "llm_tokens", "cost_micros_source": "r.cm",
+            "idempotency_anchor": {"handler": "h", "path_param": "customer_id"}}]}  # NO confidence
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            tasks = tp.build_tasks(
+                cost_inv, {"entries": []}, {"edges": []}, {"capabilities": {}}, signed,
+                {"language": "python", "framework": "fastapi"},
+                attribution_defaults={"customer_id": "c", "request_id": "r"},
+                attribution_overrides=[], slug_inventory=None)
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "tasks.yaml"
+            tp.emit_tasks_yaml(tasks, dest)
+            reloaded = yaml.safe_load(dest.read_text())
+        ins = reloaded["tasks"][0]["inserts"][0]
+        self.assertIn("confidence", ins["entry"]["idempotency_anchor"])
+        out = self._render_contract(env, reloaded["tasks"][0]["template"], ins)
+        self.assertIn("REVIEW: idempotency anchor (confidence=", out)
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+            fh.write(out)
+            path = fh.name
+        try:
+            py_compile.compile(path, doraise=True)
+        finally:
+            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
