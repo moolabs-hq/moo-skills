@@ -243,6 +243,37 @@ class RenderAndWrite(unittest.TestCase):
                                 for m in manifest if m["dest"] == "infra/moolabs.tf"))
 
 
+class DerivedSlugsPath(unittest.TestCase):
+    def test_slugs_dest_comes_from_slugs_emit_path(self):
+        from pathlib import Path
+        tasks = {
+            "env_wire_tasks": [{"stub_emit_path": "services/svc/src/myapp/moolabs_settings.py",
+                                "mode": "stub", "service_slug": "svc"}],
+            "slugs_emit_tasks": [{"task_id": "s1", "product_slug": "billing",
+                                  "generated_at": "2026-06-08T00:00:00+00:00",
+                                  "constants": {},
+                                  "slugs_emit_path": "services/svc/src/myapp/slugs_billing.py"}],
+        }
+        jobs = ra.plan_render_jobs(tasks, _TEMPLATES_DIR, Path("/repo"))
+        slugs = [j for j in jobs if j.kind == "slugs"]
+        self.assertEqual(len(slugs), 1)
+        self.assertEqual(slugs[0].dest, "services/svc/src/myapp/slugs_billing.py")
+
+    def test_slugs_falls_back_when_no_emit_path(self):
+        from pathlib import Path
+        tasks = {
+            "env_wire_tasks": [{"stub_emit_path": "app/x/moolabs_settings.py",
+                                "mode": "stub", "service_slug": "svc"}],
+            "slugs_emit_tasks": [{"task_id": "s1", "product_slug": "billing",
+                                  "generated_at": "2026-06-08T00:00:00+00:00",
+                                  "constants": {}}],  # no slugs_emit_path
+        }
+        jobs = ra.plan_render_jobs(tasks, _TEMPLATES_DIR, Path("/repo"))
+        slugs = [j for j in jobs if j.kind == "slugs"]
+        self.assertEqual(len(slugs), 1)
+        self.assertTrue(slugs[0].dest.endswith("slugs_billing.py"))  # legacy fallback
+
+
 class StubTemplateMarkerContract(unittest.TestCase):
     """Every new_file template the driver overwrite-protects MUST render the
     generated marker, or a re-run would refuse to regenerate its own output."""

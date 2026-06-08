@@ -196,10 +196,15 @@ def plan_render_jobs(tasks: dict, templates_dir: Path, repo_root: Path) -> list[
 
     for st in tasks.get("slugs_emit_tasks") or []:
         product = st.get("product_slug", "default")
+        # Primary path: consume the task_planner-derived `slugs_emit_path`
+        # (repo-relative, co-located with the service's stub anchor). Fall back
+        # to the legacy `_SLUGS_DIR`-keyed derivation only when no single stub
+        # anchor existed and the planner emitted null/absent.
+        dest = st.get("slugs_emit_path") or slugs_file_path(language, product)
         jobs.append(RenderJob(
             kind="slugs",
             template=_SLUGS_TEMPLATES.get(language, _SLUGS_TEMPLATES["python"]),
-            dest=slugs_file_path(language, product),
+            dest=dest,
             mode="new_file",
             context={
                 "product_slug": product,
