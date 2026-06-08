@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import re
 import sys
@@ -874,6 +875,17 @@ def build_tasks(
             _ru = entry.get("refund_unit")
             if isinstance(_ru, dict):
                 enriched_entry["refund_unit"] = _coerce_derivation(_ru)
+                # Round-5/6: a prose derivation can't compile to a usage quantity,
+                # so it was coerced to a placeholder. Warn LOUDLY (parity with
+                # cost_value_missing) — a wrong usage quantity is a billing bug.
+                if enriched_entry["refund_unit"].get("derivation_needs_review"):
+                    sys.stderr.write(
+                        f"WARNING: usage entry {wf!r} at {file_path}:{entry.get('line')} "
+                        f"has a non-expression refund_unit.derivation "
+                        f"({_ru.get('derivation')!r}); coerced to a placeholder "
+                        f"quantity. Fix discovery to emit a runtime EXPRESSION (e.g. "
+                        f"response.usage.completion_tokens) so usage is recorded.\n"
+                    )
             elif pattern in ("usage-only", "sibling-pair"):
                 enriched_entry["refund_unit"] = {"unit": "event", "derivation": 1}
             # Round-4 CRITICAL: the REVIEW comment derefs idempotency_anchor.confidence,
@@ -951,7 +963,6 @@ def _coerce_derivation(refund_unit: dict) -> dict:
     s = deriv.strip()
     if re.fullmatch(r"\d+(?:\.\d+)?", s):
         return {**refund_unit, "derivation": float(s) if "." in s else int(s)}
-    import ast
     try:
         ast.parse(s, mode="eval")
         return refund_unit  # valid runtime expression — emit verbatim
@@ -966,20 +977,29 @@ def _coerce_derivation(refund_unit: dict) -> dict:
 
 
 def _yaml_scalar(v: Any) -> str:
-    """Serialize a scalar as a YAML token for the hand-rolled emitter.
+    """Serialize a scalar as a YAML token for the hand-rolled emitter (PyYAML is a
+    soft dep, so emission can't use yaml.safe_dump).
 
-    None -> `null`, NOT the Python bareword `None` — `yaml.safe_load` reloads the
-    bareword as the STRING "None", which is truthy in the callsite templates'
-    `{% if entry.event_type_const %}` guard and produces `from app.slugs import None`
-    (SyntaxError). bool -> lowercase `true`/`false`; str -> repr (single-quoted,
-    valid YAML); everything else -> str. (dogfood 2026-06-08, finding F.)"""
+    The ONE correct hand-rolled form for an arbitrary string is a YAML
+    DOUBLE-QUOTED scalar with C-style escapes: `:`, `#`, spaces, and single quotes
+    are all literal inside it, and `\\` / `"` / newline / tab / CR get escaped.
+    `repr()` is NOT a YAML serializer — it emits a Python single-quoted literal
+    with `\\'` backslash-escapes that YAML rejects on mixed-quote strings (crash),
+    and leaves `\\n` / `\\` to corrupt silently (round-6 review). EVERY
+    customer-derived string in emit_tasks_yaml must route through this.
+
+    None -> `null` (NOT bareword `None`, which reloads as the truthy string
+    "None" — finding F). bool -> lowercase `true`/`false`. int/float -> str.
+    """
     if v is None:
         return "null"
     if isinstance(v, bool):
         return "true" if v else "false"
-    if isinstance(v, str):
-        return repr(v)
-    return str(v)
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = (str(v).replace("\\", "\\\\").replace('"', '\\"')
+         .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    return f'"{s}"'
 
 
 def emit_tasks_yaml(
@@ -1001,8 +1021,12 @@ def emit_tasks_yaml(
     lines.append("tasks:")
     for t in tasks:
         lines.append(f"  - task_id: {t.task_id}")
-        lines.append(f"    file: {t.file}")
-        lines.append(f"    service_slug: {t.service_slug}")
+        # file + service_slug are customer-derived (a path with a space/`#`/`:` or
+        # an odd slug breaks/corrupts raw YAML) — route through _yaml_scalar like
+        # every other customer value (round-6: they bypassed escaping in the main
+        # block while env_wire escaped them — Condition Consistency).
+        lines.append(f"    file: {_yaml_scalar(t.file)}")
+        lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
         lines.append(f"    framework: {t.framework}")
         lines.append(f"    language: {t.language}")
         lines.append(f"    template: {t.template}")
@@ -1044,23 +1068,16 @@ def emit_tasks_yaml(
     if env_wire_tasks:
         lines.append("env_wire_tasks:")
         for t in env_wire_tasks:
-            # task_id and service_slug are derived from customer-authored
-            # service slugs from the Phase A inventory; quote them to defend
-            # against YAML metacharacters. mode is a hardcoded enum.
-            safe_tid = t.task_id.replace('\\', '\\\\').replace('"', '\\"')
-            safe_slug = t.service_slug.replace('\\', '\\\\').replace('"', '\\"')
-            lines.append(f'  - task_id: "{safe_tid}"')
-            lines.append(f'    service_slug: "{safe_slug}"')
+            # Every customer-derived string routes through _yaml_scalar — the ONE
+            # correct serializer (round-6 consolidation; the old per-field
+            # `.replace` escape was a second mechanism that missed newlines).
+            # mode / infra_discovery_gap / scope / kind are hardcoded enums/bools.
+            lines.append(f"  - task_id: {_yaml_scalar(t.task_id)}")
+            lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
             lines.append(f"    mode: {t.mode}")
-            safe_import = t.settings_import_path.replace('\\', '\\\\').replace('"', '\\"')
-            safe_accessor = t.api_key_accessor.replace('\\', '\\\\').replace('"', '\\"')
-            lines.append(f'    settings_import_path: "{safe_import}"')
-            lines.append(f'    api_key_accessor: "{safe_accessor}"')
-            if t.stub_emit_path:
-                safe_stub = t.stub_emit_path.replace('\\', '\\\\').replace('"', '\\"')
-                lines.append(f'    stub_emit_path: "{safe_stub}"')
-            else:
-                lines.append(f"    stub_emit_path: null")
+            lines.append(f"    settings_import_path: {_yaml_scalar(t.settings_import_path)}")
+            lines.append(f"    api_key_accessor: {_yaml_scalar(t.api_key_accessor)}")
+            lines.append(f"    stub_emit_path: {_yaml_scalar(t.stub_emit_path)}")
             # PR #531 gap-detection: execution agent reads this and emits
             # a DEVELOPER ACTION REQUIRED block in the PR body when True.
             lines.append(f"    infra_discovery_gap: {str(t.infra_discovery_gap).lower()}")
@@ -1068,37 +1085,28 @@ def emit_tasks_yaml(
                 lines.append("    deployment_stubs:")
                 for s in t.deployment_stubs:
                     lines.append(f"      - kind: {s['kind']}")
-                    # source_path was added in PR #531 fix so the execution
-                    # agent knows which existing file to reference in the
-                    # CHECKLIST for repo-scope (centralized infra) entries.
+                    # source_path (PR #531): which existing file the CHECKLIST
+                    # references for repo-scope (centralized infra) entries.
                     if "source_path" in s:
-                        safe_src = str(s['source_path']).replace('\\', '\\\\').replace('"', '\\"')
-                        lines.append(f'        source_path: "{safe_src}"')
+                        lines.append(f"        source_path: {_yaml_scalar(s['source_path'])}")
                     if "emit_path" in s:
-                        safe_emit = str(s['emit_path']).replace('\\', '\\\\').replace('"', '\\"')
-                        lines.append(f'        emit_path: "{safe_emit}"')
+                        lines.append(f"        emit_path: {_yaml_scalar(s['emit_path'])}")
                     lines.append(f"        mode: {s['mode']}")
                     # scope: service (auto-emit safe) | repo (checklist only)
                     lines.append(f"        scope: {s.get('scope', 'service')}")
             else:
                 lines.append("    deployment_stubs: []")
-    # Phase 1.8 slugs-emit tasks (one per product). Same escape pattern.
+    # Phase 1.8 slugs-emit tasks (one per product).
     if slugs_emit_tasks:
         lines.append("slugs_emit_tasks:")
         for st in slugs_emit_tasks:
-            lines.append(f"  - task_id: {st.task_id}")
-            lines.append(f"    product_slug: {st.product_slug}")
-            safe_gen_at = str(st.generated_at).replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'    generated_at: "{safe_gen_at}"')
-            # Task 12: repo-relative emit path of the slugs module, derived
-            # from the service's stub anchor (sibling of the customer's real
-            # config). null when no single stub anchor was available — Task 13
-            # (render_artifacts) then falls back to its legacy convention.
-            if st.slugs_emit_path:
-                safe_emit = str(st.slugs_emit_path).replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'    slugs_emit_path: "{safe_emit}"')
-            else:
-                lines.append("    slugs_emit_path: null")
+            lines.append(f"  - task_id: {_yaml_scalar(st.task_id)}")
+            lines.append(f"    product_slug: {_yaml_scalar(st.product_slug)}")
+            lines.append(f"    generated_at: {_yaml_scalar(str(st.generated_at))}")
+            # Task 12: repo-relative emit path of the slugs module (null when no
+            # single stub anchor was available — render_artifacts then falls back
+            # to its legacy convention). _yaml_scalar(None) -> null.
+            lines.append(f"    slugs_emit_path: {_yaml_scalar(st.slugs_emit_path)}")
             # The constants block is rendered as a nested mapping.
             lines.append("    constants:")
             for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
@@ -1109,10 +1117,8 @@ def emit_tasks_yaml(
                     continue
                 lines.append(f"      {category}:")
                 for e in entries:
-                    safe_name = str(e.get("name", "")).replace("\\", "\\\\").replace('"', '\\"')
-                    safe_value = str(e.get("value", "")).replace("\\", "\\\\").replace('"', '\\"')
-                    lines.append(f'        - name: "{safe_name}"')
-                    lines.append(f'          value: "{safe_value}"')
+                    lines.append(f"        - name: {_yaml_scalar(e.get('name', ''))}")
+                    lines.append(f"          value: {_yaml_scalar(e.get('value', ''))}")
     dest.write_text("\n".join(lines) + "\n")
 
 

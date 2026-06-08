@@ -1011,6 +1011,34 @@ class EmitTasksYamlEscaping(unittest.TestCase):
         srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
         self.assertEqual(srcs["customer_id"], 'req.headers["x-customer"]')
 
+    def test_mixed_quote_binding_parses(self):
+        # round-6 CRITICAL: a binding with BOTH quote styles broke repr-based
+        # _yaml_scalar (it emitted a single-quoted Python literal with \' that YAML
+        # rejects). The double-quoted serializer handles it.
+        reloaded = self._emit_reload(
+            "python", "fastapi",
+            {"customer_id": 'request.headers.get(\'X\', "")', "request_id": "r"})
+        srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
+        self.assertEqual(srcs["customer_id"], 'request.headers.get(\'X\', "")')
+
+    def test_yaml_scalar_roundtrips_all_special_chars(self):
+        # _yaml_scalar is now the SINGLE emit serializer — it must round-trip every
+        # special char through yaml.safe_load (round-6 root fix).
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for v in ('plain', "a'b", 'a"b', 'a\'"b', 'l1\nl2', 'a\\b',
+                  'svc: prod', 'a #c', '', '   ', '@alias'):
+            with self.subTest(value=v):
+                tok = tp._yaml_scalar(v)
+                self.assertEqual(yaml.safe_load(f"k: {tok}")["k"], v)
+        # non-strings
+        self.assertEqual(tp._yaml_scalar(None), "null")
+        self.assertEqual(tp._yaml_scalar(True), "true")
+        self.assertEqual(tp._yaml_scalar(False), "false")
+        self.assertEqual(tp._yaml_scalar(3), "3")
+
 
 if __name__ == "__main__":
     unittest.main()
