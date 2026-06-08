@@ -275,6 +275,38 @@ class EndToEndPipeline(unittest.TestCase):
                       for t in reloaded["tasks"] for i in t["inserts"])
         self.assertTrue(flagged, "cost_value_missing must be flagged for the LLMPort entry")
 
+    def test_helper_worst_case_render_has_no_ruff_e501(self):
+        # round-10: the helper docstring/comments interpolate variable-length values
+        # (service_slug, generated_at). Short fixtures masked E501 — render under
+        # WORST-CASE realistic values (long slug, microsecond ISO ts, real path) and
+        # let ruff (which exempts unbreakable tokens) confirm 0 E501. The lesson:
+        # test the line-length-stressing shape, not the convenient short one.
+        import shutil
+        import subprocess
+        if shutil.which("ruff") is None:
+            self.skipTest("ruff not installed")
+        ctx = {
+            "service_slug": "acme-payments-platform-service",
+            "signoff_chain_hashes": [{"stage": "engineer",
+                                      "file": ".moolabs/chain/04-final-acme.signed.yaml",
+                                      "sha256": "fedcba0987654321"}],
+            "sdk_pinned_version": "v0.3.0-rc1", "telemetry": {"mode": "brownfield"},
+            "env_config": {"mode": "modify", "settings_import_path": "app.config",
+                           "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+                           "stub_emit_path": None},
+            "generated_at": "2026-06-08T00:00:00.123456+00:00",
+        }
+        out = self.env.get_template("python-moolabs-client.py.j2").render(**ctx)
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+            fh.write(out)
+            path = fh.name
+        try:
+            r = subprocess.run(["ruff", "check", "--select", "E501", "--isolated", path],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"helper has E501 under worst-case:\n{r.stdout}")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
         # the `is defined and entry.idempotency_anchor` guard checks the PARENT, so a

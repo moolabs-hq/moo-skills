@@ -14,9 +14,10 @@
      sdk_pinned_version          — from Phase 1.5 snapshot (resolved tag; must be >= v0.3.0-rc1)
      telemetry.mode              — brownfield | greenfield
 #}
-"""Moolabs SDK client — module-level singleton for {{ service_slug }} billing emissions.
+"""Moolabs SDK client for {{ service_slug }}.
 
-Wired by /cost-billing-instrument codemod on {{ generated_at }} per the signed gates:
+Module-level billing-emission singleton, wired by /cost-billing-instrument.
+Generated {{ generated_at }} per the signed gates:
 {% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
 {% endfor %}
 SDK version: {{ sdk_pinned_version | default("v0.3.0-rc1") }}  (unified-ingest ergonomic methods)
@@ -85,7 +86,7 @@ def _scrub_secrets(text: str) -> str:
     return _SECRET_TOKEN_RE.sub("[REDACTED]", text)
 
 {% if telemetry.mode == "brownfield" %}
-# Brownfield directive: {{ service_slug }} already has a live TracerProvider.
+# Brownfield directive: this service already has a live TracerProvider.
 # Do NOT register a second provider — get spans via
 # ``opentelemetry.trace.get_tracer(__name__)`` where needed.
 {% endif %}
@@ -110,7 +111,7 @@ def _resolve_api_key() -> str:
 @lru_cache(maxsize=1)
 def get_client() -> Moolabs:
     """Return the singleton Moolabs SDK client (cached; idempotent, thread-safe)."""
-    from moolabs import Moolabs  # noqa: PLC0415 — lazy so the module imports without the SDK installed
+    from moolabs import Moolabs  # noqa: PLC0415 (lazy; SDK optional at import time)
 
     return Moolabs(api_key=_resolve_api_key())
 
