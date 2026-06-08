@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-finance
 description: >-
-  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks 10-12 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes only (SOC2/HIPAA/GDPR/FedRAMP — the sensitive-data-category enumeration now lives at the CPO stage and field-path translation at the engineer stage), region(s) the customer routes to, environments to instrument, and multi-tenant shape (tenant model + tenant_id source). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
+  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks ~10 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes only (SOC2/HIPAA/GDPR/FedRAMP — the sensitive-data-category enumeration now lives at the CPO stage and field-path translation at the engineer stage), region(s) the customer routes to, environments to instrument, and multi-tenant shape (tenant model + tenant_id source). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
 license: MIT
 metadata:
   author: Moolabs
@@ -261,7 +261,7 @@ pricing_model:
 compliance:
   # Finance owns the REGIMES only (which laws bind us). The sensitive-data
   # CATEGORIES they imply are enumerated at the CPO stage (02-cpo.yaml >
-  # sensitive_data_categories) and translated to field paths at the engineer
+  # sensitive_data.categories) and translated to field paths at the engineer
   # stage (04-final > pii_field_blocklist). Finance captures neither.
   regimes: [SOC2, HIPAA, GDPR, ...]
 

@@ -113,7 +113,7 @@ properties:
     properties:
       # Finance owns the regulatory REGIMES only. The sensitive-data categories
       # they imply are enumerated at the CPO stage (02-cpo >
-      # sensitive_data_categories) and translated to field paths at the engineer
+      # sensitive_data.categories) and translated to field paths at the engineer
       # stage (04-final > pii_field_blocklist). See shared/chain-handoff.md.
       regimes:
         type: array

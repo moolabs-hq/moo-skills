@@ -2,7 +2,7 @@
 
 **Stage 4 of 4 (FINAL). Runs on the IC engineer's machine. Consumes Stages 1+2+3.**
 
-Per-service engineer drilldown — repo path, telemetry stack, MCP inventory, SDK key location, attribution sources. Outputs `04-final-<service>.signed.yaml` (one per service). This is the file every downstream skill reads.
+Per-service engineer drilldown — repo path, telemetry stack, MCP inventory, SDK key location, attribution sources, and PII/PHI field-path translation (maps the CPO's sensitive-data categories to concrete handler field paths the codemod's PII guard consumes). Outputs `04-final-<service>.signed.yaml` (one per service). This is the file every downstream skill reads.
 
 ## Trigger
 
