@@ -523,12 +523,19 @@ python scripts/render_artifacts.py \
 # add --dry-run first to print the manifest without writing
 ```
 
-It emits, honoring each deployment stub's `mode`:
-- **stub Settings module** (`<lang>-moolabs-settings.<ext>.j2` → `stub_emit_path`) — only when the service is in `mode: stub`.
-- **per-product slugs modules** (`slugs-<lang>.j2` → `app/services/moolabs/slugs_<product>.<ext>` and the TS/Go equivalents) — one per `slugs_emit_task`.
-- **deployment stubs** — `new_file` writes (e.g. `terraform-moolabs.tf.j2` → `moolabs.tf`); `append` appends to the existing file **idempotently** (skips if `MOOLABS_API_KEY` is already present — never overwrites or duplicates); `checklist_only` (and any kind with no shipped template, i.e. `docker-compose` / `Dockerfile`) writes nothing and is surfaced as a PR-body checklist item.
+It is driven by the winning framework node + the DERIVED paths in the
+inventory. `scripts/dispatch.py` reads each service's `node_id` and runs ONLY
+that node's declared `scripts` (config_wire + render_artifacts) — "pick the
+specific framework context, run only its scripts." Emit paths are **derived
+from the customer's detected config location** (`env-routing-inventory`'s
+`emit_path`/`import_path`), NEVER hardcoded `app/services/`.
 
-**Do NOT hand-author any artifact the driver renders.** The templates are the source of truth; the language is inferred from `stub_emit_path` and the slugs path from the per-product convention. The helper module (`moolabs_client.*`) is the one artifact rendered separately (Phase 2 above) — everything else flows through this driver. After it runs, Phase 2d applies the per-callsite code inserts.
+It emits, honoring each deployment stub's `mode`:
+- **stub Settings module** (`<lang>-moolabs-settings.<ext>.j2` → the inventory's `emit_path`, beside the detected config) — only when the node's `wiring.mode` is `stub`.
+- **per-product slugs modules** (`slugs-<lang>.j2` → the same package as the service's stub, i.e. the derived `slugs_emit_path`, NOT a hardcoded `app/services/moolabs/`) — one per `slugs_emit_task`.
+- **deployment stubs** — `new_file` writes (e.g. `terraform-moolabs.tf.j2` → `moolabs.tf`), but NEVER clobbers a customer-authored file (a pre-existing file without the `/cost-billing-instrument` generated marker is skipped to the PR checklist); `append` appends to the existing file **idempotently** (skips if `MOOLABS_API_KEY` is already present); `checklist_only` (and any kind with no shipped template, i.e. `docker-compose` / `Dockerfile`) writes nothing and is surfaced as a PR-body checklist item.
+
+**Do NOT hand-author any artifact the driver renders.** The templates are the source of truth; the language is inferred from the service's tasks and the emit paths are node-derived from the detected config. The helper module (`moolabs_client.*`) is the one artifact rendered separately (Phase 2 above) — everything else flows through this driver. After it runs, Phase 2d applies the per-callsite code inserts.
 
 ### Phase 2d: Dispatch tasks to focused subagent contexts
 

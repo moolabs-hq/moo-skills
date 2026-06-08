@@ -221,13 +221,18 @@ The HTML previews are static (no server). All reviewers read their respective fi
 ### Phase 6: Env-loader scan (NEW v0.3 env-routing migration)
 
 Driven by `scripts/env_loader_scan.py`. Walks each declared service and
-detects the customer's env-loading pattern (pydantic-settings v2, pydantic
-v1 BaseSettings, python-decouple, dotenv+os.getenv for Python; zod env
-schema, process.env direct, env-var library for TypeScript; viper,
-kelseyhightower/envconfig, raw os.Getenv for Go). Detection is driven by the
-framework-capability tree (the framework-node registry) under
-`cost-billing-shared/assets/frameworks/<lang>/<fw>.yaml` — the single source of
-truth for env-loader patterns.
+selects the ONE best-matching framework node from the framework-capability
+tree (`cost-billing-shared/assets/frameworks/<lang>/<fw>.yaml` — the single
+source of truth, one self-contained node per framework). Each node declares
+its detection (`kind: regex` signal-scoring, or `kind: code` for a named
+detector like the transitive pydantic base-resolution that follows
+`class Settings(ProjectBase)` chains across files), its `wiring`
+(`mode: modify | stub` + accessor), and its `emit` rule. The config-axis tree
+ships nodes for: pydantic-settings (v2/v1 + project-base subclass), dynaconf,
+django-settings, environs, decouple, dotenv+os.getenv (Python); zod, convict,
+process.env, env-var (TypeScript); viper, envconfig, koanf, os.Getenv (Go).
+Adding a framework = adding one node file. Detection picks the specific
+framework; the instrument dispatcher then runs only that node's scripts.
 
 Granularity is declared by the engineer in bootstrap-team-engineer Q14b:
 - `per-service` — scan each service independently
@@ -244,10 +249,15 @@ files, Dockerfile `ENV` lines). Each detected surface becomes an entry
 in the per-service `deployment_surfaces` list with an `insert_kind` that
 the instrument-side Phase 1.7 dispatches on.
 
-Output: `.moolabs/customer-context/env-routing-inventory.yaml`. Unrecognized
-patterns and low-confidence matches both flag `stub_required: true`, which
-instrument's Phase 1.7 turns into a generated stub Settings class instead
-of an in-place modification.
+Output: `.moolabs/customer-context/env-routing-inventory.yaml`. Each service's
+`app_config` carries the winning `node_id` plus the DERIVED `emit_path` +
+`import_path` — computed from the customer's ACTUAL detected config location
+(the node's `import_rule` anchored on the detected config dir), never a
+hardcoded `app/services/` path. Modify-vs-stub is the node's `wiring.mode`:
+nodes whose accessor composes with the customer's config (e.g. pydantic v2/v1)
+are `modify`; flat/instance/project-base patterns are `stub` (a generated
+Settings module the customer adopts). An unrecognized service falls back to a
+per-language conventional path with a DEVELOPER ACTION note.
 
 ### Phase 7: Slug inventory (NEW v0.3 event-slug constants)
 
