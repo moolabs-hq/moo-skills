@@ -269,6 +269,27 @@ joined with `_` and uppercased. Empty segments (from leading/trailing
 or consecutive separators) are stripped — so `"foo..bar"` becomes
 `"FOO_BAR"`, not `"FOO__BAR"`.
 
+Product bucketing (Dogfood #5 — deterministic): cost/usage inventory
+entries are agent-authored and routinely omit `product_slug`, which used
+to collapse EVERY entry into a single `default` bucket (defeating
+per-product slug resolution in the codemod). The script now derives
+`product_slug` per entry from the authoritative `per-feature-spec.yaml`
+docs (the root one + per-product subdirs like `moo-acute/`): exact
+`event_type` match → `event_type_convention.namespace_prefix` match →
+first dotted segment of the event value → `default`. A declared
+`product_slug` on the entry always wins. Net effect: an entry with
+`event_type: arc.shared.llmport-call` buckets under `arc` even when the
+agent forgot to stamp `product_slug` — no hand-correction needed.
+
+Consolidation double-count check (Dogfood #4 — deterministic
+enforcement of the cost-consolidation rule above): the script inverts
+`output-input-map.yaml` and WARNS (to stderr, surfaced at three-role +
+adversarial review) for any cost-events entry marked
+`pattern: sibling-pair` whose `workflow_id` feeds ≥2 usage outputs — the
+exact double-count the prose rule forbids. Warning, not refuse-to-run:
+the agent owns the final pattern call, but the omission is now caught
+mechanically rather than relying on the agent reading the prose.
+
 Duplicate-detection: when two different source values in the same
 (product, category) collapse to the same canonical name (e.g. one entry
 has `checkout.recommendation` and another has `checkout-recommendation`,

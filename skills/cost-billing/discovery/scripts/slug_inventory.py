@@ -74,11 +74,78 @@ def _feature_key_for(workflow_id: str) -> str:
     return workflow_id
 
 
+def _build_product_map_from_specs(
+    specs: list[dict],
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Build the authoritative event→product map from per-feature-spec docs.
+
+    Dogfood #5: cost/usage inventory entries are agent-authored and routinely
+    omit product_slug. per-feature-spec.yaml IS the authoritative product
+    mapping (top-level product_slug + event_type_convention.namespace_prefix +
+    features[].event_type). Returns:
+      - exact:  {event_type: product_slug}  (from features[].event_type)
+      - prefix: [(namespace_prefix, product_slug)]  (longest-first so the most
+                specific prefix wins)
+    """
+    exact: dict[str, str] = {}
+    prefix: list[tuple[str, str]] = []
+    for spec in specs or []:
+        # Defensive (PR #9 review NIT): a per-feature-spec.yaml that parses to
+        # a non-dict (top-level list, scalar) would otherwise AttributeError on
+        # .get(). These are agent-authored docs — tolerate malformed shapes by
+        # skipping rather than crashing the whole slug-inventory build.
+        if not isinstance(spec, dict):
+            continue
+        product = spec.get("product_slug") or ""
+        if not product:
+            continue
+        conv = spec.get("event_type_convention")
+        conv = conv if isinstance(conv, dict) else {}
+        ns = conv.get("namespace_prefix") or ""
+        if ns:
+            prefix.append((ns, product))
+        feats = spec.get("features")
+        for feat in feats if isinstance(feats, list) else []:
+            if not isinstance(feat, dict):
+                continue
+            et = feat.get("event_type")
+            if et:
+                exact[et] = product
+    # Longest prefix first so "arc.sub." beats "arc." when both are declared.
+    prefix.sort(key=lambda pp: len(pp[0]), reverse=True)
+    return exact, prefix
+
+
+def _product_for_event(
+    event_type: str | None,
+    exact_map: dict[str, str],
+    prefix_map: list[tuple[str, str]],
+) -> str:
+    """Resolve the product_slug for an event value deterministically.
+
+    Order: exact per-feature-spec match → namespace-prefix match → first
+    dotted segment (the namespace convention) → "" (caller defaults to
+    'default'). Decouples slug bucketing from the agent emitting product_slug.
+    """
+    if not event_type:
+        return ""
+    if event_type in exact_map:
+        return exact_map[event_type]
+    for ns, product in prefix_map:
+        if event_type.startswith(ns):
+            return product
+    # First dotted segment as the namespace convention fallback
+    # (arc.shared.llmport-call -> "arc"). Single-token events -> "".
+    head, sep, _ = event_type.partition(".")
+    return head if sep else ""
+
+
 def derive_per_product_constants(
     cost_inv: dict,
     usage_inv: dict,
     omap: dict,  # noqa: ARG001 — kept for future cross-edge derivations
     provider_catalog: dict | None,
+    product_map: tuple[dict[str, str], list[tuple[str, str]]] | None = None,
 ) -> dict[str, dict[str, list[dict]]]:
     """Return {product_slug: {CATEGORY: [{name, value}, ...]}}.
 
@@ -100,10 +167,23 @@ def derive_per_product_constants(
         if not any(e["name"] == name and e["value"] == value for e in bucket):
             bucket.append({"name": name, "value": value})
 
+    exact_map, prefix_map = product_map or ({}, [])
+
+    def _product_of(entry: dict) -> str:
+        # Declared product_slug wins; else derive from the event value via the
+        # authoritative per-feature-spec map (Dogfood #5 — agent-authored
+        # entries omit product_slug, which previously collapsed every product
+        # into the single "default" bucket and defeated slug resolution).
+        declared = entry.get("product_slug")
+        if declared:
+            return declared
+        ev = entry.get("event_type") or entry.get("workflow_id")
+        return _product_for_event(ev, exact_map, prefix_map) or "default"
+
     # EVENT_TYPE, METER_SLUG, FEATURE_KEY from cost-events + usage-events
     for source in (cost_inv, usage_inv):
         for entry in source.get("entries", []) or []:
-            product = entry.get("product_slug") or "default"
+            product = _product_of(entry)
             bucket = _ensure(product)
 
             event_type = entry.get("event_type") or entry.get("workflow_id")
@@ -121,7 +201,7 @@ def derive_per_product_constants(
 
     # SPAN_TYPE from cost_kind values in cost-events-inventory
     for entry in cost_inv.get("entries", []) or []:
-        product = entry.get("product_slug") or "default"
+        product = _product_of(entry)
         bucket = _ensure(product)
         cost_kind = entry.get("cost_kind")
         if cost_kind:
@@ -179,6 +259,62 @@ def check_duplicates(by_product: dict[str, dict[str, list[dict]]]) -> list[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Consolidation double-count detection (Dogfood #4 enforcement)
+# ──────────────────────────────────────────────────────────────────────
+
+def check_consolidation_double_count(cost_inv: dict, omap: dict) -> list[str]:
+    """Detect cost-events marked `pattern: sibling-pair` at a CONSOLIDATION
+    site — a single cost feeding >=2 usage outputs.
+
+    SKILL.md (Cost-consolidation rule) requires such a cost to be `cost-only`
+    at its single emission site, with each usage event `usage-only`. Marking
+    it `sibling-pair` emits a garbage cost lane at each agent site AND
+    double-counts the cost (once per agent + once at the consolidation site).
+    f70ce55 added the prose guidance; this is the deterministic detector the
+    guidance lacked — the agent ignored the prose and shipped sibling-pair.
+
+    Detection signal (from the SKILL.md rule): invert output-input-map; a cost
+    workflow referenced by >=2 distinct output (usage) workflows is a
+    consolidation point. Returns a list of warning strings (empty = clean).
+    """
+    # Invert the omap: cost_workflow_id -> set(output_workflow_ids).
+    # Defensive (PR #9 review NIT): edges/inputs/entries from agent-authored
+    # YAML may parse to non-dict shapes; skip those rather than AttributeError.
+    fan_out: dict[str, set[str]] = {}
+    for edge in (omap.get("edges") if isinstance(omap, dict) else []) or []:
+        if not isinstance(edge, dict):
+            continue
+        out_wf = edge.get("output_workflow_id")
+        if not out_wf:
+            continue
+        for inp in edge.get("inputs") or []:
+            if not isinstance(inp, dict):
+                continue
+            cost_wf = inp.get("cost_workflow_id")
+            if cost_wf:
+                fan_out.setdefault(cost_wf, set()).add(out_wf)
+
+    warnings: list[str] = []
+    for entry in (cost_inv.get("entries") if isinstance(cost_inv, dict) else []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("pattern") != "sibling-pair":
+            continue
+        wf = entry.get("workflow_id")
+        outs = fan_out.get(wf, set())
+        if len(outs) >= 2:
+            warnings.append(
+                f"consolidation double-count: cost '{wf}' is marked "
+                f"pattern: sibling-pair but feeds {len(outs)} usage outputs "
+                f"({sorted(outs)}). Per the cost-consolidation rule it MUST be "
+                f"pattern: cost-only (each usage event usage-only) — "
+                f"sibling-pair double-counts the cost + emits a garbage cost "
+                f"lane per agent site."
+            )
+    return warnings
+
+
+# ──────────────────────────────────────────────────────────────────────
 # YAML emit (hand-rolled)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -233,6 +369,25 @@ def _read_yaml_safe(path: Path) -> dict:
         return {}
 
 
+def _load_per_feature_specs(customer_context_dir: Path) -> list[dict]:
+    """Load every per-feature-spec.yaml under the customer-context dir — the
+    root one plus per-product subdirs (e.g. moo-acute/per-feature-spec.yaml).
+    Each is the authoritative product↔event map for #5 product derivation."""
+    specs: list[dict] = []
+    if not customer_context_dir.is_dir():
+        return specs
+    # Root + one-level subdir per-product specs.
+    for p in sorted(customer_context_dir.glob("per-feature-spec.yaml")):
+        d = _read_yaml_safe(p)
+        if d:
+            specs.append(d)
+    for p in sorted(customer_context_dir.glob("*/per-feature-spec.yaml")):
+        d = _read_yaml_safe(p)
+        if d:
+            specs.append(d)
+    return specs
+
+
 # ──────────────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────────────
@@ -251,8 +406,14 @@ def main(argv: list[str] | None = None) -> int:
     omap = _read_yaml_safe(Path(args.output_input_map))
     provider_catalog = _read_yaml_safe(Path(args.provider_catalog))
 
+    # Dogfood #5: derive product_slug per entry from the authoritative
+    # per-feature-spec map so cost/usage entries that omit product_slug bucket
+    # under their REAL product instead of collapsing into "default".
+    specs = _load_per_feature_specs(Path(args.customer_context_dir))
+    product_map = _build_product_map_from_specs(specs)
+
     by_product = derive_per_product_constants(
-        cost_inv, usage_inv, omap, provider_catalog
+        cost_inv, usage_inv, omap, provider_catalog, product_map=product_map
     )
 
     errors = check_duplicates(by_product)
@@ -264,6 +425,14 @@ def main(argv: list[str] | None = None) -> int:
         for e in errors:
             print(f"  {e}", file=sys.stderr)
         return 2
+
+    # Dogfood #4: surface (don't block) cost-consolidation sites wrongly
+    # marked sibling-pair — the deterministic enforcement the prose guidance
+    # lacked. Visible at three-role + adversarial review; the agent owns the
+    # final pattern call, so warn rather than refuse-to-run.
+    consolidation_warnings = check_consolidation_double_count(cost_inv, omap)
+    for w in consolidation_warnings:
+        print(f"WARNING (consolidation): {w}", file=sys.stderr)
 
     inventory = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
