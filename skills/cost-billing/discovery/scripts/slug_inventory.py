@@ -185,7 +185,12 @@ def check_duplicates(by_product: dict[str, dict[str, list[dict]]]) -> list[str]:
 def emit_slug_inventory_yaml(inventory: dict, dest: Path) -> None:
     """Hand-rolled YAML emit for slug-inventory.yaml."""
     lines: list[str] = []
-    lines.append(f"generated_at: {inventory['generated_at']}")
+    # Quote generated_at so PyYAML safe_load keeps it a STRING. Unquoted
+    # ISO-8601 is coerced to datetime — build_slugs_emit_tasks then re-emits
+    # str(datetime) ("2026-06-06 00:00:00+00:00", space not T) into tasks.yaml
+    # (PR #8 review #3-sibling; the dogfood handoff named slug-inventory as
+    # THE fix location for #3).
+    lines.append(f'generated_at: "{inventory["generated_at"]}"')
     if not inventory.get("products"):
         lines.append("products: []")
     else:

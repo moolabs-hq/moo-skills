@@ -344,7 +344,9 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
     lines: list[str] = []
     lines.append(f"service_slug: {service_slug}")
     lines.append(f"framework: {framework}")
-    lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
+    # Quote generated_at so PyYAML safe_load keeps it a string, not a datetime
+    # (PR #8 review #3-sibling — same bug class as task_planner/config_wire).
+    lines.append(f'generated_at: "{datetime.now(timezone.utc).isoformat()}"')
     lines.append("bindings:")
     for key in ATTRIBUTION_KEYS:
         b = bindings.get(key)
@@ -354,7 +356,7 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
             lines.append(f"    confidence: n_a")
             if b:
                 lines.append(f"    confirmed_by: {b.confirmed_by}")
-                lines.append(f"    confirmed_at: {b.confirmed_at}")
+                lines.append(f'    confirmed_at: "{b.confirmed_at or ""}"')
             continue
         lines.append(f'    source: "{b.source}"')
         lines.append(f"    confidence: {b.confidence}")
@@ -362,7 +364,7 @@ def _emit_yaml(service_slug: str, framework: str, bindings: dict[str, Binding], 
             lines.append(f"    evidence: [{', '.join(repr(e) for e in b.evidence[:5])}]")
         lines.append(f"    fallback_when_absent: {b.fallback_when_absent}")
         lines.append(f"    confirmed_by: {b.confirmed_by}")
-        lines.append(f"    confirmed_at: {b.confirmed_at}")
+        lines.append(f'    confirmed_at: "{b.confirmed_at or ""}"')
     if overrides:
         lines.append("overrides:")
         for ov in overrides:

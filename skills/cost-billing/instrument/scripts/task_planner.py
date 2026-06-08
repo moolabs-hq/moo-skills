@@ -384,6 +384,71 @@ def build_slug_index(inventory: dict) -> dict[str, dict[str, dict[str, str]]]:
     return index
 
 
+def _default_product_slug(index: dict[str, dict[str, dict[str, str]]]) -> str:
+    """Fallback product when an inventory entry carries no ``product_slug``: the
+    sole product in the slug index (the common single-product case). Returns ""
+    when the index has zero or >=2 products (multi-product requires an explicit
+    per-entry product_slug). Fixes the v0.3 slug-resolution-returns-None gap where
+    discovery emits entries without product_slug -> "" -> every lookup misses."""
+    return next(iter(index)) if len(index) == 1 else ""
+
+
+def _product_owning_value(
+    index: dict[str, dict[str, dict[str, str]]],
+    category: str,
+    value: str | None,
+) -> str:
+    """Return the product_slug whose ``category`` bucket contains ``value``.
+
+    Slug values (event_type / workflow_id) are globally-unique, namespaced
+    identifiers (e.g. ``arc.shared.llmport-call``, ``meter.ingest.batch``), so
+    a value identifies its owning product without needing the product_slug
+    join key. On ambiguity (same value in >1 product — should be impossible
+    given slug_inventory's duplicate guard) WARN and take the first. Returns
+    "" when no product owns the value."""
+    if not value:
+        return ""
+    owners = [p for p, cats in index.items() if value in (cats.get(category) or {})]
+    if not owners:
+        return ""
+    if len(owners) > 1:
+        sys.stderr.write(
+            f"WARN: slug value {value!r} found in multiple products {owners}; "
+            f"using {owners[0]!r}\n"
+        )
+    return owners[0]
+
+
+def _effective_product_slug(
+    index: dict[str, dict[str, dict[str, str]]],
+    declared: str,
+    event_type: str | None,
+    workflow_id: str | None,
+) -> str:
+    """Determine the product to resolve slug constants against.
+
+    Dogfood #5 (architectural): the earlier `_default_product_slug` fallback
+    only works when every product collapses into ONE bucket — which happens
+    *because* discovery drops per-entry product_slug. The moment discovery is
+    fixed to emit real product_slug, a multi-product index has >=2 buckets,
+    `_default_product_slug` returns "" and resolution silently breaks. That
+    couples the downstream fix to the upstream bug.
+
+    Resolution order (robust to 1 or N products, with or without product_slug):
+      1. declared product_slug, if it exists in the index (fast path) ;
+      2. the product that OWNS the event_type / workflow_id slug value
+         (value-based — works for multi-product without the join key) ;
+      3. `_default_product_slug` (sole-product fallback / "").
+    """
+    if declared and index.get(declared):
+        return declared
+    for category, value in (("EVENT_TYPE", event_type), ("METER_SLUG", workflow_id)):
+        owner = _product_owning_value(index, category, value)
+        if owner:
+            return owner
+    return declared or _default_product_slug(index)
+
+
 @dataclass
 class SlugsEmitTask:
     """One slugs-emit task per product. Renders slugs-<lang>.j2 to
@@ -546,7 +611,18 @@ def build_tasks(
             # templates can render `event_type=EVENT_TYPE_X` instead of
             # `event_type="x.y"`. None values trigger the template's
             # inline-literal fallback path.
-            product_slug = entry.get("product_slug", "")
+            # Dogfood #5: resolve the effective product robustly — declared
+            # product_slug wins, else find the product owning the event_type/
+            # workflow_id slug value (works for multi-product without the join
+            # key), else sole-product fallback. Decoupled from the single-bucket
+            # accident so it survives the upstream discovery fix that will emit
+            # real per-entry product_slug.
+            product_slug = _effective_product_slug(
+                slug_index,
+                declared=entry.get("product_slug") or "",
+                event_type=entry.get("event_type"),
+                workflow_id=wf,
+            )
             slug_consts = resolve_slug_constants(
                 slug_index,
                 product_slug=product_slug,
@@ -620,7 +696,13 @@ def emit_tasks_yaml(
     slugs_emit_tasks: list[SlugsEmitTask] | None = None,
 ) -> None:
     lines: list[str] = []
-    lines.append(f"generated_at: {datetime.now(timezone.utc).isoformat()}")
+    # Quote generated_at so PyYAML safe_load keeps it a STRING. Unquoted
+    # ISO-8601 is auto-coerced to a datetime.datetime — a downstream consumer
+    # doing string ops then crashes (dogfood #3). ISO timestamps never contain
+    # `"` or `\`, so a bare double-quote wrap is sufficient. The
+    # slugs_emit_tasks generated_at was already quoted; this top-level one was
+    # the one commit 42d51a8 missed.
+    lines.append(f'generated_at: "{datetime.now(timezone.utc).isoformat()}"')
     lines.append(f"total_tasks: {len(tasks)}")
     lines.append(f"total_inserts: {sum(len(t.inserts) for t in tasks)}")
     lines.append("tasks:")
@@ -716,7 +798,7 @@ def emit_tasks_yaml(
         for st in slugs_emit_tasks:
             lines.append(f"  - task_id: {st.task_id}")
             lines.append(f"    product_slug: {st.product_slug}")
-            safe_gen_at = st.generated_at.replace("\\", "\\\\").replace('"', '\\"')
+            safe_gen_at = str(st.generated_at).replace("\\", "\\\\").replace('"', '\\"')
             lines.append(f'    generated_at: "{safe_gen_at}"')
             # The constants block is rendered as a nested mapping.
             lines.append("    constants:")

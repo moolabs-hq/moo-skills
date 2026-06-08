@@ -361,6 +361,21 @@ def scan_service(
             continue
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
+        # Test files are NEVER the canonical app-config source — across ALL
+        # supported languages (Python/TS/JS/Go) a stray env access in a test
+        # (os.getenv / process.env / os.Getenv) must not outrank the real
+        # settings module. (Fixes the v0.3 misdetection of a test file over the
+        # real config when the real Settings extends a custom base the pattern's
+        # structural signal doesn't match.)
+        _nm = path.name
+        if (
+            _nm.startswith("test_")                                  # py
+            or _nm == "conftest.py"                                  # py
+            or re.search(r"_test\.(py|go)$", _nm)                    # py / go
+            or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
+            or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
+        ):
+            continue
         if path.suffix not in extensions:
             continue
         hit = scan_file(path, patterns)
@@ -532,6 +547,13 @@ def scan_deployment_surfaces(
 
         # Terraform
         if path.suffix == ".tf":
+            # NOTE: the repo-level scan intentionally finds ALL centralized
+            # terraform variable blocks (incl. modules/secrets) — that is the
+            # designed comprehensive surface inventory. In a large centralized
+            # infra this can be many files; SCOPING to the service's actual
+            # deployment point is the instrument layer's responsibility (config_wire
+            # / the codemod), NOT a blanket dir-skip here (which would drop the
+            # legitimate secrets module). See handoff: env-wiring scoping.
             text = path.read_text(errors="ignore")
             if re.search(r'variable\s+"[^"]+"\s*\{', text):
                 out.append(DeploymentSurface(
@@ -788,7 +810,9 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
     """Hand-rolled YAML emit for env-routing-inventory.yaml. Avoids PyYAML
     runtime dep for the customer codemod environment."""
     lines: list[str] = []
-    lines.append(f"generated_at: {inventory['generated_at']}")
+    # Quote generated_at so PyYAML safe_load keeps it a string, not a datetime
+    # (PR #8 review #3-sibling — same bug class as task_planner/config_wire).
+    lines.append(f'generated_at: "{inventory["generated_at"]}"')
     lines.append(f"granularity: {inventory['granularity']}")
     lines.append(f"granularity_source: {inventory['granularity_source']}")
     if not inventory["services"]:

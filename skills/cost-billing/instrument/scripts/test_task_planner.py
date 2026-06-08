@@ -424,5 +424,133 @@ class EnvWireTaskGapDetection(unittest.TestCase):
             self.assertIs(parsed["env_wire_tasks"][0]["infra_discovery_gap"], True)
 
 
+class TasksYamlTopLevelGeneratedAtQuoted(unittest.TestCase):
+    """Dogfood #3: the top-level `generated_at` in emit_tasks_yaml was emitted
+    UNQUOTED, so PyYAML safe_load coerces the ISO-8601 string to a
+    datetime.datetime object. A downstream consumer doing string ops on it
+    crashes. (The slugs_emit_tasks generated_at was already quoted; the
+    top-level one at the head of tasks.yaml was missed by commit 42d51a8.)"""
+
+    def test_top_level_generated_at_round_trips_as_str(self):
+        import tempfile
+        import yaml
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "tasks.yaml"
+            tp.emit_tasks_yaml([], out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertIsInstance(
+                parsed["generated_at"], str,
+                "top-level generated_at must round-trip as str, not datetime "
+                "(dogfood #3 — PyYAML coerces unquoted ISO-8601 to datetime)",
+            )
+
+
+class SlugResolutionRobustToMissingProductSlug(unittest.TestCase):
+    """Dogfood #5 (architectural): slug resolution must NOT depend on the
+    single-bucket accident. The downstream `_default_product_slug` fallback
+    only works when every product collapses into one bucket (because discovery
+    drops product_slug). The moment discovery is fixed to emit real per-entry
+    product_slug, a multi-product index has >=2 buckets, `_default_product_slug`
+    returns "" and resolution breaks again.
+
+    The robust fix: when the declared product_slug is absent/unknown, resolve
+    by the slug VALUE across all product buckets (event_type/workflow_id slug
+    values are globally unique/namespaced), and use the product that owns the
+    value for the import path."""
+
+    def _multi_product_index(self):
+        inventory = {
+            "products": [
+                {"product_slug": "arc", "constants": {
+                    "EVENT_TYPE": [{"name": "ARC_SHARED_LLMPORT_CALL",
+                                    "value": "arc.shared.llmport-call"}],
+                    "METER_SLUG": [{"name": "ARC_SHARED_LLMPORT_CALL",
+                                    "value": "arc.shared.llmport-call"}],
+                    "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+                }},
+                {"product_slug": "meter", "constants": {
+                    "EVENT_TYPE": [{"name": "METER_INGEST_BATCH",
+                                    "value": "meter.ingest.batch"}],
+                    "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [],
+                    "SPAN_TYPE": [],
+                }},
+            ],
+        }
+        return tp.build_slug_index(inventory)
+
+    def test_resolves_in_multiproduct_index_with_no_declared_product(self):
+        """The exact failure the fragile fallback masks: 2+ products, entry has
+        no product_slug, but the event_type value is globally unique → must
+        resolve to the owning product's constant (NOT None)."""
+        idx = self._multi_product_index()
+        # _default_product_slug returns "" here (2 products) — the old path misses.
+        self.assertEqual(tp._default_product_slug(idx), "")
+        eff = tp._effective_product_slug(
+            idx, declared="", event_type="arc.shared.llmport-call",
+            workflow_id="arc.shared.llmport-call",
+        )
+        self.assertEqual(eff, "arc")
+        consts = tp.resolve_slug_constants(
+            idx, product_slug=eff,
+            event_type="arc.shared.llmport-call",
+            workflow_id="arc.shared.llmport-call", cost_kind=None,
+        )
+        self.assertEqual(consts["event_type_const"], "EVENT_TYPE_ARC_SHARED_LLMPORT_CALL")
+
+    def test_declared_product_still_wins_fast_path(self):
+        idx = self._multi_product_index()
+        eff = tp._effective_product_slug(
+            idx, declared="meter", event_type="meter.ingest.batch",
+            workflow_id="meter.ingest.batch",
+        )
+        self.assertEqual(eff, "meter")
+
+    def test_unknown_value_returns_declared_or_empty(self):
+        idx = self._multi_product_index()
+        eff = tp._effective_product_slug(
+            idx, declared="", event_type="nonexistent.value",
+            workflow_id="nonexistent.value",
+        )
+        # Not found in any product, 2 products → "" (literal fallback downstream)
+        self.assertEqual(eff, "")
+
+    def test_single_product_still_resolves_via_default(self):
+        """The moo-arc dogfood case: all entries collapsed into one bucket
+        because discovery dropped product_slug. Must still resolve."""
+        inventory = {"products": [{"product_slug": "default", "constants": {
+            "EVENT_TYPE": [{"name": "X", "value": "x.y"}],
+            "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+        }}]}
+        idx = tp.build_slug_index(inventory)
+        eff = tp._effective_product_slug(idx, declared="", event_type="x.y",
+                                         workflow_id="x.y")
+        self.assertEqual(eff, "default")
+
+    def test_value_in_two_products_warns_and_takes_first(self):
+        """PR #8 review 2.1: when a slug value appears in >1 product (should be
+        impossible given slug_inventory's duplicate guard, but defensive), the
+        value-search must WARN and take the first owner — not crash, not pick
+        silently. Locks the documented first-wins design choice."""
+        import io
+        import contextlib
+        inventory = {"products": [
+            {"product_slug": "arc", "constants": {
+                "EVENT_TYPE": [{"name": "DUP", "value": "shared.dup"}],
+                "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+            }},
+            {"product_slug": "meter", "constants": {
+                "EVENT_TYPE": [{"name": "DUP", "value": "shared.dup"}],
+                "METER_SLUG": [], "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": [],
+            }},
+        ]}
+        idx = tp.build_slug_index(inventory)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            owner = tp._product_owning_value(idx, "EVENT_TYPE", "shared.dup")
+        # First-wins (dict insertion order preserves "arc" first).
+        self.assertEqual(owner, "arc")
+        self.assertIn("multiple products", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

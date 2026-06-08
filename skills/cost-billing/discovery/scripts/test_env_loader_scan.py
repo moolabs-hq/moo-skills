@@ -721,6 +721,9 @@ class InventoryYamlEmit(unittest.TestCase):
             self.assertEqual(svc["service_slug"], "svc-a")
             self.assertEqual(svc["app_config"]["pattern"], "python-pydantic-settings-v2")
             self.assertEqual(svc["app_config"]["line_to_insert"], 5)
+            # PR #8 review #3-sibling guard: generated_at must round-trip as a
+            # string, not be coerced to datetime by PyYAML.
+            self.assertIsInstance(parsed["generated_at"], str)
 
     def test_emit_yaml_handles_backslash_in_evidence(self):
         """Regression guard for the backslash YAML escape bug. Source

@@ -264,6 +264,10 @@ class YamlEmitRoundtrip(unittest.TestCase):
             self.assertEqual(product["product_slug"], "billing")
             event_types = product["constants"]["EVENT_TYPE"]
             self.assertEqual(event_types[0]["value"], "seat.assigned")
+            # PR #8 review #3-sibling guard: generated_at must round-trip as a
+            # string, not be coerced to datetime (build_slugs_emit_tasks reads
+            # it and re-emits str(datetime) — space not T — into tasks.yaml).
+            self.assertIsInstance(parsed["generated_at"], str)
 
     def test_emit_handles_backslash_in_value(self):
         """Slug values constructed from regex patterns or path-like keys

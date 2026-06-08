@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"sync"
 
 	moolabs "github.com/moolabs/moolabs-go"
@@ -83,14 +84,23 @@ func resolveAPIKey() (string, error) {
 //
 // eventClass is "usage" / "cost" / "event"; fields are the envelope facts we
 // want preserved in the log line (the never-drop guarantee).
+// Defense-in-depth: never let an API key reach logs/panics verbatim if an SDK
+// error echoes it (matches the Python + TS helpers; the central log redaction
+// does not cover the moo_* key format).
+var _secretTokenRE = regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]+|\bwhsec_[A-Za-z0-9_]+|\bmoo_[a-z]+_[A-Za-z0-9_]+`)
+
+func scrubSecrets(s string) string {
+	return _secretTokenRE.ReplaceAllString(s, "[REDACTED]")
+}
+
 func handleEmitErr(eventClass string, fields map[string]any, err error) {
 	if os.Getenv(devEnvVar) != "" {
-		panic(fmt.Sprintf(
+		panic(scrubSecrets(fmt.Sprintf(
 			"moolabsclient: %s emission failed (SDK_DEVELOPMENT mode — unset to swallow): %v",
 			eventClass, err,
-		))
+		)))
 	}
-	fields["error"] = err.Error()
+	fields["error"] = scrubSecrets(err.Error())
 	logEvent("moolabs."+eventClass+".event", fields)
 }
 
