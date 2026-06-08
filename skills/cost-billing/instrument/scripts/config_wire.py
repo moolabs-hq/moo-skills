@@ -32,14 +32,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Framework-capability tree. The registry is the single source of truth for
-# per-node wiring (mode + accessor); config_wire reads it instead of the old
-# hardcoded per-pattern accessor maps. Mirrors discovery/scripts/
-# env_loader_scan.py's path computation so both layers resolve the same dir.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+# per-node wiring (mode + accessor). Locate the shared dir across BOTH the
+# SOURCE monorepo (cost-billing/shared) and the INSTALLED layout (shared ships
+# as the sibling skill `cost-billing-shared`) — a hardcoded parents[2]/"shared"
+# crashed installed users with ModuleNotFoundError (2026-06-08 dogfood fix).
+def _locate_shared_base() -> Path | None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        for name in ("shared", "cost-billing-shared"):
+            base = parent / name
+            if (base / "scripts" / "strategies.py").is_file():
+                return base
+    return None
+
+
+_SHARED_BASE = _locate_shared_base()
+if _SHARED_BASE is not None:
+    sys.path.insert(0, str(_SHARED_BASE / "scripts"))
 import framework_registry  # noqa: E402
 
 _FRAMEWORKS_DIR = (
-    Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
+    (_SHARED_BASE / "assets" / "frameworks")
+    if _SHARED_BASE is not None
+    else Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
 )
 
 

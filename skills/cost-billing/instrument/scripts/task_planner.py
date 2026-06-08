@@ -35,10 +35,23 @@ from pathlib import Path
 from typing import Any
 
 # The de-hardcoded import-path rules live in the shared framework-capability
-# tree (shared/scripts/strategies.py), exposed via IMPORT_RULES. The slugs-path
-# helpers below reuse them — same sys.path-insert pattern as config_wire /
-# env_loader_scan so all three layers resolve the same shared module.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+# tree (strategies.py), exposed via IMPORT_RULES. Locate the shared dir across
+# BOTH the SOURCE monorepo (cost-billing/shared) and the INSTALLED layout
+# (shared ships as the sibling skill `cost-billing-shared`) — a hardcoded
+# parents[2]/"shared" crashed installed users (2026-06-08 dogfood fix).
+def _locate_shared_base() -> Path | None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        for name in ("shared", "cost-billing-shared"):
+            base = parent / name
+            if (base / "scripts" / "strategies.py").is_file():
+                return base
+    return None
+
+
+_SHARED_BASE = _locate_shared_base()
+if _SHARED_BASE is not None:
+    sys.path.insert(0, str(_SHARED_BASE / "scripts"))
 import strategies  # noqa: E402
 
 # Language → (IMPORT_RULES key, file extension) for the slugs-path derivation.
