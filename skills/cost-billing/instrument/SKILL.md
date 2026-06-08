@@ -510,6 +510,26 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
 
 **Task granularity = per file.** Atomic commit boundary, single rendering pass per file (so `python -m py_compile` can verify the file before the task completes), parallelizable across files. Per-callsite would over-fragment; per-service would re-introduce the big-context problem the Codex review caught.
 
+### Phase 2c-render: Emit env-wiring, slugs, and deployment artifacts (DETERMINISTIC — run the driver, do NOT hand-author)
+
+**Why this exists** (added 2026-06-08 after the moo-arc dogfood caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
+
+Run the deterministic render driver — it enumerates every template referenced by `tasks.yaml`'s `env_wire_tasks` / `slugs_emit_tasks` and renders each to the customer repo:
+
+```bash
+python scripts/render_artifacts.py \
+    --tasks .moolabs/codemod/tasks.yaml \
+    --repo-root <customer-repo-root>
+# add --dry-run first to print the manifest without writing
+```
+
+It emits, honoring each deployment stub's `mode`:
+- **stub Settings module** (`<lang>-moolabs-settings.<ext>.j2` → `stub_emit_path`) — only when the service is in `mode: stub`.
+- **per-product slugs modules** (`slugs-<lang>.j2` → `app/services/moolabs/slugs_<product>.<ext>` and the TS/Go equivalents) — one per `slugs_emit_task`.
+- **deployment stubs** — `new_file` writes (e.g. `terraform-moolabs.tf.j2` → `moolabs.tf`); `append` appends to the existing file **idempotently** (skips if `MOOLABS_API_KEY` is already present — never overwrites or duplicates); `checklist_only` (and any kind with no shipped template, i.e. `docker-compose` / `Dockerfile`) writes nothing and is surfaced as a PR-body checklist item.
+
+**Do NOT hand-author any artifact the driver renders.** The templates are the source of truth; the language is inferred from `stub_emit_path` and the slugs path from the per-product convention. The helper module (`moolabs_client.*`) is the one artifact rendered separately (Phase 2 above) — everything else flows through this driver. After it runs, Phase 2d applies the per-callsite code inserts.
+
 ### Phase 2d: Dispatch tasks to focused subagent contexts
 
 For each task in `tasks.yaml`, fire a subagent via the `Agent` tool with `subagent_type=general-purpose` and a focused prompt:
