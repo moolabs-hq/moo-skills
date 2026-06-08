@@ -30,7 +30,9 @@ _PY_TEMPLATES = ["python-fastapi.j2", "python-django.j2", "python-flask.j2"]
 _TS_TEMPLATES = ["typescript-express.j2", "typescript-nestjs.j2", "typescript-nextjs.j2"]
 
 
-def _sources(request_id="req.state.rid"):
+def _sources(request_id="get_correlation_id()"):
+    # request_id source matches the attribution_imports fixture (get_correlation_id)
+    # so the rendered insert imports AND uses it — the real F821 scenario.
     return {"request_id": request_id, "customer_id": "req.state.cid",
             "consumer_agent": None, "feature_key": None}
 
@@ -47,6 +49,9 @@ def _usage_entry():
         "event_type_const": "EVENT_TYPE_EMAIL_COMPOSED",
         "meter_slug_const": "METER_SLUG_ARC_DUNNING_EMAIL_COMPOSED",
         "feature_key_const": "FEATURE_KEY_DUNNING",
+        # binding-import for the request_id source (get_correlation_id) — the
+        # codemod must emit it or the insert NameErrors (dogfood ruff F821).
+        "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
     }
 
 
@@ -62,6 +67,7 @@ def _cost_entry():
         "event_type_const": "EVENT_TYPE_LLMPORT_CALL",
         "span_type_const": "SPAN_TYPE_LLM_TOKENS",
         "feature_key_const": "FEATURE_KEY_SHARED",
+        "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
     }
 
 
@@ -129,6 +135,7 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 "slugs_import_path": "app.slugs", "cost_kind": "llm-tokens",
                 "cost_micros_source": "r.cm",
                 "refund_unit": {"unit": "event", "derivation": 1},
+                "attribution_imports": [],
             }
             for tpl in _PY_TEMPLATES:
                 with self.subTest(tpl=tpl, pattern=pattern):

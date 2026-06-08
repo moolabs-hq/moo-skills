@@ -844,6 +844,38 @@ class AttributionKeyContract(unittest.TestCase):
         self.assertIn("consumer_agent", srcs)
         self.assertIsNone(srcs["consumer_agent"])
 
+    def test_binding_requires_import_threads_to_attribution_imports(self):
+        # Dogfood ruff F821: a binding's requires_import must reach the insert so
+        # the codemod emits it (else the rendered insert NameErrors on the symbol).
+        tasks = tp.build_tasks(
+            {"entries": []},
+            {"entries": [{"file": "app/s.py", "line": 1, "workflow_id": "x.y",
+                          "event_type": "x.y", "product_slug": "billing"}]},
+            {"edges": []}, {"capabilities": {}},
+            {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}},
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id",
+                                  "request_id": "get_correlation_id()"},
+            attribution_overrides=[], slug_inventory=None,
+            attribution_import_defaults={
+                "request_id": "from app.obs import get_correlation_id",
+                # an import for a binding whose source is NOT used must be dropped:
+                "consumer_agent": "from app.unused import nope"})
+        imports = tasks[0].inserts[0].entry["attribution_imports"]
+        self.assertEqual(imports, ["from app.obs import get_correlation_id"])
+
+    def test_attribution_imports_empty_when_no_requires_import(self):
+        tasks = tp.build_tasks(
+            {"entries": []},
+            {"entries": [{"file": "app/s.py", "line": 1, "workflow_id": "x.y",
+                          "event_type": "x.y", "product_slug": "billing"}]},
+            {"edges": []}, {"capabilities": {}},
+            {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}},
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+            attribution_overrides=[], slug_inventory=None)
+        self.assertEqual(tasks[0].inserts[0].entry["attribution_imports"], [])
+
 
 class DerivationCoercion(unittest.TestCase):
     """H (dogfood 2026-06-08): refund_unit.derivation must be a numeric scalar

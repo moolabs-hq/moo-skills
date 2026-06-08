@@ -21,8 +21,12 @@
      attribution_sources         — { request_id, customer_id, consumer_agent }
                                     Each is a CONFIRMED Python expression (Phase 1.6 binding)
                                     or None (skip / use fallback).
+     entry.attribution_imports   — import statements the binding expressions need
+                                    (e.g. get_correlation_id); emitted so the
+                                    insert doesn't NameError. May be empty.
 #}
-{% if entry.pattern == "sibling-pair" %}
+{% for _moolabs_imp in entry.attribution_imports %}{{ _moolabs_imp }}
+{% endfor %}{% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
 # emit_event_safe -> client.events.ingest(...). entity_id is the cross-lane

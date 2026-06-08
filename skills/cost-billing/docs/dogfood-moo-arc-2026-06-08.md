@@ -543,3 +543,37 @@ against the happy path (populated fixtures, tolerant env, source layout, textboo
 service), and only a dogfood on a genuinely awkward real service — rendered exactly
 as production does — exposed the truth. Build that adversarial e2e *in*, and most of
 this is caught before a customer ever sees it.
+
+---
+
+## Addendum 3 — rendered code fails the customer's linter (ruff), 2026-06-08
+
+After the instrument fixes landed, running moo-arc's **own** ruff pre-push gate on the
+rendered output surfaced 100 findings — exactly the retro's lesson #1 (`py_compile`
+proves compilation, not lint-correctness). Three classes:
+
+- **CRITICAL `F821` — the inserted code does not run.** Callsites rendered
+  `entity_id=str(get_correlation_id())` but never imported `get_correlation_id` →
+  NameError at runtime. Root: attribution-bindings.yaml *captures* the import
+  (`requires_import: from app.monitoring.logging import get_correlation_id`) but the
+  codemod read only `source` and dropped it. Fix: `_load_attribution_bindings` now
+  returns the per-binding imports; `build_tasks` resolves them per-file (override
+  wins, only for USED bindings) into `entry.attribution_imports`; every callsite
+  template emits them at the insert site.
+- **HIGH `F401`/`F811` — duplicate imports.** The codemod added a top-level
+  `helper_import` (SKILL Phase 2d step 4) AND the templates emit an in-function
+  import → top-level unused + redefinition. Fix: removed step 4; templates
+  self-import inline (helper + slug consts + attribution imports). `helper_import`
+  in tasks.yaml is now informational only.
+- **MINOR (84 of 100, all `--fix`-able) `I001`/`W293`/`UP045`.** Import sorting,
+  blank-line whitespace, and the Python helper's `Optional[X]` (→ `X | None`). Fix:
+  modernized the helper typing, and added a Phase-2d step to run the CUSTOMER's own
+  formatter (`ruff --fix`/`black`; `eslint --fix`/`prettier`; `gofmt`/`goimports`)
+  on touched files — their formatter is the source of truth for style.
+
+Cross-language: the fix applies to all 6 callsite templates (py + ts). The Go
+callsite template is still unshipped (TEMPLATE_MAP refuses); the TS helper uses
+idiomatic `| null` and the Go helper is gofmt-clean (audited — no Optional-class
+issue). Meta: this is the retro's "run the customer's linter on real output" gap —
+now the codemod renders the imports it needs AND defers final style to the
+customer's own formatter.

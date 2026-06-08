@@ -573,8 +573,12 @@ You are instrumenting ONE file. Your job:
 3. Apply each insert immediately AFTER the source line specified in the
    inventory entry's idempotency_anchor.handler return path. Preserve all
    existing imports + business logic.
-4. Add the helper import at the top of the file if not already present:
-   <task.helper_import>
+4. Do NOT add a separate top-level helper import. The template renders ALL the
+   imports its insert needs (the `emit_*_safe` helper, the per-product slug
+   constants, and the attribution-binding imports from `entry.attribution_imports`)
+   at the insert site. Adding `task.helper_import` at the top too produces an
+   UNUSED top-level import + a redefinition (dogfood ruff F401/F811). `helper_import`
+   in the task is informational only.
 5. Run `python -m py_compile <file>` (or the language equivalent). If it fails,
    that is a TEMPLATE or task_planner DEFECT, NOT a per-file fixup — STOP, leave
    the file unwritten, and report it for a skill-folder fix (a failing render
@@ -584,7 +588,16 @@ You are instrumenting ONE file. Your job:
    it produces compilable output by luck, so the template defect never surfaces.
    The render-smoke (`instrument/scripts/test_codemod_templates.py`) is the gate
    that should catch these before you ever reach a customer file.
-6. Stage + commit the file with message: `feat(moolabs): instrument
+6. Run the customer's OWN formatter/linter autofix on every file you touched
+   (NOT a moolabs tool — the customer's): Python `ruff check --fix <file> && ruff
+   format <file>` (or `isort` + `black`); TypeScript `eslint --fix` / `prettier
+   --write`; Go `gofmt -w` / `goimports -w`. The inserts are correct + compilable
+   but NOT pre-sorted to the customer's import order or line-length — their
+   formatter is the source of truth for style (sorts the imports the template
+   added, fixes whitespace, modernizes typing). If the customer has no formatter
+   configured, skip + note it in the PR. This is what makes the PR pass their
+   pre-push lint gate (dogfood: 84 of 100 ruff findings were autofixable).
+7. Stage + commit the file with message: `feat(moolabs): instrument
    <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
 
 You may NOT:

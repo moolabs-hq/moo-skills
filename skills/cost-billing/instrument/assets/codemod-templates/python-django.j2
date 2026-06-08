@@ -7,9 +7,10 @@
    conventions like `request.META.get('HTTP_X_REQUEST_ID')`. If the developer's
    middleware uses a non-standard source, that's what gets emitted here.
 
-   Variables: identical to python-fastapi.j2.
+   Variables: identical to python-fastapi.j2 (incl. entry.attribution_imports).
 #}
-{% if entry.pattern == "sibling-pair" %}
+{% for _moolabs_imp in entry.attribution_imports %}{{ _moolabs_imp }}
+{% endfor %}{% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
 # emit_event_safe -> client.events.ingest(...). Attribution sources from

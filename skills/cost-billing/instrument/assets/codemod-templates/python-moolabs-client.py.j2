@@ -44,7 +44,7 @@ from __future__ import annotations
 import os
 import re
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 {# Phase 1.7 env-wire (NEW v0.3 env-routing migration):
    env_config.mode               — "modify" | "stub"
@@ -139,17 +139,17 @@ def emit_usage_event_safe(
     meter_slug: str,
     value: float,
     # Well-known top-level data.* keys (canonical wire shape).
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Wraps client.usage.ingest_event with the env-gated never-drop rail.
     Required: event_type, customer_id, entity_id, meter_slug, value (finite)."""
@@ -181,17 +181,17 @@ def emit_cost_event_safe(
     customer_id: str,
     entity_id: str,
     spans: list[dict],
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Wraps client.cost.ingest_event with the env-gated never-drop rail.
     Required: event_type, customer_id, entity_id, spans (each MUST carry a
@@ -222,20 +222,20 @@ def emit_event_safe(
     event_type: str,
     customer_id: str,
     entity_id: str,
-    meter_slug: Optional[str] = None,
-    value: Optional[float] = None,
-    spans: Optional[list[dict]] = None,
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    meter_slug: str | None = None,
+    value: float | None = None,
+    spans: list[dict] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Wraps client.events.ingest (US-011, dual-lane). Use for sibling-pair
     emission. Required: event_type, customer_id, entity_id + at least one of
@@ -287,7 +287,7 @@ def _cost_fallback_fields(spans: list[dict], **kwargs: Any) -> dict:
     return fields
 
 
-def _event_fallback_fields(spans: Optional[list[dict]], **kwargs: Any) -> dict:
+def _event_fallback_fields(spans: list[dict] | None, **kwargs: Any) -> dict:
     fields = {
         "transport": "log_recovery_rail",
         "policy": "never_drop_event",

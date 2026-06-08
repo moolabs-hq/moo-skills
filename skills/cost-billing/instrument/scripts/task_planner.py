@@ -318,21 +318,33 @@ def _attribution_keys_for(framework: str) -> list[str]:
     return ["request_id", "customer_id"]
 
 
-def _load_attribution_bindings(path: Path) -> tuple[dict[str, str | None], list[dict[str, Any]]]:
-    """Read attribution-bindings.yaml. Returns (default_bindings, overrides[])."""
+def _load_attribution_bindings(
+    path: Path,
+) -> tuple[dict[str, str | None], list[dict[str, Any]], dict[str, str]]:
+    """Read attribution-bindings.yaml. Returns (default_bindings, overrides[],
+    default_imports).
+
+    A binding's `source` may be an expression that references a customer symbol
+    (e.g. `get_correlation_id()`), and the binding carries the import that puts
+    that symbol in scope under `requires_import`. The codemod MUST emit that
+    import or the rendered insert raises NameError at runtime (dogfood ruff F821).
+    `default_imports` maps binding-key -> import statement."""
     if not path.exists():
-        return {}, []
+        return {}, [], {}
     data = _read_yaml(path) or {}
     defaults: dict[str, str | None] = {}
+    default_imports: dict[str, str] = {}
     for key, val in (data.get("bindings") or {}).items():
         if isinstance(val, dict):
             defaults[key] = val.get("source")
+            if val.get("requires_import"):
+                default_imports[key] = val["requires_import"]
         else:
             defaults[key] = None
     overrides = data.get("overrides") or []
     if not isinstance(overrides, list):
         overrides = []
-    return defaults, overrides
+    return defaults, overrides, default_imports
 
 
 # Attribution keys the callsite templates reference directly — must always be
@@ -713,6 +725,7 @@ def build_tasks(
     attribution_overrides: list[dict[str, Any]] | None = None,
     slug_inventory: dict[str, Any] | None = None,
     anchor: tuple[str, str] | None = None,
+    attribution_import_defaults: dict[str, str] | None = None,
 ) -> list[Task]:
     """Group inventory entries by file, emit one task per file.
 
@@ -776,6 +789,22 @@ def build_tasks(
         sources_for_file = _resolve_sources_for_file(
             file_path, attribution_defaults or {}, attribution_overrides or []
         )
+        # Dogfood ruff F821: an attribution binding's `source` may reference a
+        # customer symbol (e.g. get_correlation_id()) whose import the binding
+        # carries under requires_import. The rendered insert calls that symbol, so
+        # the codemod MUST emit its import. Resolve per-file (override
+        # requires_import wins), then keep only the imports for bindings actually
+        # USED at this file (non-None resolved source) — deduped + sorted.
+        imports_for_file = dict(attribution_import_defaults or {})
+        for ov in attribution_overrides or []:
+            if ov.get("file") == file_path:
+                for k, val in (ov.get("bindings") or {}).items():
+                    if isinstance(val, dict) and val.get("requires_import"):
+                        imports_for_file[k] = val["requires_import"]
+        attribution_imports = sorted({
+            imp for k, imp in imports_for_file.items()
+            if sources_for_file.get(k) and imp
+        })
         inserts: list[Insert] = []
         for entry in entries:
             pattern = _pattern_for(entry, output_input_index)
@@ -839,6 +868,10 @@ def build_tasks(
                 # template raises UndefinedError on entry.pattern under
                 # StrictUndefined (advisor catch — the render contract).
                 "pattern": pattern,
+                # Imports the rendered insert needs for its attribution-binding
+                # expressions (e.g. get_correlation_id) — emitted with the helper /
+                # slug imports so the insert doesn't NameError (dogfood ruff F821).
+                "attribution_imports": attribution_imports,
                 # Guarantee event_type EXISTS (None when absent) — the cost-events
                 # schema has NO event_type property (cost entries carry workflow_id),
                 # so a schema-conformant cost / sibling-pair entry would otherwise
@@ -1146,7 +1179,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_profile = _read_yaml(Path(args.customer_context_dir) / "repo-info.yaml") or {}
 
     bindings_path = Path(args.customer_context_dir) / "attribution-bindings.yaml"
-    attribution_defaults, attribution_overrides = _load_attribution_bindings(bindings_path)
+    attribution_defaults, attribution_overrides, attribution_import_defaults = (
+        _load_attribution_bindings(bindings_path)
+    )
     if not attribution_defaults:
         sys.stderr.write(
             f"REFUSING TO RUN: attribution bindings not found at {bindings_path}\n"
@@ -1218,6 +1253,7 @@ def main(argv: list[str] | None = None) -> int:
         attribution_overrides=attribution_overrides,
         slug_inventory=slug_inv,
         anchor=anchor,
+        attribution_import_defaults=attribution_import_defaults,
     )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")

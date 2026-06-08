@@ -6,9 +6,10 @@
    NOT hardcode `flask.g.request_id` etc. The developer may keep these in a
    custom `flask.current_app.config['REQUEST_CONTEXT']` or elsewhere.
 
-   Variables: identical to python-fastapi.j2.
+   Variables: identical to python-fastapi.j2 (incl. entry.attribution_imports).
 #}
-{% if entry.pattern == "sibling-pair" %}
+{% for _moolabs_imp in entry.attribution_imports %}{{ _moolabs_imp }}
+{% endfor %}{% if entry.pattern == "sibling-pair" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
 # emit_event_safe -> client.events.ingest(...).

@@ -6,9 +6,11 @@
    hardcoded `req.headers['x-request-id']` etc. If the customer's middleware
    uses `(req as any).orgId` instead, that's what gets emitted.
 
-   Variables: same shape as python-fastapi.j2.
+   Variables: same shape as python-fastapi.j2 (incl. entry.attribution_imports —
+   each binding's requires_import, in TS import syntax; emitted verbatim).
 #}
-{% if entry.pattern == "sibling-pair" %}
+{% for _moolabs_imp in entry.attribution_imports %}{{ _moolabs_imp }}
+{% endfor %}{% if entry.pattern == "sibling-pair" %}
 // ─────────────────────────────────────────────────────────────────────────
 // moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
 // emitEventSafe -> client.events.ingest(...). entityId is the cross-lane
