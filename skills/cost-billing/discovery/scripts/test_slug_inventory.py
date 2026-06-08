@@ -358,6 +358,56 @@ class ProductSlugDerivation(unittest.TestCase):
         # Single-token event, no spec → "" (caller defaults to 'default').
         self.assertEqual(si._product_for_event("standalone", {}, []), "")
 
+    def test_longest_prefix_wins_over_shorter(self):
+        """PR #9 review NIT-2: when two namespace prefixes both match, the
+        LONGER (more specific) one must win. _build_product_map_from_specs
+        sorts prefixes longest-first; verify the precedence end to end."""
+        exact, prefix = si._build_product_map_from_specs([
+            {"product_slug": "arc",
+             "event_type_convention": {"namespace_prefix": "arc."},
+             "features": []},
+            {"product_slug": "arc-sub",
+             "event_type_convention": {"namespace_prefix": "arc.sub."},
+             "features": []},
+        ])
+        # arc.sub.thing matches BOTH "arc." and "arc.sub." → longer wins.
+        self.assertEqual(
+            si._product_for_event("arc.sub.thing", exact, prefix), "arc-sub")
+        # arc.other matches only "arc.".
+        self.assertEqual(
+            si._product_for_event("arc.other", exact, prefix), "arc")
+
+    def test_malformed_spec_shapes_do_not_crash(self):
+        """PR #9 review NIT-1: a per-feature-spec parsing to a non-dict, or
+        with non-dict event_type_convention / features, must be skipped — not
+        AttributeError the whole slug-inventory build (agent-authored input)."""
+        exact, prefix = si._build_product_map_from_specs([
+            ["not", "a", "dict"],                       # top-level list
+            "a string",                                  # scalar
+            {"product_slug": "ok",
+             "event_type_convention": "not-a-dict",      # wrong-type conv
+             "features": {"also": "not-a-list"}},        # wrong-type features
+            {"product_slug": "good",
+             "event_type_convention": {"namespace_prefix": "good."},
+             "features": [{"event_type": "good.thing"}]},
+        ])
+        # The well-formed spec still registers; malformed ones are skipped.
+        self.assertEqual(si._product_for_event("good.thing", exact, prefix), "good")
+        self.assertEqual(si._product_for_event("good.x", exact, prefix), "good")
+
+    def test_consolidation_check_tolerates_malformed_omap(self):
+        """PR #9 review NIT-1: non-dict edges/inputs/entries must be skipped."""
+        cost_inv = {"entries": ["not-a-dict",
+                                {"workflow_id": "c", "pattern": "sibling-pair"}]}
+        omap = {"edges": ["not-a-dict",
+                          {"output_workflow_id": "a",
+                           "inputs": ["bad", {"cost_workflow_id": "c"}]},
+                          {"output_workflow_id": "b",
+                           "inputs": [{"cost_workflow_id": "c"}]}]}
+        # Must not raise; 'c' feeds 2 outputs as sibling-pair → flagged.
+        errors = si.check_consolidation_double_count(cost_inv, omap)
+        self.assertTrue(any("'c'" in e for e in errors))
+
     def test_derive_buckets_by_real_product_not_default(self):
         """The end-to-end #5 fix: cost entries WITHOUT product_slug bucket
         under their real product (from the spec map), NOT 'default'."""

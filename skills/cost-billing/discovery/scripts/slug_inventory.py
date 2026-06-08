@@ -90,14 +90,24 @@ def _build_product_map_from_specs(
     exact: dict[str, str] = {}
     prefix: list[tuple[str, str]] = []
     for spec in specs or []:
+        # Defensive (PR #9 review NIT): a per-feature-spec.yaml that parses to
+        # a non-dict (top-level list, scalar) would otherwise AttributeError on
+        # .get(). These are agent-authored docs — tolerate malformed shapes by
+        # skipping rather than crashing the whole slug-inventory build.
+        if not isinstance(spec, dict):
+            continue
         product = spec.get("product_slug") or ""
         if not product:
             continue
-        conv = spec.get("event_type_convention") or {}
+        conv = spec.get("event_type_convention")
+        conv = conv if isinstance(conv, dict) else {}
         ns = conv.get("namespace_prefix") or ""
         if ns:
             prefix.append((ns, product))
-        for feat in spec.get("features") or []:
+        feats = spec.get("features")
+        for feat in feats if isinstance(feats, list) else []:
+            if not isinstance(feat, dict):
+                continue
             et = feat.get("event_type")
             if et:
                 exact[et] = product
@@ -267,19 +277,27 @@ def check_consolidation_double_count(cost_inv: dict, omap: dict) -> list[str]:
     workflow referenced by >=2 distinct output (usage) workflows is a
     consolidation point. Returns a list of warning strings (empty = clean).
     """
-    # Invert the omap: cost_workflow_id -> set(output_workflow_ids)
+    # Invert the omap: cost_workflow_id -> set(output_workflow_ids).
+    # Defensive (PR #9 review NIT): edges/inputs/entries from agent-authored
+    # YAML may parse to non-dict shapes; skip those rather than AttributeError.
     fan_out: dict[str, set[str]] = {}
     for edge in (omap.get("edges") if isinstance(omap, dict) else []) or []:
+        if not isinstance(edge, dict):
+            continue
         out_wf = edge.get("output_workflow_id")
         if not out_wf:
             continue
         for inp in edge.get("inputs") or []:
+            if not isinstance(inp, dict):
+                continue
             cost_wf = inp.get("cost_workflow_id")
             if cost_wf:
                 fan_out.setdefault(cost_wf, set()).add(out_wf)
 
     warnings: list[str] = []
     for entry in (cost_inv.get("entries") if isinstance(cost_inv, dict) else []) or []:
+        if not isinstance(entry, dict):
+            continue
         if entry.get("pattern") != "sibling-pair":
             continue
         wf = entry.get("workflow_id")
