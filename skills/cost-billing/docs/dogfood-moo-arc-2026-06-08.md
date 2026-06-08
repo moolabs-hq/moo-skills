@@ -453,3 +453,93 @@ fixture is now schema-conformant (no `event_type`), and a dedicated
 absent-`event_type` test guards it. Lesson: a producer-guarantees-keys contract is
 only as good as the fixtures' fidelity to the *sparsest schema-legal shape* — over-
 populated fixtures hide exactly the absent-key bugs the contract exists to prevent.
+
+---
+
+# Skills Retro — what the suite could have done better
+
+Every defect in this retro was a *real customer-facing break* that the green test
+suite did not catch. The bugs are fixed; the point of this section is the systemic
+gaps in the **skills themselves** that let them ship, ordered by leverage.
+
+### 1. Test fixtures must mirror the SPARSEST schema-legal shape AND the real execution env
+This single gap hid the most damage. The Phase-7 render-smoke used a *tolerant*
+jinja env and fixtures where every optional key (`idempotency_anchor`,
+`event_type`, `cost_micros_source`, `confidence`, `consumer_agent`) was populated.
+The real codemod renders under **StrictUndefined** against the *minimal* shapes
+discovery actually emits. That mismatch alone masked **five** absent-key CRITICALs
+(rounds 3-4 + the attribution/cost/refund siblings) and the 0/8 render failure.
+**Do:** every template/codegen skill renders under the SAME env as production,
+against fixtures built from the schema's *required-only* keys — plus a build→emit→
+reload→render→compile e2e on a real awkward service. A fixture that over-populates
+optional fields is worse than no fixture: it gives false confidence.
+
+### 2. Sibling search must be CLASS-complete, not instance-complete
+The adversarial review found a CRITICAL *every round* for four rounds — not because
+fixes were wrong, but because each fix patched one *instance* of a class while the
+class stayed open (fixed `idempotency_anchor` then missed `event_type`; fixed
+single-level keys then missed the nested `.confidence`). The convergence proof — an
+**exhaustive table of every `entry.X` deref classified schema-required / producer-
+guaranteed / template-guarded** — wasn't built until round 5. Built at round 3 it
+would have closed the class in one pass. **Do:** the moment a bug-class is named,
+enumerate the whole class (grep every occurrence, cross-check each against the
+schema + producer) before fixing — don't fix instances and re-review.
+
+### 3. Never hand-roll YAML twice; one rigorously round-trip-tested serializer
+`task_planner` emits YAML by hand (PyYAML is a soft dep) and accreted **two**
+escape mechanisms — a `repr()`-based helper and a per-field `.replace()` — each
+with a different hole (`repr` breaks mixed-quote + corrupts newline; `.replace`
+missed newline). Result: unparseable `tasks.yaml` for *every* TypeScript customer.
+**Do:** if a soft-dep forces hand-rolled serialization, write ONE serializer, prove
+it round-trips every special char through the real parser, and route 100% of values
+through it. `repr()` is not a YAML serializer.
+
+### 4. A failing render is a SKILL defect to report — forbid the hand-patch escape hatch
+The Phase-2d subagent instruction said "if `py_compile` fails, FIX the rendered
+output." That is the hand-authoring the dogfood elsewhere bans — it lets broken
+templates pass by luck, so template defects never surface as failures (it hid E/F
+for rounds). **Do:** when a skill delegates emission to a subagent, a failing
+render/compile must STOP and report a skill-folder defect, never be patched per-file.
+
+### 5. LLM-subagent contracts must be explicit and machine-checkable, not prose
+The callsite render is performed by a Phase-2d subagent following SKILL.md *prose*.
+The prose was vague ("substitute the entry into the template") and silent on the env
+and the exact context — so the producer could emit `pattern` as a *sibling* of
+`entry` while the template read `entry.pattern`, and a literal reading crashed every
+insert. There was no deterministic render function to pin the contract. **Do:** where
+a skill hands a precise operation to an LLM, back the prose with a deterministic
+function + a test (or at minimum spell out the exact inputs + env), so the subagent
+can't diverge.
+
+### 6. Cross-check what templates CONSUME against what the schema/producer GUARANTEE
+The templates dereferenced keys the schemas mark *optional* (`event_type`,
+`confidence`) with no producer guarantee — the absent-key class. Nothing tied "keys
+the template reads" to "keys the schema requires or the producer emits." **Do:**
+treat the template's variable list as a contract and assert the invariant *every
+referenced key is schema-required OR producer-guaranteed OR template-guarded* —
+ideally as a test, so a new template referencing a new optional key fails loudly.
+
+### 7. Discovery should validate SEMANTIC data quality and surface gaps loudly
+Two breaks were discovery *data* gaps the instrument layer could only flag: a
+`refund_unit.derivation` storing prose ("1 apply_remittance completion") instead of
+the schema's runtime expression, and a cost entry with no `cost_micros_source` (an
+empty cost lane). **Do:** discovery validates against the schema's *semantic intent*
+(derivation is an expression; a cost entry needs a value source), and downstream
+surfaces missing data LOUDLY (the `cost_value_missing` / `derivation_needs_review`
+flag + stderr pattern) rather than silently coercing to a wrong-but-compilable value.
+
+### 8. Test the INSTALLED layout, and assign questions by who-holds-the-knowledge
+Two earlier finds this session: the cross-skill import broke for *installed* users
+because the smoke only ran from the source tree (PR #12); and the bootstrap chain
+asked the **CFO** for PII field-paths/regex it cannot author (the regime is the
+CFO's, the data *categories* the CPO's, the field *paths* the engineer's). **Do:**
+test the installed layout as a first-class case, and design each questionnaire stage
+to ask a role only what it can answer authoritatively.
+
+### The one-line meta-lesson
+**Green tests proved compilation, never correctness against real, minimal, awkward
+inputs.** Six of these eight gaps are the same root: the skills were validated
+against the happy path (populated fixtures, tolerant env, source layout, textbook
+service), and only a dogfood on a genuinely awkward real service — rendered exactly
+as production does — exposed the truth. Build that adversarial e2e *in*, and most of
+this is caught before a customer ever sees it.
