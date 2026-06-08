@@ -424,3 +424,19 @@ produces. New `instrument/scripts/test_codemod_templates.py` renders every
 callsite template under **StrictUndefined** against realistic sparse fixtures
 (usage-only with no idempotency_anchor; cost-only with no cost value) + a full
 build→emit→render→`py_compile` e2e on the moo-arc shape. Smoke 125→127.
+
+**Render-contract fix (advisor catch on the first e2e):** the templates branch on
+`entry.pattern`, but the planner emitted `pattern` as a SIBLING of `entry` in
+tasks.yaml — and Phase 2d renders by "substituting the entry block into the
+template". A subagent rendering `entry=<the entry block>` would raise on
+`entry.pattern` (the e2e originally only passed because it hand-merged pattern —
+masking the bug). Fix: `build_tasks` now puts `pattern` INSIDE `enriched_entry`,
+the e2e renders `entry=ins["entry"]` with NO hand-merge (so it mirrors the real
+render path), and `instrument/SKILL.md` Phase 2d now spells out the exact render
+context (the entry block — which carries pattern — + attribution_sources, under a
+strict-undefined env). That SKILL.md step also CLOSES the "if py_compile fails,
+FIX the rendered output" escape hatch — the hand-patching that let broken template
+output pass by luck and hid E/F for rounds; a failing render is now a
+report-the-skill-defect STOP, not a per-file fixup. The idempotency REVIEW prompt
+is preserved for usage-only/sibling-pair via an `{% else %}` generic prompt (so
+guarding the anchor out doesn't silently drop the retry-double-count review).

@@ -830,6 +830,13 @@ def build_tasks(
                 )
             enriched_entry = {
                 **entry,
+                # The callsite templates branch on `entry.pattern`, and Phase 2d
+                # renders by substituting THIS entry block into the template
+                # (SKILL.md). pattern is also emitted at the insert level for the
+                # subagent's routing, but it MUST live in entry too or the
+                # template raises UndefinedError on entry.pattern under
+                # StrictUndefined (advisor catch — the render contract).
+                "pattern": pattern,
                 "cost_kind": effective_cost_kind,
                 # Guarantee the optional cost-value key EXISTS (None when absent)
                 # so the template's `{% if entry.cost_micros_source %}` guard works

@@ -27,7 +27,7 @@ from app.services.moolabs_client import emit_event_safe
 _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% if not attribution_sources.request_id %}_moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
-{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% endif %}
+{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW: idempotency — no derived anchor for this event; verify entity_id keys it uniquely so a retry does not double-count{% endif %}
 emit_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ entry.event_type ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
@@ -62,7 +62,7 @@ from app.services.moolabs_client import emit_usage_event_safe
 
 _moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
-{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% endif %}
+{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW: idempotency — no derived anchor for this event; verify entity_id keys it uniquely so a retry does not double-count{% endif %}
 emit_usage_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ entry.event_type ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),

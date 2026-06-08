@@ -120,6 +120,17 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 out = self._render(tpl, _sibling_entry())
                 self._assert_py_compiles(out, f"{tpl} sibling-pair")
 
+    def test_usage_only_preserves_idempotency_review_surface(self):
+        # The E guard must not SILENTLY drop the idempotency review prompt for
+        # usage-only/sibling-pair (which never carry a derived anchor) — usage
+        # events can double-count on retry, so the review surface is preserved via
+        # the {% else %} generic prompt (advisor follow-up).
+        for tpl in _PY_TEMPLATES:
+            for entry in (_usage_entry(), _sibling_entry()):
+                with self.subTest(tpl=tpl, pattern=entry["pattern"]):
+                    out = self._render(tpl, entry)
+                    self.assertIn("REVIEW: idempotency", out)
+
     def test_typescript_all_patterns_render(self):
         # Can't compile TS here; assert StrictUndefined render succeeds + the
         # emit call appears (no UndefinedError on the missing idempotency_anchor).
@@ -157,10 +168,15 @@ class EndToEndPipeline(unittest.TestCase):
     the attribution sibling together — the coverage that was missing."""
 
     def _render_contract(self, env, template, ins):
-        # Render contract: the insert's `pattern` is merged into `entry`.
+        # Mirror the REAL Phase 2d render contract: the subagent substitutes the
+        # insert's `entry` block + `attribution_sources` into the template — NO
+        # hand-merge. `entry.pattern` must therefore be present IN the entry block
+        # (build_tasks guarantees it). If a test had to inject pattern by hand,
+        # the producer would be wrong and the real codemod would 0/8 (advisor catch).
+        self.assertIn("pattern", ins["entry"],
+                      "entry block must carry pattern for the Phase 2d render contract")
         return env.get_template(template.split("/")[-1]).render(
-            entry={**ins["entry"], "pattern": ins["pattern"]},
-            attribution_sources=ins["attribution_sources"])
+            entry=ins["entry"], attribution_sources=ins["attribution_sources"])
 
     def test_moo_arc_shape_renders_and_compiles_end_to_end(self):
         try:

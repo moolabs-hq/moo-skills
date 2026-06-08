@@ -549,15 +549,33 @@ For each task in `tasks.yaml`, fire a subagent via the `Agent` tool with `subage
 You are instrumenting ONE file. Your job:
 
 1. Read the file at <task.file>.
-2. For each insert in <task.inserts>, render the helper call by substituting
-   the inventory entry into <task.template>.
+2. For each insert in <task.inserts>, render <task.template> with EXACTLY this
+   context — nothing added, nothing merged:
+     - `entry`              = the insert's `entry` block verbatim. It is COMPLETE:
+                              it carries `pattern`, `event_type`, `workflow_id`,
+                              the `*_const` slug names (or null), `slugs_import_path`,
+                              `cost_kind` / `cost_micros_source` / `cost_value_missing`,
+                              `refund_unit`, and `idempotency_anchor` (cost-only only).
+     - `attribution_sources` = the insert's `attribution_sources` block verbatim
+                              (always carries customer_id / request_id / consumer_agent,
+                              each an expression or null).
+   Render under a STRICT-undefined jinja env (an absent key is a DEFECT to report,
+   not a silently-blank field). Do NOT inject `entry.pattern` or any other key by
+   hand — the planner already put everything the template needs in the entry block.
 3. Apply each insert immediately AFTER the source line specified in the
    inventory entry's idempotency_anchor.handler return path. Preserve all
    existing imports + business logic.
 4. Add the helper import at the top of the file if not already present:
    <task.helper_import>
-5. Run `python -m py_compile <file>` (or the language equivalent). If it
-   fails, FIX the rendered output — do NOT proceed with broken Python.
+5. Run `python -m py_compile <file>` (or the language equivalent). If it fails,
+   that is a TEMPLATE or task_planner DEFECT, NOT a per-file fixup — STOP, leave
+   the file unwritten, and report it for a skill-folder fix (a failing render
+   means a missing template guard or a planner data bug that affects EVERY
+   customer on that pattern). Do NOT hand-patch the rendered output: hand-patching
+   around broken templates is exactly what hid dogfood findings E/F for rounds —
+   it produces compilable output by luck, so the template defect never surfaces.
+   The render-smoke (`instrument/scripts/test_codemod_templates.py`) is the gate
+   that should catch these before you ever reach a customer file.
 6. Stage + commit the file with message: `feat(moolabs): instrument
    <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
 
