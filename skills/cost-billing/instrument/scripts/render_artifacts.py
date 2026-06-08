@@ -67,6 +67,11 @@ _LANG_EXT = {"python": "py", "typescript": "ts", "go": "go"}
 # idempotent (don't re-append if the file is already wired).
 _APPEND_SENTINEL = "MOOLABS_API_KEY"
 
+# Marker present in every rendered template's header. Used by new_file to tell
+# OUR previously-generated artifact (safe to overwrite/regenerate) apart from a
+# hand-written customer file at the same path (must NOT be clobbered).
+_GENERATED_MARKER = "/cost-billing-instrument"
+
 
 @dataclass
 class RenderJob:
@@ -97,8 +102,17 @@ def load_yaml(path: Path) -> dict:
 
 
 def infer_language(tasks: dict) -> str:
-    """Infer the service's primary language from the stub_emit_path extension on
-    the first env_wire_task. Defaults to python."""
+    """Infer the service's primary language. Prefers the per-file insert tasks'
+    explicit `language` field (always present, even in modify mode), then falls
+    back to the stub_emit_path extension, then python.
+
+    The stub_emit_path-only inference was unreliable: a service in MODIFY mode
+    has no stub_emit_path, so an all-modify TS/Go repo would default to python
+    and render the wrong slugs template."""
+    for t in tasks.get("tasks") or []:
+        lang = t.get("language")
+        if lang in ("python", "typescript", "go"):
+            return lang
     for t in tasks.get("env_wire_tasks") or []:
         stub = t.get("stub_emit_path") or ""
         suffix = Path(stub).suffix.lower()
@@ -247,10 +261,26 @@ def render_and_write(
             manifest.append(rec)
             continue
 
-        # new_file
+        # new_file — write, but NEVER clobber a hand-written customer file.
+        # A pre-existing file is safe to overwrite ONLY if it carries our
+        # generated marker (i.e. it's our own prior output being regenerated).
+        # Otherwise the customer authored it → skip + record for the checklist.
+        if dest_path.is_file():
+            existing = dest_path.read_text()
+            if _GENERATED_MARKER not in existing:
+                sys.stderr.write(
+                    f"render_artifacts: REFUSING to overwrite customer-authored "
+                    f"{job.dest} (no generated marker) — wire MOOLABS_API_KEY by "
+                    f"hand or remove the file to regenerate\n"
+                )
+                rec["action"] = "skipped_customer_file"
+                manifest.append(rec)
+                continue
+            rec["action"] = "regenerated"
+        else:
+            rec["action"] = "wrote"
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_text(rendered)
-        rec["action"] = "wrote"
         manifest.append(rec)
 
     return manifest
