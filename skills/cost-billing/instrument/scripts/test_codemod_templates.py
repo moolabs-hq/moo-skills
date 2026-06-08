@@ -285,6 +285,8 @@ class EndToEndPipeline(unittest.TestCase):
         import subprocess
         if shutil.which("ruff") is None:
             self.skipTest("ruff not installed")
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
         ctx = {
             "service_slug": "acme-payments-platform-service",
             "signoff_chain_hashes": [{"stage": "engineer",
@@ -296,7 +298,7 @@ class EndToEndPipeline(unittest.TestCase):
                            "stub_emit_path": None},
             "generated_at": "2026-06-08T00:00:00.123456+00:00",
         }
-        out = self.env.get_template("python-moolabs-client.py.j2").render(**ctx)
+        out = env.get_template("python-moolabs-client.py.j2").render(**ctx)
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
             fh.write(out)
             path = fh.name
