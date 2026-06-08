@@ -42,9 +42,13 @@ class InstalledLayoutStandaloneInvocation(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _run(self, rel: str, *args: str) -> subprocess.CompletedProcess:
+        # cwd=self.root sandboxes any CWD-relative writes (env_loader_scan's
+        # --customer-context-dir defaults to .moolabs/ relative to CWD) inside
+        # the tempdir tearDown removes — otherwise a full-main() invocation
+        # leaks a non-gitignored .moolabs/ into the repo root (round-1 review).
         return subprocess.run(
             [sys.executable, str(self.root / rel), *args],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, cwd=str(self.root),
         )
 
     def test_env_loader_scan_imports_in_installed_layout(self):
@@ -83,6 +87,7 @@ class InstalledLayoutStandaloneInvocation(unittest.TestCase):
         r = self._run("cost-billing-discovery/scripts/env_loader_scan.py",
                       "--catalog", "/nonexistent/env-loader-patterns.yaml",
                       "--repo-root", self._tmp)
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
         self.assertNotIn("unrecognized arguments", r.stderr)
         self.assertNotIn("ModuleNotFoundError", r.stderr)
 
