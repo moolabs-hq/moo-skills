@@ -524,10 +524,14 @@ python scripts/render_artifacts.py \
 ```
 
 It is driven by the winning framework node + the DERIVED paths in the
-inventory. `scripts/dispatch.py` reads each service's `node_id` and runs ONLY
-that node's declared `scripts` (config_wire + render_artifacts) — "pick the
-specific framework context, run only its scripts." Emit paths are **derived
-from the customer's detected config location** (`env-routing-inventory`'s
+inventory. Run each service's node `scripts` in order — `scripts/dispatch.py`
+is the helper that gates this ("pick the specific framework context, run only
+its scripts"). Today every config-axis node declares the same
+`scripts: ["config_wire", "render_artifacts"]`, so you run both per service; the
+per-node `scripts` list becomes selective when a later framework (e.g. a
+deployment-framework node) declares a different set — divergence is then a node
+data change, not a code change. Emit paths are **derived from the customer's
+detected config location** (`env-routing-inventory`'s
 `emit_path`/`import_path`), NEVER hardcoded `app/services/`.
 
 It emits, honoring each deployment stub's `mode`:

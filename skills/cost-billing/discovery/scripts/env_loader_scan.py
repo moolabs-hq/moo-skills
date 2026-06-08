@@ -786,6 +786,17 @@ def _service_entry(
     Task 9 removes the parameter."""
     language = service.get("language", "python")
     service_root_rel = service["root"]
+    # Emit/import anchor = the scan_root's repo-relative path, NOT service["root"].
+    # In per-service granularity these are equal (scan_root == repo_root/service
+    # root). In repo-wide granularity scan_root == repo_root/shared_config_path,
+    # and the stub must land beside the SHARED config (where its import resolves),
+    # not under each service tree — otherwise emit_path and import_path describe
+    # different trees and the customer-side import fails (PR #11 review F1).
+    scan_root_rel = (
+        str(scan_root.relative_to(repo_root))
+        if scan_root.is_relative_to(repo_root)
+        else service_root_rel
+    )
     # search_roots include the repo root so a Settings base imported from a
     # shared repo-level package (outside the service tree) still resolves for
     # the transitive pydantic-settings detection (Dogfood #1a).
@@ -807,7 +818,7 @@ def _service_entry(
             "confidence": "none",
             "evidence": [],
             "stub_required": True,
-            "emit_path": _derive_emit_path(service_root_rel, fb_dir, fb_basename + ext),
+            "emit_path": _derive_emit_path(scan_root_rel, fb_dir, fb_basename + ext),
             "import_path": fb_import,
         }
     else:
@@ -828,11 +839,12 @@ def _service_entry(
         emit_path = None
         import_path = None
         if node is not None:
-            # SERVICE-RELATIVE config path: result.file lives under scan_root
-            # (the scan rglob'd it), so relative_to(scan_root) is safe. Using
-            # scan_root (NOT a service["root"] prefix-strip) is correct for
-            # repo-wide granularity where scan_root = repo_root/shared_config_path
-            # and result.file is NOT under services/<svc>/.
+            # SCAN-ROOT-RELATIVE config path: result.file lives under scan_root
+            # (the scan rglob'd it), so relative_to(scan_root) is safe. The
+            # import rule strips package-root markers (src/) from this; the emit
+            # path re-anchors the SAME scan-root-relative dir under scan_root_rel
+            # so emit_path and import_path always describe ONE consistent tree
+            # (correct in both per-service and repo-wide granularity — F1).
             service_rel = str(Path(result.file).relative_to(scan_root))
             basename = node.emit["artifact_basename"]
             emit_dir_rel, import_path = strategies.IMPORT_RULES[
@@ -840,7 +852,7 @@ def _service_entry(
             ](service_rel, basename, "")
             ext = _EMIT_EXT_BY_LANGUAGE.get(language, ".py")
             emit_path = _derive_emit_path(
-                service_root_rel, emit_dir_rel, basename + ext
+                scan_root_rel, emit_dir_rel, basename + ext
             )
 
         app_config = {
@@ -936,6 +948,10 @@ def build_inventory(
                       see the degradation happened.
       - TBD:          per-service best-effort with granularity_source flag
     """
+    # Drop any stale source-file index from a prior in-process scan (F3): the
+    # index is keyed by path only, so a server-style caller re-scanning a mutated
+    # tree must start fresh. Within this run the index is rebuilt once per root.
+    strategies.clear_index_cache()
     if granularity == "repo-wide" and shared_config_path:
         scan_root = repo_root / shared_config_path
         service_entries: list[dict] = []

@@ -57,6 +57,24 @@ class LoadRegistry(unittest.TestCase):
             with self.assertRaises(fr.RegistryError):
                 fr.load_registry(root)
 
+    def test_missing_artifact_basename_raises(self):
+        # F5: emit.artifact_basename required (else a raw KeyError mid-scan).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, "python/bad.yaml",
+                              _VALID_NODE.replace(
+                                  "  artifact_basename: moolabs_settings\n", ""))
+            with self.assertRaises(fr.RegistryError):
+                fr.load_registry(root)
+
+    def test_unknown_import_rule_raises(self):
+        # F5: emit.import_rule must be a known IMPORT_RULES key.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp, "python/bad.yaml",
+                              _VALID_NODE.replace("import_rule: python_package",
+                                                  "import_rule: bogus_rule"))
+            with self.assertRaises(fr.RegistryError):
+                fr.load_registry(root)
+
     def test_empty_dir_returns_empty_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "frameworks").mkdir()

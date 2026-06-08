@@ -36,6 +36,19 @@ _MAX_BASE_DEPTH = 8
 # all and would take ~100s on a real monorepo). Used by the src-layout
 # fallback in _resolve_module_files to locate a package by module-path suffix.
 _PY_INDEX_CACHE: dict[str, list[str]] = {}
+
+
+def clear_index_cache() -> None:
+    """Drop the cached source-file index. The cache is keyed by root PATH with
+    no filesystem-state component, so a long-running in-process caller that
+    re-scans the SAME path after its files changed would otherwise get a stale
+    index (PR #11 review F3). The one-shot CLI is unaffected (fresh process), but
+    build_inventory calls this at entry so a server-style caller that invokes it
+    repeatedly always indexes the current tree. Within a single build_inventory
+    run the index is still built once per root and reused across services."""
+    _PY_INDEX_CACHE.clear()
+
+
 # Non-dotted heavy dirs to prune from the source walk. All DOT-prefixed dirs
 # (.venv, .git, .tox, .terraform, .mypy_cache, …) are pruned separately via the
 # `startswith(".")` check, so they need not be listed here.

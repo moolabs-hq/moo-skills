@@ -524,28 +524,32 @@ def resolve_slug_constants(
 
 
 def stub_anchor(env_wire_tasks: list[EnvWireTask] | None) -> tuple[str, str] | None:
-    """Pick the single (stub_emit_path, settings_import_path) anchor that all
-    products' slugs modules hang off of.
+    """Pick the (stub_emit_path, settings_import_path) anchor that products'
+    slugs modules hang off of — a REAL customer location, never a hardcode.
 
-    The inventory carries NO product→service edge, so we can't map products to
-    services. The anchor is therefore the SOLE stub-mode env-wire task that has
-    a non-null stub_emit_path. Returns:
-      - (stub_emit_path, settings_import_path) when exactly one such task exists ;
-      - None when there are zero (all modify mode → no stub file to swap on) OR
-        more than one distinct stub (multi-service ambiguity).
-    Callers fall back to the legacy hardcoded convention when this returns None.
+    The inventory carries NO product→service edge, so we can't map a product to
+    the specific service whose package its slugs belong in. Returns:
+      - (stub_emit_path, settings_import_path) of the FIRST stub-mode env-wire
+        task with a non-null stub_emit_path ;
+      - None ONLY when there are zero stubs (every service is modify mode → no
+        stub file to anchor on).
+
+    MULTI-SERVICE LIMITATION (documented, NOT a hardcode): when 2+ services are
+    stubbed, all products' slugs anchor on the FIRST service's stub package.
+    This is a customer-derived best-effort — strictly better than the old
+    `app/services/moolabs` literal (PR #11 review F2). A product whose callsites
+    live in a DIFFERENT service imports slugs from the first service's package,
+    which only resolves if that package is importable repo-wide. The correct fix
+    is a product→service edge so each product anchors on ITS service's stub;
+    tracked as a follow-up. Only the zero-stub (all-modify) case falls through to
+    the legacy convention.
     """
     if not env_wire_tasks:
         return None
-    anchors: list[tuple[str, str]] = []
-    seen: set[str] = set()
     for t in env_wire_tasks:
         if t.mode == "stub" and t.stub_emit_path:
-            key = t.stub_emit_path
-            if key not in seen:
-                seen.add(key)
-                anchors.append((t.stub_emit_path, t.settings_import_path or ""))
-    return anchors[0] if len(anchors) == 1 else None
+            return (t.stub_emit_path, t.settings_import_path or "")
+    return None
 
 
 def build_slugs_emit_tasks(

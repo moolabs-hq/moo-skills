@@ -614,12 +614,16 @@ class StubAnchorDerivation(unittest.TestCase):
         ewt = [self._stub("svc", None, "app.config", mode="modify")]
         self.assertIsNone(tp.stub_anchor(ewt))
 
-    def test_multiple_distinct_stubs_returns_none(self):
+    def test_multiple_distinct_stubs_anchors_on_first_not_hardcode(self):
+        # F2: multi-service must anchor on a REAL customer stub (the FIRST),
+        # NEVER fall back to the app/services/moolabs literal.
         ewt = [
-            self._stub("a", "services/a/app/moolabs_settings.py", "app.moolabs_settings"),
-            self._stub("b", "services/b/app/moolabs_settings.py", "app.moolabs_settings"),
+            self._stub("a", "services/a/app/moolabs_settings.py", "a.moolabs_settings"),
+            self._stub("b", "services/b/app/moolabs_settings.py", "b.moolabs_settings"),
         ]
-        self.assertIsNone(tp.stub_anchor(ewt))
+        anchor = tp.stub_anchor(ewt)
+        self.assertEqual(anchor, ("services/a/app/moolabs_settings.py", "a.moolabs_settings"))
+        self.assertNotIn("app/services/moolabs", anchor[0])
 
     def test_duplicate_stub_path_collapses_to_single_anchor(self):
         # same stub_emit_path twice (idempotent) → still a single anchor.

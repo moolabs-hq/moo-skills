@@ -69,6 +69,36 @@ class EndToEndFrameworkTree(unittest.TestCase):
             self.assertEqual(ac["import_path"], "myapp.moolabs_settings")
             self.assertNotIn("app/services", ac["emit_path"])
 
+    def test_repo_wide_shared_package_emit_matches_import(self):
+        """F1: repo-wide granularity (shared config package). The stub must land
+        BESIDE the shared config (where its import resolves), not under each
+        service tree — emit_path and import_path must describe ONE tree."""
+        import env_loader_scan as e
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Shared config package at packages/common/src/python_common/.
+            cfg_dir = repo / "packages" / "common" / "src" / "python_common"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    api: str\n")
+            inv = e.build_inventory(
+                repo,
+                [{"slug": "svcA", "root": "services/svcA", "language": "python"},
+                 {"slug": "svcB", "root": "services/svcB", "language": "python"}],
+                granularity="repo-wide", granularity_source="declared",
+                shared_config_path="packages/common")
+            for svc in inv["services"]:
+                ac = svc["app_config"]
+                # emit lands beside the SHARED config, NOT under services/<svc>/
+                self.assertEqual(
+                    ac["emit_path"],
+                    "packages/common/src/python_common/moolabs_settings.py",
+                    f"repo-wide emit_path wrong: {ac['emit_path']}")
+                # import resolves against packages/common/src (src stripped)
+                self.assertEqual(ac["import_path"], "python_common.moolabs_settings")
+                self.assertNotIn("services/svc", ac["emit_path"])
+
 
 if __name__ == "__main__":
     unittest.main()

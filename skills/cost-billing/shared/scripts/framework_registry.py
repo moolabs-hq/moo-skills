@@ -28,6 +28,9 @@ _LANGUAGES = {"python", "typescript", "go"}
 _KINDS = {"regex", "code"}
 _MODES = {"modify", "stub"}
 _ANCHORS = {"detected_config_dir", "service_root"}
+# Must stay in sync with strategies.IMPORT_RULES. Kept as a literal here so the
+# registry loader does not import strategies (avoids a load-order dependency).
+_IMPORT_RULES = {"python_package", "ts_alias", "go_module"}
 _REQUIRED_TOP = ("id", "language", "framework", "detection", "wiring", "emit", "scripts")
 
 
@@ -58,6 +61,11 @@ def _validate(d: dict, path: Path) -> Node:
     emit = d["emit"] or {}
     if emit.get("anchor") not in _ANCHORS:
         raise RegistryError(f"{path}: emit.anchor must be one of {_ANCHORS}")
+    if not emit.get("artifact_basename"):
+        raise RegistryError(f"{path}: emit.artifact_basename is required")
+    if emit.get("import_rule") not in _IMPORT_RULES:
+        raise RegistryError(
+            f"{path}: emit.import_rule must be one of {_IMPORT_RULES}")
     if not isinstance(d["scripts"], list) or not d["scripts"]:
         raise RegistryError(f"{path}: scripts must be a non-empty list")
     return Node(
