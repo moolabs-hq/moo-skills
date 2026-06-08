@@ -660,10 +660,23 @@ class BuildSlugsEmitTasksAnchor(unittest.TestCase):
         self.assertIsNone(tasks[0].slugs_emit_path)
         self.assertEqual(tasks[0].product_slug, "billing")
 
-    def test_typescript_ext_in_emit_basename(self):
+    def test_typescript_emit_stays_none_matching_import_gate(self):
+        # IMP-1: TS/Go slugs EMIT must be gated to legacy exactly like the
+        # IMPORT (_slugs_import_for_entry is python-only) — else the slugs file
+        # is written where no TS callsite imports it. Anchor-derived TS/Go is a
+        # follow-up; until then emit AND import both use the legacy convention.
         anchor = ("src/moolabs-settings.ts", "@/moolabs-settings")
         tasks = tp.build_slugs_emit_tasks(self._inv(), "typescript", anchor)
-        self.assertEqual(tasks[0].slugs_emit_path, "src/slugs_billing.ts")
+        self.assertIsNone(tasks[0].slugs_emit_path)
+        # The per-callsite import is also legacy for TS → emit + import agree.
+        self.assertEqual(
+            tp._slugs_import_for_entry("typescript", "billing", anchor),
+            tp._slugs_import_path_for("typescript", "billing"))
+
+    def test_go_emit_stays_none_matching_import_gate(self):
+        anchor = ("internal/conf/settings.go", "internal/conf")
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "go", anchor)
+        self.assertIsNone(tasks[0].slugs_emit_path)
 
 
 class BuildTasksAnchorDerivedImport(unittest.TestCase):

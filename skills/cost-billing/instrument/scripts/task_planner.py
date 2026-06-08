@@ -559,11 +559,19 @@ def build_slugs_emit_tasks(
 ) -> list[SlugsEmitTask]:
     """One slugs-emit task per product in the inventory.
 
-    When ``anchor`` (the service's stub (emit_path, import_path)) is provided,
-    each task's ``slugs_emit_path`` is derived as a SIBLING of the stub via
-    ``slugs_paths_from_stub`` — landing the slugs file in the customer's real
-    config package. Without an anchor, ``slugs_emit_path`` stays None and
-    render_artifacts falls back to its legacy convention. ``language`` selects
+    When ``anchor`` (the service's stub (emit_path, import_path)) is provided
+    AND the language is python, each task's ``slugs_emit_path`` is derived as a
+    SIBLING of the stub via ``slugs_paths_from_stub`` — landing the slugs file in
+    the customer's real config package. Otherwise ``slugs_emit_path`` stays None
+    and render_artifacts falls back to its legacy convention.
+
+    The python gate MUST match the import gate in ``_slugs_import_for_entry``
+    (PR #11 review IMP-1): the basename/dotted swap is python-shaped and would
+    corrupt TS ``@/`` aliases / Go slash paths, so TS/Go keep the legacy path on
+    BOTH the emit and the import side — emitting anchor-derived here while the
+    import stays legacy wrote the slugs module where no callsite imports it.
+    Anchor-derived TS/Go paths are a follow-up (needs ts_alias/go_module
+    emit+import derivation through strategies.IMPORT_RULES). ``language`` selects
     the file extension for the swapped basename."""
     out: list[SlugsEmitTask] = []
     generated_at = inventory.get("generated_at", "")
@@ -573,7 +581,7 @@ def build_slugs_emit_tasks(
         if not slug:
             continue
         slugs_emit_path: str | None = None
-        if anchor is not None:
+        if anchor is not None and language == "python":
             stub_emit, stub_import = anchor
             slugs_emit_path, _imp = slugs_paths_from_stub(
                 stub_emit, stub_import, slug, ext
