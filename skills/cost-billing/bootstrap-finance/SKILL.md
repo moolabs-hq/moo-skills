@@ -53,7 +53,7 @@ Persist each answer immediately to `.moolabs/chain/01-finance.draft.yaml`. Crash
 
 **Nothing upstream — finance is FIRST in the chain.** Phase 1 is just a sanity check that no stale `.moolabs/chain/` directory exists from a prior abandoned bootstrap. If one exists, ask: "Existing chain detected — start fresh, or `--refresh` keeps prior answers as defaults?"
 
-## Questions for this stage (~12 total)
+## Questions for this stage (~10 total)
 
 Reference structure — you ask these one at a time. Each can spawn 1-2 follow-up clarifying questions (also one at a time).
 
