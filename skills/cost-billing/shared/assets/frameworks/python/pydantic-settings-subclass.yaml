@@ -1,0 +1,18 @@
+id: python-pydantic-settings-subclass
+language: python
+framework: pydantic-settings-subclass
+detection:
+  kind: code
+  import_signals: []
+  structural_signals: []
+  detector: pydantic_settings_subclass
+  priority: 85
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]
