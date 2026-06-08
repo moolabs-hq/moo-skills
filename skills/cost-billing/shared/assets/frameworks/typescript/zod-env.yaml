@@ -1,0 +1,20 @@
+id: ts-zod-env-schema
+language: typescript
+framework: zod-env
+detection:
+  kind: regex
+  import_signals:
+    - "import\\s+\\{[^}]*\\bz\\b[^}]*\\}\\s+from\\s+['\"]zod['\"]"
+    - "from\\s+['\"]zod['\"]"
+  structural_signals: ["z\\.object\\(\\s*\\{"]
+  detector: ""
+  priority: 100
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs-settings
+  anchor: detected_config_dir
+  import_rule: ts_alias
+  fallback_dir: "src/services"
+scripts: ["config_wire", "render_artifacts"]

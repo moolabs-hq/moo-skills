@@ -1,0 +1,18 @@
+id: python-decouple
+language: python
+framework: decouple
+detection:
+  kind: regex
+  import_signals: ["from\\s+decouple\\s+import\\s+config"]
+  structural_signals: ["config\\(['\"][A-Z_]+['\"]"]
+  detector: ""
+  priority: 80
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs_settings
+  anchor: detected_config_dir
+  import_rule: python_package
+  fallback_dir: "app/services"
+scripts: ["config_wire", "render_artifacts"]

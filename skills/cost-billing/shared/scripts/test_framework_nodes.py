@@ -26,5 +26,26 @@ class NodeTreeLoads(unittest.TestCase):
         self.assertEqual(sub.wiring["mode"], "stub")
 
 
+class AllExistingPatternsMigrated(unittest.TestCase):
+    def test_ids_present_and_routing(self):
+        reg = fr.load_registry(_FW)
+        ids = {n.id for fws in reg.values() for n in fws.values()}
+        for expected in (
+            "python-pydantic-settings-v2", "python-pydantic-v1-settings",
+            "python-decouple", "python-dotenv-os-getenv",
+            "python-pydantic-settings-subclass",
+            "ts-zod-env-schema", "ts-process-env-direct", "ts-env-var-library",
+            "go-viper", "go-envconfig", "go-os-getenv",
+        ):
+            self.assertIn(expected, ids)
+        # 3 typescript + 3 go nodes
+        self.assertEqual(len(reg["typescript"]), 3)
+        self.assertEqual(len(reg["go"]), 3)
+        # go-envconfig is the only non-pydantic modify node (it has an accessor)
+        self.assertEqual(reg["go"]["envconfig"].wiring["mode"], "modify")
+        self.assertEqual(reg["go"]["viper"].wiring["mode"], "stub")
+        self.assertEqual(reg["typescript"]["zod-env"].wiring["mode"], "stub")
+
+
 if __name__ == "__main__":
     unittest.main()

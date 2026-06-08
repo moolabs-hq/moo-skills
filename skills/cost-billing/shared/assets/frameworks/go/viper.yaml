@@ -1,0 +1,18 @@
+id: go-viper
+language: go
+framework: viper
+detection:
+  kind: regex
+  import_signals: ["spf13/viper"]
+  structural_signals: ["viper\\.(SetEnvPrefix|AutomaticEnv|BindEnv)"]
+  detector: ""
+  priority: 100
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: settings
+  anchor: detected_config_dir
+  import_rule: go_module
+  fallback_dir: "internal/moolabsconfig"
+scripts: ["config_wire", "render_artifacts"]

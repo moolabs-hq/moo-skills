@@ -1,0 +1,18 @@
+id: go-envconfig
+language: go
+framework: envconfig
+detection:
+  kind: regex
+  import_signals: ["kelseyhightower/envconfig"]
+  structural_signals: ["envconfig:\"[A-Z_]+\""]
+  detector: ""
+  priority: 90
+wiring:
+  mode: modify
+  accessor: "config.Get().MoolabsAPIKey"
+emit:
+  artifact_basename: settings
+  anchor: detected_config_dir
+  import_rule: go_module
+  fallback_dir: "internal/moolabsconfig"
+scripts: ["config_wire", "render_artifacts"]

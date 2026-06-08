@@ -1,0 +1,18 @@
+id: go-os-getenv
+language: go
+framework: os-getenv
+detection:
+  kind: regex
+  import_signals: []
+  structural_signals: ["os\\.Getenv\\(['\"]"]
+  detector: ""
+  priority: 70
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: settings
+  anchor: detected_config_dir
+  import_rule: go_module
+  fallback_dir: "internal/moolabsconfig"
+scripts: ["config_wire", "render_artifacts"]

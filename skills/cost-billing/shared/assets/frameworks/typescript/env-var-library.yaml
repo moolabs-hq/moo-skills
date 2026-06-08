@@ -1,0 +1,18 @@
+id: ts-env-var-library
+language: typescript
+framework: env-var-library
+detection:
+  kind: regex
+  import_signals: ["import\\s+.*env-var", "from\\s+['\"]env-var['\"]"]
+  structural_signals: ["env\\.get\\(['\"]"]
+  detector: ""
+  priority: 90
+wiring:
+  mode: stub
+  accessor: ""
+emit:
+  artifact_basename: moolabs-settings
+  anchor: detected_config_dir
+  import_rule: ts_alias
+  fallback_dir: "src/services"
+scripts: ["config_wire", "render_artifacts"]
