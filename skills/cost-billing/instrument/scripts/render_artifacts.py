@@ -63,10 +63,12 @@ _SLUGS_DIR = {
 }
 _LANG_EXT = {"python": "py", "typescript": "ts", "go": "go"}
 
-# Sentinel present in the APPEND-capable deployment templates (dotenv_example,
-# k8s) — used to make `append` idempotent (don't re-append if the file is
-# already wired). The full-file templates (terraform) use new_file mode and are
-# exempt; they carry the `/cost-billing-instrument` generated marker instead.
+# Sentinel used to make `append` idempotent (don't re-append if the file is
+# already wired). The only append-capable template is dotenv_example (see
+# _APPEND_SAFE_KINDS) and it contains this sentinel. The full-file templates
+# (terraform, k8s) use new_file mode — they may also contain MOOLABS_API_KEY in
+# their body, but the append path never runs for them, so the sentinel is not
+# what protects them; the `/cost-billing-instrument` generated marker is.
 _APPEND_SENTINEL = "MOOLABS_API_KEY"
 
 # Kinds whose template is a line/block snippet safe to APPEND to an existing
