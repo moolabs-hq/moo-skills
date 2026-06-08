@@ -31,6 +31,17 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Framework-capability tree. The registry is the single source of truth for
+# per-node wiring (mode + accessor); config_wire reads it instead of the old
+# hardcoded per-pattern accessor maps. Mirrors discovery/scripts/
+# env_loader_scan.py's path computation so both layers resolve the same dir.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+import framework_registry  # noqa: E402
+
+_FRAMEWORKS_DIR = (
+    Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
+)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Inventory load
@@ -55,22 +66,6 @@ def load_env_routing_inventory(path: Path) -> dict:
 # Per-service plan derivation
 # ──────────────────────────────────────────────────────────────────────
 
-# Maps each pattern_id → accessor expression. Only patterns whose accessor
-# composes with the helper template's `from <import_path> import get_settings`
-# contract are listed here. Patterns absent from this map route to stub mode
-# via `accessor_map.get(pattern) is None` in plan_service_env_wire.
-#
-# python-decouple and python-dotenv-os-getenv are intentionally absent — they
-# are flat module-level patterns with no get_settings() class. The helper
-# template's import shape is incompatible; these route to stub mode (which
-# emits a pydantic-settings BaseSettings stub the customer can adopt). Future
-# enhancement: pattern-aware template variants for direct-export patterns.
-_PYTHON_PATTERN_ACCESSORS = {
-    "python-pydantic-settings-v2": "get_settings().moolabs_api_key.get_secret_value()",
-    "python-pydantic-v1-settings": "get_settings().moolabs_api_key.get_secret_value()",
-}
-
-
 def _python_settings_import_path(file_path: str, service_slug: str = "") -> str:
     """Derive the Python import path for the customer's settings module.
 
@@ -90,28 +85,6 @@ def _python_settings_import_path(file_path: str, service_slug: str = "") -> str:
     if parts and parts[-1].endswith(".py"):
         parts[-1] = parts[-1][:-3]
     return ".".join(parts)
-
-
-# All three TS patterns are intentionally absent — the helper template imports
-# `getSettings` (typescript-moolabs-client.ts.j2:44) but none of the recognized
-# patterns export a getSettings function:
-#   - ts-zod-env-schema: exports `env` (a zod-parsed object)
-#   - ts-process-env-direct: exports a const `MOOLABS_API_KEY`
-#   - ts-env-var-library: exports a const `MOOLABS_API_KEY`
-# All three route to stub mode (which emits a getSettings() wrapper template
-# the customer can adopt). Future enhancement: pattern-aware template variants
-# for direct-export patterns.
-_TS_PATTERN_ACCESSORS: dict[str, str] = {}
-
-# go-viper requires importing viper as a separate dependency (not the
-# customer's `config` package the helper template imports), so it doesn't
-# compose with the template. go-os-getenv uses stdlib `os` directly but
-# leaves the `config` import unused — Go's `imported and not used` is a
-# compile error. Both route to stub mode. go-envconfig works because it
-# uses the customer's config package via the imported `config` alias.
-_GO_PATTERN_ACCESSORS = {
-    "go-envconfig":  "config.Get().MoolabsAPIKey",
-}
 
 
 def _ts_settings_import_path(file_path: str, service_slug: str = "") -> str:
@@ -162,26 +135,15 @@ def _go_settings_import_path(file_path: str, service_slug: str = "") -> str:
     return "/".join(parts) if parts else "internal/config"
 
 
-# Stub-mode emit paths per language. The customer merges this file into
-# their own config layer (per the spec's "stub fallback" rule).
-_STUB_EMIT_PATHS = {
-    "python":     "app/services/moolabs_settings.py",
-    "typescript": "src/services/moolabs-settings.ts",
-    "go":         "internal/moolabsconfig/settings.go",
-}
-
-# Stub-mode accessor (helper imports get_settings from the stub).
+# Stub-mode accessor body per language. The stub artifact ALWAYS exposes a
+# get_settings()/getSettings()/config.Get() entry point exporting
+# moolabs_api_key, so this accessor is a constant — it is NOT a per-pattern
+# choice. (The stub's emit_path/import_path now come from the inventory,
+# derived from the customer's real layout in Phase A.)
 _STUB_ACCESSORS = {
     "python":     "get_settings().moolabs_api_key.get_secret_value()",
     "typescript": "getSettings().MOOLABS_API_KEY",
     "go":         "config.Get().MoolabsAPIKey",
-}
-
-# Stub-mode import path per language.
-_STUB_IMPORT_PATHS = {
-    "python":     "app.services.moolabs_settings",
-    "typescript": "@/services/moolabs-settings",
-    "go":         "internal/moolabsconfig",
 }
 
 
@@ -267,11 +229,44 @@ def _plan_deployment_stubs(surfaces: list[dict]) -> list[dict]:
     return out
 
 
+_REGISTRY_CACHE: dict[str, dict[str, framework_registry.Node]] | None = None
+
+
+def _registry() -> dict[str, dict[str, framework_registry.Node]]:
+    """Load the framework-capability tree once and cache it. load_registry
+    re-globs the filesystem each call, so we memoize for the per-service loop."""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        _REGISTRY_CACHE = framework_registry.load_registry(_FRAMEWORKS_DIR)
+    return _REGISTRY_CACHE
+
+
+def _resolve_node(
+    node_key: str, language: str
+) -> framework_registry.Node | None:
+    """Find the Node whose .id == node_key within the language's framework set.
+
+    reg[language] is keyed by FRAMEWORK NAME, not node id (e.g. key 'envconfig'
+    holds the node whose id is 'go-envconfig'), so we scan values by .id rather
+    than dict-get by node_key. Returns None when node_key is empty or no node
+    matches (unrecognized service) → caller treats as stub."""
+    if not node_key:
+        return None
+    for node in _registry().get(language, {}).values():
+        if node.id == node_key:
+            return node
+    return None
+
+
 def plan_service_env_wire(service: dict, language: str) -> dict:
-    """Derive the per-service env-wiring plan from an inventory entry."""
+    """Derive the per-service env-wiring plan from an inventory entry.
+
+    Node-driven: the winning framework node (app_config.node_id) decides the
+    wiring mode + accessor. Stub paths come from the inventory (emit_path/
+    import_path, derived from the customer's real layout in Phase A); modify
+    paths come from the customer's existing config module (file-derived)."""
     app_config = service.get("app_config") or {}
-    pattern = app_config.get("pattern", "unrecognized")
-    stub_required = bool(app_config.get("stub_required", True))
+    node_key = app_config.get("node_id") or app_config.get("pattern") or ""
     service_slug = service.get("service_slug", "")
     deployment_stubs = _plan_deployment_stubs(service.get("deployment_surfaces") or [])
     # PR #531 gap-detection: when Phase A's scanner found no terraform/k8s/
@@ -280,33 +275,27 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
     # in the PR body asking where the customer's IaC actually lives.
     infra_discovery_gap = bool(service.get("infra_discovery_gap", False))
 
-    if stub_required or pattern == "unrecognized":
+    node = _resolve_node(node_key, language)
+    # No node (unrecognized service or empty node_key) → stub mode.
+    mode = node.wiring.get("mode", "stub") if node is not None else "stub"
+
+    if mode == "stub":
+        # Stub paths are inventory-derived (NOT a hardcode) — Phase A derived
+        # emit_path/import_path from the customer's real config layout. The stub
+        # artifact always exposes get_settings(), so the accessor is constant.
         return {
             "service_slug": service_slug,
             "mode": "stub",
-            "settings_import_path": _STUB_IMPORT_PATHS.get(language, ""),
+            "settings_import_path": app_config.get("import_path"),
             "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
-            "stub_emit_path": _STUB_EMIT_PATHS.get(language),
+            "stub_emit_path": app_config.get("emit_path"),
             "deployment_stubs": deployment_stubs,
             "infra_discovery_gap": infra_discovery_gap,
         }
 
-    accessor_map = {
-        "python": _PYTHON_PATTERN_ACCESSORS,
-        "typescript": _TS_PATTERN_ACCESSORS,
-        "go": _GO_PATTERN_ACCESSORS,
-    }.get(language)
-    accessor = accessor_map.get(pattern) if accessor_map else None
-    if accessor is None:
-        return {
-            "service_slug": service_slug,
-            "mode": "stub",
-            "settings_import_path": _STUB_IMPORT_PATHS.get(language, ""),
-            "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
-            "stub_emit_path": _STUB_EMIT_PATHS.get(language),
-            "deployment_stubs": deployment_stubs,
-            "infra_discovery_gap": infra_discovery_gap,
-        }
+    # modify mode: wire into the customer's EXISTING config module. The import
+    # path is file-derived (their real module); the accessor comes from the
+    # node's declared wiring, not a per-pattern hardcode.
     import_path = {
         "python": _python_settings_import_path,
         "typescript": _ts_settings_import_path,
@@ -316,7 +305,7 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
         "service_slug": service_slug,
         "mode": "modify",
         "settings_import_path": import_path,
-        "api_key_accessor": accessor,
+        "api_key_accessor": node.wiring.get("accessor"),
         "stub_emit_path": None,
         "deployment_stubs": deployment_stubs,
         "infra_discovery_gap": infra_discovery_gap,
@@ -374,7 +363,15 @@ def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
             # like `:` or `#`. mode is a hardcoded enum, safe unquoted.
             lines.append(f"  - service_slug: {_quote(svc['service_slug'])}")
             lines.append(f"    mode: {svc['mode']}")
-            lines.append(f"    settings_import_path: {_quote(svc['settings_import_path'])}")
+            # settings_import_path is inventory-derived in stub mode and may be
+            # None for a degenerate stub with no inventory path — emit null
+            # rather than the literal string "None".
+            if svc.get("settings_import_path"):
+                lines.append(
+                    f"    settings_import_path: {_quote(svc['settings_import_path'])}"
+                )
+            else:
+                lines.append("    settings_import_path: null")
             lines.append(f"    api_key_accessor: {_quote(svc['api_key_accessor'])}")
             if svc.get("stub_emit_path"):
                 lines.append(f"    stub_emit_path: {_quote(svc['stub_emit_path'])}")

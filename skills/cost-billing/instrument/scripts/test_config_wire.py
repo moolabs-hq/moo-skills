@@ -55,6 +55,7 @@ class PythonWireTargetDispatch(unittest.TestCase):
         service = {
             "service_slug": "payments-api",
             "app_config": {
+                "node_id": "python-pydantic-settings-v2",
                 "pattern": "python-pydantic-settings-v2",
                 "file": "services/payments-api/app/config.py",
                 "line_to_insert": 5,
@@ -80,6 +81,7 @@ class PythonWireTargetDispatch(unittest.TestCase):
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "python-pydantic-v1-settings",
                 "pattern": "python-pydantic-v1-settings",
                 "file": "svc/app/settings.py",
                 "line_to_insert": 3,
@@ -92,17 +94,26 @@ class PythonWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="python")
         self.assertEqual(plan["mode"], "modify")
+        # modify imports the CUSTOMER's existing module (file-derived).
         self.assertEqual(plan["settings_import_path"], "app.settings")
+        # accessor comes from the node's wiring, not a per-pattern hardcode.
+        self.assertEqual(
+            plan["api_key_accessor"],
+            "get_settings().moolabs_api_key.get_secret_value()",
+        )
 
     def test_python_decouple_routes_to_stub(self):
-        """Direct-export pattern (decouple) — accessor would be a bare
-        identifier the helper template doesn't import. Routes to stub mode
-        instead (PR #4 review CRIT-1 fix)."""
+        """Direct-export pattern (decouple) — the node declares wiring.mode=stub
+        (the modify accessor would be a bare identifier the helper doesn't
+        import). Stub paths come from the inventory (emit_path/import_path)."""
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "python-decouple",
                 "pattern": "python-decouple",
                 "file": "svc/app/config.py",
+                "emit_path": "svc/app/moolabs_settings.py",
+                "import_path": "app.moolabs_settings",
                 "line_to_insert": 10,
                 "confidence": "high",
                 "stub_required": False,
@@ -113,20 +124,26 @@ class PythonWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="python")
         self.assertEqual(plan["mode"], "stub")
-        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+        # stub import path is inventory-derived, not the old hardcode.
+        self.assertEqual(plan["settings_import_path"], "app.moolabs_settings")
+        self.assertEqual(plan["stub_emit_path"], "svc/app/moolabs_settings.py")
+        # the stub always exposes get_settings(); accessor is the constant body.
         self.assertEqual(
             plan["api_key_accessor"],
             "get_settings().moolabs_api_key.get_secret_value()",
         )
 
     def test_python_dotenv_os_getenv_routes_to_stub(self):
-        """Same root cause as decouple — dotenv-os-getenv is a flat module
-        pattern; stub mode is the correct path (PR #4 review CRIT-1 fix)."""
+        """Same root cause as decouple — dotenv-os-getenv's node declares
+        wiring.mode=stub. Stub paths are inventory-derived."""
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "python-dotenv-os-getenv",
                 "pattern": "python-dotenv-os-getenv",
                 "file": "svc/app/config.py",
+                "emit_path": "svc/app/moolabs_settings.py",
+                "import_path": "app.moolabs_settings",
                 "line_to_insert": 8,
                 "confidence": "high",
                 "stub_required": False,
@@ -137,31 +154,36 @@ class PythonWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="python")
         self.assertEqual(plan["mode"], "stub")
-        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+        self.assertEqual(plan["settings_import_path"], "app.moolabs_settings")
 
     def test_pydantic_settings_subclass_routes_to_stub(self):
         """Dogfood #1b: the project-base Settings pattern (a class extending a
         custom base, often with a module-level `settings` instance and no
         get_settings()) MUST route to stub — the modify-mode accessor
         `get_settings()...` would break a config that doesn't expose it. The
-        pattern is intentionally absent from _PYTHON_PATTERN_ACCESSORS, so
-        `accessor_map.get(pattern) is None` → stub (the stub provides its own
-        get_settings())."""
+        node declares wiring.mode=stub (the stub provides its own
+        get_settings()). Stub paths are inventory-derived."""
         service = {
             "service_slug": "moo-arc",
             "app_config": {
+                "node_id": "python-pydantic-settings-subclass",
                 "pattern": "python-pydantic-settings-subclass",
                 "file": "services/moo-arc/app/config.py",
+                "emit_path": "services/moo-arc/app/moolabs_settings.py",
+                "import_path": "app.moolabs_settings",
                 "line_to_insert": 14,
                 "confidence": "high",
-                "stub_required": False,  # high confidence, but no accessor → stub
+                "stub_required": False,  # high confidence, but node mode=stub
                 "wire_target": {"kind": "add_pydantic_settings_field"},
             },
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="python")
         self.assertEqual(plan["mode"], "stub")
-        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+        self.assertEqual(plan["settings_import_path"], "app.moolabs_settings")
+        self.assertEqual(
+            plan["stub_emit_path"], "services/moo-arc/app/moolabs_settings.py"
+        )
 
 
 class TypeScriptWireTargetDispatch(unittest.TestCase):
@@ -180,8 +202,11 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "ts-zod-env-schema",
                 "pattern": "ts-zod-env-schema",
                 "file": "src/env.ts",
+                "emit_path": "src/moolabs-settings.ts",
+                "import_path": "@/moolabs-settings",
                 "line_to_insert": 5,
                 "confidence": "high",
                 "stub_required": False,
@@ -192,15 +217,20 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
         self.assertEqual(plan["mode"], "stub")
-        self.assertEqual(plan["settings_import_path"], "@/services/moolabs-settings")
+        # stub import path is inventory-derived, not the old hardcode.
+        self.assertEqual(plan["settings_import_path"], "@/moolabs-settings")
+        self.assertEqual(plan["stub_emit_path"], "src/moolabs-settings.ts")
         self.assertEqual(plan["api_key_accessor"], "getSettings().MOOLABS_API_KEY")
 
     def test_process_env_direct_routes_to_stub(self):
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "ts-process-env-direct",
                 "pattern": "ts-process-env-direct",
                 "file": "src/config.ts",
+                "emit_path": "src/moolabs-settings.ts",
+                "import_path": "@/moolabs-settings",
                 "line_to_insert": 12,
                 "confidence": "medium",
                 "stub_required": False,
@@ -211,14 +241,17 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
         self.assertEqual(plan["mode"], "stub")
-        self.assertEqual(plan["settings_import_path"], "@/services/moolabs-settings")
+        self.assertEqual(plan["settings_import_path"], "@/moolabs-settings")
 
     def test_env_var_library_routes_to_stub(self):
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "ts-env-var-library",
                 "pattern": "ts-env-var-library",
                 "file": "src/env.ts",
+                "emit_path": "src/moolabs-settings.ts",
+                "import_path": "@/moolabs-settings",
                 "line_to_insert": 8,
                 "confidence": "high",
                 "stub_required": False,
@@ -229,18 +262,21 @@ class TypeScriptWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
         self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "@/moolabs-settings")
 
 
 class GoWireTargetDispatch(unittest.TestCase):
     def test_viper_routes_to_stub(self):
-        """go-viper needs `import viper` in the helper template, but the
-        template only imports the customer's `config` alias. Routes to
-        stub mode (PR #4 review CRIT-3 fix)."""
+        """go-viper's node declares wiring.mode=stub (viper needs a separate
+        import the template doesn't carry). Stub paths are inventory-derived."""
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "go-viper",
                 "pattern": "go-viper",
                 "file": "internal/config/config.go",
+                "emit_path": "internal/moolabsconfig/settings.go",
+                "import_path": "internal/moolabsconfig",
                 "line_to_insert": 14,
                 "confidence": "high",
                 "stub_required": False,
@@ -252,6 +288,9 @@ class GoWireTargetDispatch(unittest.TestCase):
         plan = cw.plan_service_env_wire(service, language="go")
         self.assertEqual(plan["mode"], "stub")
         self.assertEqual(plan["settings_import_path"], "internal/moolabsconfig")
+        self.assertEqual(
+            plan["stub_emit_path"], "internal/moolabsconfig/settings.go"
+        )
 
     def test_envconfig(self):
         """go-envconfig is the only Go pattern that works in modify mode.
@@ -261,6 +300,7 @@ class GoWireTargetDispatch(unittest.TestCase):
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "go-envconfig",
                 "pattern": "go-envconfig",
                 "file": "internal/config/config.go",
                 "line_to_insert": 6,
@@ -273,19 +313,22 @@ class GoWireTargetDispatch(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="go")
         self.assertEqual(plan["mode"], "modify")
+        # modify imports the CUSTOMER's existing config package (file-derived).
         self.assertEqual(plan["settings_import_path"], "internal/config")
+        # accessor comes from the node's wiring.
         self.assertEqual(plan["api_key_accessor"], "config.Get().MoolabsAPIKey")
 
     def test_go_os_getenv_routes_to_stub(self):
-        """go-os-getenv uses stdlib os directly — the customer's config
-        package isn't actually used by the accessor expression, leaving the
-        `config` import dead. Go's `imported and not used` is a compile
-        error. Routes to stub mode (PR #4 review CRIT-3 fix)."""
+        """go-os-getenv's node declares wiring.mode=stub (stdlib os leaves the
+        config import dead, a Go compile error). Stub paths inventory-derived."""
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "go-os-getenv",
                 "pattern": "go-os-getenv",
                 "file": "internal/config/config.go",
+                "emit_path": "internal/moolabsconfig/settings.go",
+                "import_path": "internal/moolabsconfig",
                 "line_to_insert": 5,
                 "confidence": "medium",
                 "stub_required": False,
@@ -301,10 +344,15 @@ class GoWireTargetDispatch(unittest.TestCase):
 
 class StubModeFallback(unittest.TestCase):
     def test_unrecognized_pattern_triggers_stub(self):
+        """No node resolves (unrecognized service) → stub mode. Stub paths come
+        from the inventory's emit_path/import_path (Phase A derived them from
+        the customer's real layout)."""
         service = {
             "service_slug": "svc",
             "app_config": {
                 "pattern": "unrecognized",
+                "emit_path": "app/services/moolabs_settings.py",
+                "import_path": "app.services.moolabs_settings",
                 "confidence": "none",
                 "stub_required": True,
             },
@@ -312,23 +360,40 @@ class StubModeFallback(unittest.TestCase):
         }
         plan = cw.plan_service_env_wire(service, language="python")
         self.assertEqual(plan["mode"], "stub")
-        # Stub Settings file is emitted at a conventional service-relative path.
+        # Stub Settings file path comes from the inventory.
         self.assertEqual(plan["stub_emit_path"], "app/services/moolabs_settings.py")
-        # Accessor reads from the stub.
+        # Accessor reads from the stub (constant body).
         self.assertEqual(
             plan["api_key_accessor"],
             "get_settings().moolabs_api_key.get_secret_value()",
         )
         self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
 
+    def test_unrecognized_without_inventory_paths_yields_none(self):
+        """Degenerate input — no node, no inventory emit_path/import_path. Stub
+        mode still applies but the paths are None (no hardcoded fallback)."""
+        service = {
+            "service_slug": "svc",
+            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertIsNone(plan["stub_emit_path"])
+        self.assertIsNone(plan["settings_import_path"])
+
     def test_stub_required_true_overrides_recognized_pattern(self):
-        """When confidence is low even for a recognized pattern, stub_required
-        triggers the stub fallback to avoid wiring into an uncertain match."""
+        """python-decouple's node declares wiring.mode=stub regardless of
+        confidence, so this routes to stub via the node, not the old
+        stub_required gate."""
         service = {
             "service_slug": "svc",
             "app_config": {
+                "node_id": "python-decouple",
                 "pattern": "python-decouple",
                 "file": "svc/app/config.py",
+                "emit_path": "svc/app/moolabs_settings.py",
+                "import_path": "app.moolabs_settings",
                 "confidence": "low",
                 "stub_required": True,
             },
@@ -340,7 +405,12 @@ class StubModeFallback(unittest.TestCase):
     def test_typescript_stub(self):
         service = {
             "service_slug": "svc",
-            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "app_config": {
+                "pattern": "unrecognized",
+                "emit_path": "src/services/moolabs-settings.ts",
+                "import_path": "@/services/moolabs-settings",
+                "stub_required": True,
+            },
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="typescript")
@@ -350,7 +420,12 @@ class StubModeFallback(unittest.TestCase):
     def test_go_stub(self):
         service = {
             "service_slug": "svc",
-            "app_config": {"pattern": "unrecognized", "stub_required": True},
+            "app_config": {
+                "pattern": "unrecognized",
+                "emit_path": "internal/moolabsconfig/settings.go",
+                "import_path": "internal/moolabsconfig",
+                "stub_required": True,
+            },
             "deployment_surfaces": [],
         }
         plan = cw.plan_service_env_wire(service, language="go")
@@ -501,6 +576,7 @@ class BuildPlanFromInventory(unittest.TestCase):
                 {
                     "service_slug": "svc-a",
                     "app_config": {
+                        "node_id": "python-pydantic-settings-v2",
                         "pattern": "python-pydantic-settings-v2",
                         "file": "svc-a/app/config.py",
                         "stub_required": False,
@@ -516,13 +592,19 @@ class BuildPlanFromInventory(unittest.TestCase):
     def test_build_plan_unknown_language_falls_back_to_python(self):
         inventory = {
             "services": [
-                {"service_slug": "svc", "app_config": {"pattern": "unrecognized"},
+                {"service_slug": "svc",
+                 "app_config": {
+                     "pattern": "unrecognized",
+                     "emit_path": "app/services/moolabs_settings.py",
+                     "import_path": "app.services.moolabs_settings",
+                 },
                  "deployment_surfaces": []},
             ],
         }
         plan = cw.build_plan(inventory, services_languages={})
         # No language declared → default to python (Phase A's
-        # parse_services_and_granularity makes the same fallback).
+        # parse_services_and_granularity makes the same fallback). No node
+        # resolves the unrecognized pattern → stub; paths from the inventory.
         self.assertEqual(plan["services"][0]["mode"], "stub")
         self.assertEqual(
             plan["services"][0]["stub_emit_path"],
@@ -614,29 +696,72 @@ class YamlEmit(unittest.TestCase):
                 accessor_with_bs,
             )
 
+    def test_emit_yaml_none_settings_import_path_is_null(self):
+        """Node-driven refactor: settings_import_path is inventory-derived and
+        may be None for a degenerate stub with no inventory path. The emitter
+        must write YAML `null` (round-trips to None), NOT the literal string
+        "None" (which would render `from None import get_settings`)."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "plan.yaml"
+            plan = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "services": [{
+                    "service_slug": "svc",
+                    "mode": "stub",
+                    "settings_import_path": None,
+                    "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+                    "stub_emit_path": None,
+                    "deployment_stubs": [],
+                }],
+            }
+            cw.emit_config_wiring_plan_yaml(plan, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertIsNone(parsed["services"][0]["settings_import_path"])
+            # Defend against the literal-"None" leak explicitly.
+            self.assertNotEqual(
+                parsed["services"][0]["settings_import_path"], "None"
+            )
+
+
+def _modify_accessors(language: str) -> dict[str, str]:
+    """Pull {node_id: accessor} for every modify-mode node in a language from
+    the framework registry — the source of truth that replaced the old
+    _LANG_PATTERN_ACCESSORS maps."""
+    reg = cw._registry()
+    return {
+        node.id: node.wiring.get("accessor", "")
+        for node in reg.get(language, {}).values()
+        if node.wiring.get("mode") == "modify"
+    }
+
 
 class AccessorRuntimeRegression(unittest.TestCase):
-    """Regression guard against PR #4 review C-1/C-2/C-3. Every accessor in
-    every _LANG_PATTERN_ACCESSORS map must compose with the helper template's
-    import contract — i.e. when the helper renders `return <accessor>`, the
-    accessor must be a valid expression in the helper's scope (`get_settings`
-    is imported; nothing else).
+    """Regression guard against PR #4 review C-1/C-2/C-3. Every modify-mode
+    accessor declared in the framework registry must compose with the helper
+    template's import contract — i.e. when the helper renders
+    `return <accessor>`, the accessor must be a valid expression in the
+    helper's scope (`get_settings` is imported; nothing else).
 
     Earlier accessors like `"MOOLABS_API_KEY"` or `viper.GetString(...)`
     rendered to expressions referencing undefined names. py-compile / gofmt
     passed (syntactically valid) but the rendered helper crashed at runtime
     with NameError / undefined: viper. This test would have caught the bug
     by executing the rendered _resolve_api_key with a mocked get_settings.
+    The accessor source moved (registry, not hardcoded maps) — the runtime
+    composition check is unchanged.
     """
 
     def test_every_python_accessor_executes_without_nameerror(self):
-        """For every pattern in _PYTHON_PATTERN_ACCESSORS, render the helper
-        and execute _resolve_api_key. Mocked get_settings returns an object
-        compatible with the accessor expression."""
+        """For every modify-mode python node, render the helper and execute
+        _resolve_api_key. Mocked get_settings returns an object compatible
+        with the accessor expression."""
         from jinja2 import Environment, FileSystemLoader
         tpl_dir = Path(__file__).resolve().parents[1] / "assets" / "codemod-templates"
         env = Environment(loader=FileSystemLoader(str(tpl_dir)))
-        for pattern, accessor in cw._PYTHON_PATTERN_ACCESSORS.items():
+        accessors = _modify_accessors("python")
+        self.assertTrue(accessors, "expected at least one modify-mode python node")
+        for pattern, accessor in accessors.items():
             with self.subTest(pattern=pattern):
                 ctx = {
                     'service_slug': 'svc',
@@ -677,25 +802,78 @@ class AccessorRuntimeRegression(unittest.TestCase):
                     f"_resolve_api_key for pattern {pattern} returned {result!r}",
                 )
 
-    def test_python_decouple_NOT_in_accessor_map(self):
+    def _node_mode(self, node_id: str, language: str) -> str | None:
+        node = cw._resolve_node(node_id, language)
+        return node.wiring.get("mode") if node is not None else None
+
+    def test_python_decouple_routes_to_stub_via_node(self):
         """C-1 regression guard: python-decouple's accessor was a bare
-        identifier (NameError). It must NOT be in the accessor map — the
-        absence routes it to stub mode."""
-        self.assertNotIn("python-decouple", cw._PYTHON_PATTERN_ACCESSORS)
-        self.assertNotIn("python-dotenv-os-getenv", cw._PYTHON_PATTERN_ACCESSORS)
+        identifier (NameError). Its node now declares wiring.mode=stub — the
+        registry is the source of truth that keeps it out of modify mode."""
+        self.assertEqual(self._node_mode("python-decouple", "python"), "stub")
+        self.assertEqual(
+            self._node_mode("python-dotenv-os-getenv", "python"), "stub"
+        )
 
-    def test_no_ts_patterns_in_accessor_map(self):
+    def test_no_ts_nodes_are_modify(self):
         """C-2 regression guard: all 3 TS patterns produced TS compile
-        errors AND runtime ReferenceError. Map must be empty until
-        pattern-aware TS template variants exist."""
-        self.assertEqual(cw._TS_PATTERN_ACCESSORS, {})
+        errors AND runtime ReferenceError. Every TS node must declare
+        wiring.mode=stub until pattern-aware TS template variants exist."""
+        ts_nodes = cw._registry().get("typescript", {})
+        self.assertTrue(ts_nodes, "expected typescript nodes in the registry")
+        for node in ts_nodes.values():
+            self.assertEqual(
+                node.wiring.get("mode"), "stub",
+                f"TS node {node.id} must be stub mode",
+            )
 
-    def test_go_viper_and_os_getenv_NOT_in_accessor_map(self):
+    def test_go_viper_and_os_getenv_route_to_stub_via_node(self):
         """C-3 regression guard: go-viper needed a separate viper import,
-        go-os-getenv left the config import unused. Both routed to stub."""
-        self.assertNotIn("go-viper", cw._GO_PATTERN_ACCESSORS)
-        self.assertNotIn("go-os-getenv", cw._GO_PATTERN_ACCESSORS)
-        self.assertIn("go-envconfig", cw._GO_PATTERN_ACCESSORS)
+        go-os-getenv left the config import unused. Both nodes declare
+        wiring.mode=stub; go-envconfig is the only modify-mode Go node."""
+        self.assertEqual(self._node_mode("go-viper", "go"), "stub")
+        self.assertEqual(self._node_mode("go-os-getenv", "go"), "stub")
+        self.assertEqual(self._node_mode("go-envconfig", "go"), "modify")
+
+
+class NodeDrivenWiring(unittest.TestCase):
+    def test_stub_emit_path_comes_from_inventory_not_hardcode(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "node_id": "python-pydantic-settings-subclass",
+                "pattern": "python-pydantic-settings-subclass",
+                "file": "src/myapp/config.py",
+                "emit_path": "src/myapp/moolabs_settings.py",
+                "import_path": "myapp.moolabs_settings",
+                "confidence": "high",
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["stub_emit_path"], "src/myapp/moolabs_settings.py")
+        self.assertEqual(plan["settings_import_path"], "myapp.moolabs_settings")
+
+    def test_modify_uses_node_accessor_and_customer_module(self):
+        service = {
+            "service_slug": "svc",
+            "app_config": {
+                "node_id": "python-pydantic-settings-v2",
+                "pattern": "python-pydantic-settings-v2",
+                "file": "services/svc/app/config.py",
+                "emit_path": "services/svc/app/moolabs_settings.py",
+                "import_path": "app.moolabs_settings",
+                "confidence": "high",
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["api_key_accessor"],
+                         "get_settings().moolabs_api_key.get_secret_value()")
+        # modify imports the CUSTOMER module (file-derived), not the stub
+        self.assertEqual(plan["settings_import_path"], "app.config")
 
 
 if __name__ == "__main__":
