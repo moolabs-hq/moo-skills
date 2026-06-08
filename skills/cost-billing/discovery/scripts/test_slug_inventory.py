@@ -394,17 +394,32 @@ class ProductSlugDerivation(unittest.TestCase):
         )
         self.assertIn("explicit-override", by_product)
 
-    def test_backward_compat_no_product_map(self):
-        """Without a product_map (old callers), behavior is unchanged:
-        entries without product_slug → 'default'."""
+    def test_no_product_map_dotted_event_uses_first_segment(self):
+        """Contract WITH NO product_map (old 4-arg callers): the first-segment
+        fallback still applies — a DOTTED slugless event buckets by its first
+        dotted segment, NOT 'default'. This is an intentional behavior change
+        from the pre-PR 'everything → default'; first-segment is strictly more
+        specific + deterministic. (4-arg production/test callers are unaffected
+        because they all stamp an explicit product_slug per entry.)"""
         cost_inv = {"entries": [
             {"workflow_id": "x.y", "event_type": "x.y"},
         ]}
         by_product = si.derive_per_product_constants(
             cost_inv, {"entries": []}, {"edges": []}, provider_catalog=None,
         )
-        # first-segment fallback gives "x" even with no spec map (deterministic).
         self.assertIn("x", by_product)
+        self.assertNotIn("default", by_product)
+
+    def test_no_product_map_single_token_event_uses_default(self):
+        """The 'default' bucket is reserved for genuinely unmappable events:
+        a single-token (no-dot) slugless event with no spec → 'default'."""
+        cost_inv = {"entries": [
+            {"workflow_id": "standalone", "event_type": "standalone"},
+        ]}
+        by_product = si.derive_per_product_constants(
+            cost_inv, {"entries": []}, {"edges": []}, provider_catalog=None,
+        )
+        self.assertIn("default", by_product)
 
 
 class ConsolidationDoubleCountDetection(unittest.TestCase):
