@@ -33,11 +33,19 @@ class PydanticSubclassDetector(unittest.TestCase):
 
 
 class ImportRules(unittest.TestCase):
+    # config_file is SERVICE-RELATIVE (relative to the service root).
     def test_python_package_app_layout(self):
         emit_dir, import_path = st.IMPORT_RULES["python_package"](
-            "services/svc/app/config.py", "moolabs_settings", "moolabs")
-        self.assertEqual(emit_dir, "services/svc/app")
+            "app/config.py", "moolabs_settings", "moolabs")
+        self.assertEqual(emit_dir, "app")
         self.assertEqual(import_path, "app.moolabs_settings")
+
+    def test_python_package_nested_package(self):
+        # Nested package must keep ALL segments — not just the immediate parent.
+        emit_dir, import_path = st.IMPORT_RULES["python_package"](
+            "app/core/config.py", "moolabs_settings", "x")
+        self.assertEqual(emit_dir, "app/core")
+        self.assertEqual(import_path, "app.core.moolabs_settings")
 
     def test_python_package_src_layout(self):
         emit_dir, import_path = st.IMPORT_RULES["python_package"](

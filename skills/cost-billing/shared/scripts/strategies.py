@@ -247,22 +247,24 @@ DETECTORS = {"pydantic_settings_subclass": pydantic_settings_subclass}
 
 
 # ── Import-path rules (de-hardcoded artifact placement) ─────────────────
-# Each rule: (config_file, basename, product) -> (emit_dir, import_path).
-# Artifacts are placed beside the DETECTED config file; `src/` is a package
-# root marker (stripped from the python import path).
+# Each rule: (config_file, basename, product) -> (emit_dir, import_path), where
+# `config_file` is SERVICE-RELATIVE (relative to the service root — the import
+# base the customer's code runs from). Artifacts are placed beside the detected
+# config; the caller prepends the service root to `emit_dir` for the write path.
+# `src/` is a package-root marker (stripped from the python import path).
 
 _PY_ROOT_MARKERS = {"src"}
 
 
 def python_package(config_file: str, basename: str, product: str) -> tuple[str, str]:
+    """Full dotted package of ALL directory segments (so nested packages like
+    `app/core/` map to `app.core.<basename>`), with `src/`-style root markers
+    stripped. Service-relative in, service-relative out."""
     p = config_file.replace("\\", "/")
     parts = p.split("/")
     emit_dir = "/".join(parts[:-1])
-    # The IMMEDIATE parent directory is the package; `src/` is stripped as a
-    # package-root marker so a `src/config.py` layout imports flat.
     pkg_parts = [seg for seg in parts[:-1] if seg not in _PY_ROOT_MARKERS]
-    last = pkg_parts[-1] if pkg_parts else ""
-    dotted = f"{last}.{basename}" if last else basename
+    dotted = ".".join([*pkg_parts, basename]) if pkg_parts else basename
     return emit_dir, dotted
 
 
