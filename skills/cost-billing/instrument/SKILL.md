@@ -592,11 +592,15 @@ You are instrumenting ONE file. Your job:
    (NOT a moolabs tool — the customer's): Python `ruff check --fix <file> && ruff
    format <file>` (or `isort` + `black`); TypeScript `eslint --fix` / `prettier
    --write`; Go `gofmt -w` / `goimports -w`. The inserts are correct + compilable
-   but NOT pre-sorted to the customer's import order or line-length — their
-   formatter is the source of truth for style (sorts the imports the template
-   added, fixes whitespace, modernizes typing). If the customer has no formatter
-   configured, skip + note it in the PR. This is what makes the PR pass their
-   pre-push lint gate (dogfood: 84 of 100 ruff findings were autofixable).
+   but NOT pre-sorted to the customer's import order — their formatter is the
+   source of truth for the AUTOFIXABLE classes: it sorts the imports the template
+   added (I001), strips blank-line whitespace (W293), and modernizes typing
+   (UP). If the customer has no formatter configured, skip + note it in the PR.
+   This clears the bulk of a strict gate (dogfood: 84 of 100 ruff findings were
+   autofixable). CAVEAT: a formatter does NOT reflow comments or docstrings, so
+   it will NOT fix comment/docstring line-length (E501) — the templates therefore
+   keep every comment + docstring within ~88 columns themselves; do not assume
+   the formatter will rescue an over-long REVIEW comment.
 7. Stage + commit the file with message: `feat(moolabs): instrument
    <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
 

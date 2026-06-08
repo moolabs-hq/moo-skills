@@ -109,7 +109,7 @@ def _resolve_api_key() -> str:
 
 @lru_cache(maxsize=1)
 def get_client() -> Moolabs:
-    """Return the singleton Moolabs SDK client (lru_cache = idempotent + thread-safe)."""
+    """Return the singleton Moolabs SDK client (cached; idempotent, thread-safe)."""
     from moolabs import Moolabs  # noqa: PLC0415 — lazy so the module imports without the SDK installed
 
     return Moolabs(api_key=_resolve_api_key())
