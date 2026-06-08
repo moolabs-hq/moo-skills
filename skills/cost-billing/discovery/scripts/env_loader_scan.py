@@ -1153,7 +1153,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
-    ap.add_argument("--repo-root", default=".")
+    # IMPORTANT: in a monorepo/workspace, point this at the WORKSPACE ROOT (the
+    # dir containing `packages/`, `uv.workspace`, `go.work`, the npm workspace
+    # root, etc.) — NOT a single service dir. The transitive config detector
+    # resolves a Settings base imported from a sibling workspace package (e.g.
+    # `from python_common.config import Settings`) by searching under repo_root;
+    # if repo_root is the service dir, that base is out of reach and the config
+    # falls back to `unrecognized` (dogfood 2026-06-08, finding B).
+    ap.add_argument("--repo-root", default=".",
+                    help="workspace/monorepo root (NOT a single service dir)")
     # Deprecated/ignored: PR #11 retired the env-loader-patterns.yaml catalog in
     # favor of the framework-node registry. Accepted (and ignored) so stale
     # runbooks / muscle-memory invocations that still pass `--catalog <path>`

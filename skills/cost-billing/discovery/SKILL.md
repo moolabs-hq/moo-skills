@@ -220,6 +220,16 @@ The HTML previews are static (no server). All reviewers read their respective fi
 
 ### Phase 6: Env-loader scan (NEW v0.3 env-routing migration)
 
+> **Invocation — `--repo-root` MUST be the workspace/monorepo root** (the dir
+> containing `packages/`, `uv.workspace`, `go.work`, the npm workspace root,
+> etc.), NOT a single service dir. The transitive config detector resolves a
+> Settings base imported from a sibling workspace package (e.g.
+> `from python_common.config import Settings`) by searching under `repo_root`;
+> if you point it at the service dir, that base is unreachable and the config
+> falls back to `unrecognized` (dogfood 2026-06-08, finding B). Also ensure the
+> suite is INSTALLED (or run from source) so `cost-billing-shared/scripts/` is
+> resolvable — the scripts locate it across both layouts (finding A).
+
 Driven by `scripts/env_loader_scan.py`. Walks each declared service and
 selects the ONE best-matching framework node from the framework-capability
 tree (`cost-billing-shared/assets/frameworks/<lang>/<fw>.yaml` — the single

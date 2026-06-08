@@ -54,7 +54,13 @@ except ImportError:  # pragma: no cover
 # Confidence below which an otherwise-classified site is still flagged for review.
 _CONTEXT_REVIEW_THRESHOLD = 0.6
 
-_IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+_IGNORE_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+    # `.direnv` (Nix/direnv) holds store artifacts incl. DIRECTORIES named like
+    # `*.py`; `.terraform` holds vendored providers. Walking them crashed the
+    # scanner on a real monorepo (dogfood 2026-06-08, finding C).
+    ".direnv", ".terraform", ".tox", ".mypy_cache",
+}
 
 
 @dataclass(frozen=True)
@@ -202,6 +208,12 @@ def scan_repo(root: Path, ops: list[_Operation]) -> list[CostCallSite]:
         if py.suffix != ".py":
             continue
         if any(part in _IGNORE_DIRS for part in py.parts):
+            continue
+        # Robust guard against the root cause class: a DIRECTORY whose name ends
+        # in `.py` (Nix store artifacts, etc.) would otherwise crash read_text
+        # with IsADirectoryError (dogfood 2026-06-08, finding C). Belt-and-braces
+        # with the skip-set above — covers any future ignored-dir we miss.
+        if not py.is_file():
             continue
         try:
             rel = str(py.relative_to(root)) if root.is_dir() else py.name
