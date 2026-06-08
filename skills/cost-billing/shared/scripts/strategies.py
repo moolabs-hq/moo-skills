@@ -288,9 +288,20 @@ def go_module(config_file: str, basename: str, product: str) -> tuple[str, str]:
 
 
 def ts_alias(config_file: str, basename: str, product: str) -> tuple[str, str]:
+    """`@/`-aliased ABSOLUTE import (aliased to the TS source root; `src/` is
+    stripped), matching config_wire._ts_settings_import_path's modify-mode
+    convention. Must NOT be a relative `./` import: the stub is emitted beside
+    the detected config, but the importer (the moolabs_client helper) lives at a
+    FIXED location, so a relative import resolves to the wrong file whenever the
+    config is not in the helper's directory (PR #11 review, round 3). The `@/`
+    alias is importer-location-independent, like python_package (dotted) and
+    go_module (absolute package path)."""
     p = config_file.replace("\\", "/")
-    emit_dir = "/".join(p.split("/")[:-1])
-    return emit_dir, f"./{basename}"
+    parts = p.split("/")
+    emit_dir = "/".join(parts[:-1])
+    alias_parts = [seg for seg in parts[:-1] if seg not in _PY_ROOT_MARKERS]
+    import_path = "@/" + "/".join([*alias_parts, basename]) if alias_parts else f"@/{basename}"
+    return emit_dir, import_path
 
 
 IMPORT_RULES = {

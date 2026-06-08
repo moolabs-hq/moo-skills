@@ -64,10 +64,21 @@ class ImportRules(unittest.TestCase):
             "internal/conf/config.go", "moolabs_settings", "billing")
         self.assertEqual(emit_dir, "internal/conf")
 
-    def test_ts_alias_sibling(self):
+    def test_ts_alias_absolute_not_relative(self):
+        # ts_alias must be a @/-aliased ABSOLUTE import (importer-location-
+        # independent), NOT a relative ./ import (round-3 review).
+        emit_dir, import_path = st.IMPORT_RULES["ts_alias"](
+            "src/config/env.ts", "moolabs-settings", "billing")
+        self.assertEqual(emit_dir, "src/config")
+        # @/ aliases the src root, so src/ is stripped from the import.
+        self.assertEqual(import_path, "@/config/moolabs-settings")
+        self.assertFalse(import_path.startswith("./"))
+
+    def test_ts_alias_no_subdir(self):
         emit_dir, import_path = st.IMPORT_RULES["ts_alias"](
             "src/config.ts", "moolabs-settings", "billing")
         self.assertEqual(emit_dir, "src")
+        self.assertEqual(import_path, "@/moolabs-settings")
 
 
 if __name__ == "__main__":
