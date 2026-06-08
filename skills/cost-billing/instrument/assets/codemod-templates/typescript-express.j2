@@ -27,7 +27,7 @@ const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ?
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}// REVIEW: idempotency — no derived anchor for this event; verify entity_id keys it uniquely so a retry does not double-count{% endif %}
 await emitEventSafe({
-  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ entry.event_type ~ "'" }},
+  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
   // Usage lane
@@ -64,7 +64,7 @@ const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto 
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}// REVIEW: idempotency — no derived anchor for this event; verify entity_id keys it uniquely so a retry does not double-count{% endif %}
 await emitUsageEventSafe({
-  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ entry.event_type ~ "'" }},
+  eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
   entityId: String({{ attribution_sources.request_id if attribution_sources.request_id else "_moolabsEventId" }} ?? ''),
   meterSlug: {{ entry.meter_slug_const if entry.meter_slug_const else "'" ~ entry.workflow_id ~ "'" }},

@@ -114,6 +114,29 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 out = self._render(tpl, _cost_entry())
                 self._assert_py_compiles(out, f"{tpl} cost-only")
 
+    def test_absent_event_type_falls_back_to_workflow_id(self):
+        # round-3 CRITICAL: the cost-events schema has NO event_type property, so
+        # a cost-only / sibling-pair entry with no event_type (and no resolved
+        # event_type_const) would raise UndefinedError on `entry.event_type` under
+        # StrictUndefined. Producer guarantees the key (None); templates fall back
+        # to workflow_id. With NO const to short-circuit, this exercises the deref.
+        for pattern in ("cost-only", "sibling-pair"):
+            entry = {
+                "pattern": pattern, "workflow_id": "api.completion.openai-chat",
+                "event_type": None,            # producer-guaranteed key, absent value
+                "event_type_const": None, "meter_slug_const": None,
+                "feature_key_const": None, "span_type_const": None,
+                "slugs_import_path": "app.slugs", "cost_kind": "llm-tokens",
+                "cost_micros_source": "r.cm",
+                "refund_unit": {"unit": "event", "derivation": 1},
+            }
+            for tpl in _PY_TEMPLATES:
+                with self.subTest(tpl=tpl, pattern=pattern):
+                    out = self._render(tpl, entry)
+                    self._assert_py_compiles(out, f"{tpl} {pattern} no-event_type")
+                    self.assertNotIn('"None"', out)          # no bareword-None literal
+                    self.assertIn("api.completion.openai-chat", out)  # workflow_id fallback
+
     def test_python_sibling_pair_renders_and_compiles(self):
         for tpl in _PY_TEMPLATES:
             with self.subTest(tpl=tpl):
@@ -194,7 +217,10 @@ class EndToEndPipeline(unittest.TestCase):
                             "derivation": "1 apply_remittance completion (post-success)"}}]}
         cost_inv = {"entries": [{
             "file": "app/llm_helpers.py", "line": 209,
-            "workflow_id": "arc.shared.llmport-call", "event_type": "arc.shared.llmport-call",
+            "workflow_id": "arc.shared.llmport-call",
+            # NO event_type — the cost-events schema has no such property; a
+            # cost entry carries workflow_id. Over-populating event_type here is
+            # exactly what hid the round-3 CRITICAL.
             "classification": "cost-only", "product_slug": "arc",
             "cost_dimension": "llm_tokens"}]}
         signed = {"service_slug": "moo-arc",

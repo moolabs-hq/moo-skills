@@ -492,10 +492,14 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
     events_method_path:       "client.events.ingest"
   inserts:
     - line: 729
-      pattern: sibling-pair
-      entry:                       # the inventory entry — JUST this one
+      pattern: sibling-pair        # insert-level — for the subagent's routing
+      entry:                       # the inventory entry — JUST this one. The
+                                   # planner mirrors `pattern` IN HERE too (the
+                                   # template branches on entry.pattern); render
+                                   # with THIS block, do not hand-merge anything.
+        pattern: sibling-pair
         workflow_id: messaging.email.sent
-        event_type: completion.delivered
+        event_type: completion.delivered    # absent on cost entries (cost schema has no event_type) — templates fall back to workflow_id
         idempotency_anchor: { handler: compose_email, path_param: customer_id, confidence: 0.95 }
         refund_unit: { unit: email, derivation: "1" }
         cost_kind: llm-tokens
@@ -551,10 +555,14 @@ You are instrumenting ONE file. Your job:
 1. Read the file at <task.file>.
 2. For each insert in <task.inserts>, render <task.template> with EXACTLY this
    context — nothing added, nothing merged:
-     - `entry`              = the insert's `entry` block verbatim. It is COMPLETE:
-                              it carries `pattern`, `event_type`, `workflow_id`,
-                              the `*_const` slug names (or null), `slugs_import_path`,
-                              `cost_kind` / `cost_micros_source` / `cost_value_missing`,
+     - `entry`              = the insert's `entry` block verbatim. Every key the
+                              template references is PRESENT (value-or-null), so a
+                              StrictUndefined render never hits an absent key:
+                              `pattern`, `workflow_id`, `event_type` (null on cost
+                              entries — the cost schema has none; templates fall
+                              back to workflow_id), the `*_const` slug names (or
+                              null), `slugs_import_path`, `cost_kind` /
+                              `cost_micros_source` / `cost_value_missing`,
                               `refund_unit`, and `idempotency_anchor` (cost-only only).
      - `attribution_sources` = the insert's `attribution_sources` block verbatim
                               (always carries customer_id / request_id / consumer_agent,

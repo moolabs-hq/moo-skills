@@ -440,3 +440,16 @@ output pass by luck and hid E/F for rounds; a failing render is now a
 report-the-skill-defect STOP, not a per-file fixup. The idempotency REVIEW prompt
 is preserved for usage-only/sibling-pair via an `{% else %}` generic prompt (so
 guarding the anchor out doesn't silently drop the retry-double-count review).
+
+**Third sibling of E (adversarial review, round 3):** `entry.event_type` was ALSO
+referenced unguarded — and the cost-events schema has NO `event_type` property
+(cost entries carry `workflow_id`), so a schema-conformant cost / sibling-pair
+entry crashed all 6 templates with `UndefinedError: ... 'event_type'`. The first
+sibling sweep missed it because every test fixture over-populated `event_type`.
+Fix: the producer guarantees the `event_type` key (None when absent); cost-only
+keeps its `event_type → cost_kind → workflow_id` fallback, the usage-only /
+sibling-pair branches gained a `→ workflow_id` fallback, the render-smoke cost
+fixture is now schema-conformant (no `event_type`), and a dedicated
+absent-`event_type` test guards it. Lesson: a producer-guarantees-keys contract is
+only as good as the fixtures' fidelity to the *sparsest schema-legal shape* — over-
+populated fixtures hide exactly the absent-key bugs the contract exists to prevent.
