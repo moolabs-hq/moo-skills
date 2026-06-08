@@ -8,13 +8,14 @@ recognized pattern (or stub_required=true when none found) and the
 deployment-surface insertion points (Terraform, k8s, docker-compose,
 .env.example).
 
-Pattern catalog lives at shared/assets/env-loader-patterns.yaml.
+Detection is driven by the framework-capability tree (the framework-node
+registry) at shared/assets/frameworks/<lang>/<fw>.yaml — the single source of
+truth for env-loader patterns.
 
 Usage:
     python env_loader_scan.py \\
         --signed-yaml .moolabs/chain/04-final.signed.yaml \\
         --customer-context-dir .moolabs/customer-context \\
-        --catalog skills/cost-billing/shared/assets/env-loader-patterns.yaml \\
         [--repo-root .]
 """
 
@@ -42,70 +43,6 @@ _FRAMEWORKS_DIR = Path(__file__).resolve().parents[2] / "shared" / "assets" / "f
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Catalog loading
-# ──────────────────────────────────────────────────────────────────────
-
-@dataclass
-class Pattern:
-    id: str
-    language: str
-    detection_signal: str
-    import_signals: list[str]
-    structural_signals: list[str]
-    wire_target: dict[str, str]
-    priority: int
-
-
-def load_pattern_catalog(path: Path) -> list[Pattern]:
-    """Load env-loader-patterns.yaml. Uses PyYAML when available, falls back
-    to a minimal hand-rolled parser otherwise (matches sdk_snapshot.py's
-    no-runtime-dep approach for the codemod environment).
-    """
-    try:
-        import yaml
-        data = yaml.safe_load(path.read_text())
-    except ImportError:
-        data = _hand_rolled_yaml_load(path)
-
-    out: list[Pattern] = []
-    for entry in data.get("patterns", []):
-        out.append(Pattern(
-            id=entry["id"],
-            language=entry["language"],
-            detection_signal=entry["detection_signal"],
-            import_signals=list(entry.get("import_signals", []) or []),
-            structural_signals=list(entry.get("structural_signals", []) or []),
-            wire_target=entry["wire_target"],
-            priority=int(entry.get("priority", 50)),
-        ))
-    return out
-
-
-def group_patterns_by_language(patterns: list[Pattern]) -> dict[str, list[Pattern]]:
-    """Group patterns by language, sorted by priority descending within each."""
-    by_lang: dict[str, list[Pattern]] = {"python": [], "typescript": [], "go": []}
-    for p in patterns:
-        by_lang.setdefault(p.language, []).append(p)
-    for lang in by_lang:
-        by_lang[lang].sort(key=lambda p: -p.priority)
-    return by_lang
-
-
-def _hand_rolled_yaml_load(path: Path) -> dict:
-    """Minimal YAML reader for the pattern catalog when PyYAML is absent.
-    Only supports the catalog's known shape; not a general YAML parser.
-    """
-    # Phase A leans on PyYAML being available in the test environment (smoke
-    # already imports yaml). This fallback is here so the script can run in
-    # a customer's codemod environment that lacks PyYAML — Phase B's instrument
-    # side will revisit this.
-    raise NotImplementedError(
-        "PyYAML required for env_loader_scan.py in Phase A. "
-        "Install pyyaml or run from the smoke environment."
-    )
-
-
-# ──────────────────────────────────────────────────────────────────────
 # Per-file scan
 # ──────────────────────────────────────────────────────────────────────
 
@@ -121,7 +58,7 @@ class ScanResult:
     wire_target: dict[str, str] = field(default_factory=dict)
 
 
-# Confidence-band thresholds. Matches catalog comment.
+# Confidence-band thresholds.
 _HIGH_THRESHOLD = 0.85
 _MEDIUM_THRESHOLD = 0.50
 _LOW_THRESHOLD = 0.30
@@ -274,8 +211,8 @@ def _go_insert_line(text: str, opening_pattern: str) -> int:
 # Transitive pydantic-settings detection (Dogfood #1a) — moved to
 # shared/scripts/strategies.py (DETECTORS registry). The detection LOGIC now
 # lives there and returns a bool; this thin shim reconstructs the ScanResult
-# that scan_file expects, using the local _python_insert_line for the class's
-# insertion line. See strategies._first_transitive_settings_class.
+# that the registry scan expects, using the local _python_insert_line for the
+# class's insertion line. See strategies._first_transitive_settings_class.
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -289,7 +226,7 @@ def _detect_settings_subclass(
     (which carry the modify-mode accessor).
 
     Detection is delegated to strategies; this shim wraps the matched class +
-    bases back into the ScanResult shape scan_file consumes."""
+    bases back into the ScanResult shape the registry scan consumes."""
     match = strategies._first_transitive_settings_class(path, text, search_roots)
     if match is None:
         return None
@@ -306,73 +243,6 @@ def _detect_settings_subclass(
         ],
         wire_target={"kind": "add_pydantic_settings_field"},
     )
-
-
-def scan_file(
-    path: Path, patterns: list[Pattern], search_roots: list[Path] | None = None,
-) -> ScanResult | None:
-    """Scan a single file against the patterns. Return the highest-confidence
-    match, or None if no pattern reaches the LOW threshold."""
-    try:
-        text = path.read_text(errors="ignore")
-    except OSError:
-        return None
-
-    best: ScanResult | None = None
-    best_score: float = 0.0
-
-    for p in patterns:
-        import_score, import_evidence = _signal_score(text, p.import_signals)
-        struct_score, struct_evidence = _signal_score(text, p.structural_signals)
-
-        # Combine: structural weighted higher than imports.
-        # Both → 0.95 (high); structural only → 0.65 (medium);
-        # import only → 0.35 (low); neither → 0.0
-        if import_score > 0 and struct_score > 0:
-            score = 0.95
-        elif struct_score > 0:
-            score = 0.65
-        elif import_score > 0:
-            score = 0.35
-        else:
-            score = 0.0
-
-        if score < _LOW_THRESHOLD:
-            continue
-
-        if score > best_score:
-            best_score = score
-            # For class-based Python patterns, derive insertion line from the class
-            line_to_insert = 1
-            if p.structural_signals:
-                if p.language == "python":
-                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
-                elif p.language == "typescript":
-                    line_to_insert = _ts_insert_line(text, p.structural_signals[0])
-                elif p.language == "go":
-                    line_to_insert = _go_insert_line(text, p.structural_signals[0])
-                else:
-                    line_to_insert = _python_insert_line(text, p.structural_signals[0])
-            best = ScanResult(
-                pattern_id=p.id,
-                file=str(path),
-                line_to_insert=line_to_insert,
-                confidence=_band(score),
-                confidence_score=score,
-                evidence=import_evidence + struct_evidence,
-                wire_target=p.wire_target,
-            )
-
-    # Transitive pydantic-settings-subclass detection (Dogfood #1a): only for
-    # Python files, and only when no precise high-confidence regex pattern
-    # already matched (a DIRECT BaseSettings subclass keeps its v1/v2 match +
-    # modify accessor). Catches a Settings class that extends a project base.
-    if path.suffix == ".py" and (best is None or best.confidence_score < _HIGH_THRESHOLD):
-        sub = _detect_settings_subclass(path, text, search_roots or [path.parent])
-        if sub is not None and (best is None or sub.confidence_score > best.confidence_score):
-            best = sub
-
-    return best
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -394,10 +264,9 @@ _SKIP_DIRS = frozenset({
 
 
 def _is_excluded_candidate(path: Path) -> bool:
-    """Path-only candidate-exclusion predicate shared by scan_service (old
-    catalog path) AND scan_service_via_registry (new node path) so the two
-    can never drift. Returns True iff `path` must NOT be considered as the
-    customer's app-config source.
+    """Path-only candidate-exclusion predicate used by
+    scan_service_via_registry. Returns True iff `path` must NOT be considered as
+    the customer's app-config source.
 
     NOTE: caller still applies `path.is_file()` (first) and the per-language
     extension filter inline — those aren't path-name-only and don't belong
@@ -431,82 +300,15 @@ def _is_excluded_candidate(path: Path) -> bool:
     return False
 
 
-def scan_service(
-    service_root: Path,
-    language: str,
-    catalog: list[Pattern],
-    search_roots: list[Path] | None = None,
-) -> ScanResult | None:
-    """Walk a service directory and return the best env-loader-pattern match
-    found, or None if no file passes the LOW threshold.
-
-    Conflict resolution (sort_key order):
-      1. Highest confidence_score wins.
-      2. Among equal scores, highest catalog priority wins.
-      3. Among equal priority, the SHALLOWEST path wins (closest to the
-         service root = most canonical config location).
-         e.g. `app/config.py` beats `app/legacy/old_config.py`.
-    """
-    by_lang = group_patterns_by_language(catalog)
-    patterns = by_lang.get(language, [])
-    if not patterns:
-        return None
-
-    extensions = _EXTENSION_BY_LANGUAGE.get(language, ())
-    if not extensions:
-        return None
-
-    candidates: list[ScanResult] = []
-    for path in service_root.rglob("*"):
-        if not path.is_file():
-            continue
-        # Path-only exclusions (skip dirs, test/smoke files, skill artifacts)
-        # live in _is_excluded_candidate — shared with scan_service_via_registry
-        # so the two scan paths can never drift on what counts as a candidate.
-        if _is_excluded_candidate(path):
-            continue
-        if path.suffix not in extensions:
-            continue
-        hit = scan_file(path, patterns, search_roots=search_roots or [service_root])
-        if hit is not None:
-            candidates.append(hit)
-
-    if not candidates:
-        return None
-
-    # Sort by: confidence_score desc, then by priority of the matched
-    # pattern desc, then by path depth asc (shallower path = more canonical
-    # config location).
-    priority_by_id = {p.id: p.priority for p in catalog}
-    # The transitive subclass detector is a code-based pattern (not in the YAML
-    # catalog). Rank it above flat env-read patterns (dotenv=70, decouple=80) so
-    # it beats a smoke/script env-read on a confidence tie, but below the
-    # precise direct-BaseSettings patterns (v1=90, v2=100) — a direct config is
-    # a more certain match than a transitive project-base subclass.
-    priority_by_id.setdefault("python-pydantic-settings-subclass", 85)
-
-    def sort_key(r: ScanResult) -> tuple:
-        depth = r.file.count("/")
-        return (
-            -r.confidence_score,
-            -priority_by_id.get(r.pattern_id, 0),
-            depth,
-        )
-
-    candidates.sort(key=sort_key)
-    return candidates[0]
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Registry-driven scan (framework-capability tree)
 # ──────────────────────────────────────────────────────────────────────
 #
-# Mirror of scan_file / scan_service that drives off framework_registry Nodes
-# (shared/assets/frameworks/<lang>/<fw>.yaml) instead of the flat env-loader
-# catalog. It MUST produce the SAME winners as scan_service for the existing
-# fixtures, so it reuses the same _signal_score banding, the same code-detector
-# fallback, the same _is_excluded_candidate exclusions, and the same tiebreak
-# (confidence_score desc -> detection.priority desc -> path depth asc).
+# Drives off framework_registry Nodes (shared/assets/frameworks/<lang>/<fw>.yaml)
+# — the single source of truth for env-loader detection. Reuses the
+# _signal_score banding, the code-detector fallback, the _is_excluded_candidate
+# exclusions, and the tiebreak (confidence_score desc -> detection.priority desc
+# -> path depth asc).
 
 
 def scan_file_via_registry(
@@ -518,7 +320,7 @@ def scan_file_via_registry(
     """Scan a single file against the language's framework-tree Nodes. Returns
     the best ScanResult (whose pattern_id is the winning node's id), or None.
 
-    Two-phase, matching scan_file exactly:
+    Two-phase:
       1. REGEX nodes, evaluated priority-desc, banded by _signal_score:
          import + structural -> 0.95 (high); structural-only -> 0.65 (medium);
          import-only -> 0.35 (low); below _LOW_THRESHOLD -> skip. Strict-greater
@@ -635,9 +437,9 @@ def scan_service_via_registry(
     search_roots: list[Path] | None = None,
 ) -> ScanResult | None:
     """Walk a service directory and return the best framework-tree node match,
-    or None. Registry-driven counterpart of scan_service: same exclusions
-    (_is_excluded_candidate), same per-language extension filter, same tiebreak
-    (confidence_score desc -> node detection.priority desc -> path depth asc).
+    or None. Exclusions (_is_excluded_candidate), per-language extension filter,
+    and tiebreak (confidence_score desc -> node detection.priority desc -> path
+    depth asc).
     """
     reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
     nodes = list(reg.get(language, {}).values())
@@ -1113,12 +915,15 @@ def _service_entry(
 def build_inventory(
     repo_root: Path,
     services: list[dict],
-    catalog: list[Pattern],
     granularity: str,
     granularity_source: str,
     shared_config_path: str | None,
+    catalog=None,
 ) -> dict:
     """Build the env-routing-inventory dict that will be YAML-emitted.
+
+    Detection is registry-driven via _service_entry. The trailing `catalog`
+    arg is accepted for back-compat with existing callers but IGNORED.
 
     Granularity behavior:
       - per-service:  scan each service's root independently
@@ -1303,12 +1108,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
-    ap.add_argument("--catalog", required=True, help="path to env-loader-patterns.yaml")
     ap.add_argument("--repo-root", default=".")
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
-    catalog = load_pattern_catalog(Path(args.catalog))
     services, granularity, granularity_source, shared_config_path = \
         parse_services_and_granularity(Path(args.signed_yaml))
 
@@ -1322,7 +1125,6 @@ def main(argv: list[str] | None = None) -> int:
     inventory = build_inventory(
         repo_root=repo_root,
         services=services,
-        catalog=catalog,
         granularity=granularity,
         granularity_source=granularity_source,
         shared_config_path=shared_config_path,

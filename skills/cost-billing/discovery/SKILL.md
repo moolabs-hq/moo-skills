@@ -224,8 +224,10 @@ Driven by `scripts/env_loader_scan.py`. Walks each declared service and
 detects the customer's env-loading pattern (pydantic-settings v2, pydantic
 v1 BaseSettings, python-decouple, dotenv+os.getenv for Python; zod env
 schema, process.env direct, env-var library for TypeScript; viper,
-kelseyhightower/envconfig, raw os.Getenv for Go). The recognition catalog
-lives at `cost-billing-shared/assets/env-loader-patterns.yaml`.
+kelseyhightower/envconfig, raw os.Getenv for Go). Detection is driven by the
+framework-capability tree (the framework-node registry) under
+`cost-billing-shared/assets/frameworks/<lang>/<fw>.yaml` — the single source of
+truth for env-loader patterns.
 
 Granularity is declared by the engineer in bootstrap-team-engineer Q14b:
 - `per-service` — scan each service independently
