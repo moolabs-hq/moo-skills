@@ -32,6 +32,13 @@ from pathlib import Path
 # DETECTORS registry. env_loader_scan reuses it through a thin ScanResult shim.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
 import strategies  # noqa: E402
+import framework_registry  # noqa: E402
+
+# Framework-capability tree node files. load_registry(_FRAMEWORKS_DIR) returns
+# {language: {framework: Node}}; each Node carries detection.kind ("regex" |
+# "code"), detection.import_signals/structural_signals/priority (regex nodes),
+# and detection.detector (code nodes — a key into strategies.DETECTORS).
+_FRAMEWORKS_DIR = Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -386,6 +393,44 @@ _SKIP_DIRS = frozenset({
 })
 
 
+def _is_excluded_candidate(path: Path) -> bool:
+    """Path-only candidate-exclusion predicate shared by scan_service (old
+    catalog path) AND scan_service_via_registry (new node path) so the two
+    can never drift. Returns True iff `path` must NOT be considered as the
+    customer's app-config source.
+
+    NOTE: caller still applies `path.is_file()` (first) and the per-language
+    extension filter inline — those aren't path-name-only and don't belong
+    in this predicate.
+
+    Excludes:
+      - any segment in _SKIP_DIRS (vendored deps, build dirs, VCS, caches)
+      - test / smoke files across ALL languages (a stray env access in a
+        test must never outrank the real settings module)
+      - the skill's OWN previously-emitted artifacts
+        (moolabs_settings.* / moolabs_client.* / slugs_*.*) — else a re-run
+        would wire the codemod into its own output (circular)
+    """
+    if any(part in _SKIP_DIRS for part in path.parts):
+        return True
+    _nm = path.name
+    if (
+        _nm.startswith("test_")                                  # py
+        or _nm == "conftest.py"                                  # py
+        or re.search(r"_test\.(py|go)$", _nm)                    # py / go
+        or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
+        or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
+    ):
+        return True
+    if (
+        re.match(r"^moolabs_settings\.(py|ts|go)$", _nm)
+        or re.match(r"^moolabs_client\.(py|ts|go)$", _nm)
+        or re.match(r"^slugs_[\w-]+\.(py|ts|go)$", _nm)
+    ):
+        return True
+    return False
+
+
 def scan_service(
     service_root: Path,
     language: str,
@@ -415,33 +460,10 @@ def scan_service(
     for path in service_root.rglob("*"):
         if not path.is_file():
             continue
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        # Test files are NEVER the canonical app-config source — across ALL
-        # supported languages (Python/TS/JS/Go) a stray env access in a test
-        # (os.getenv / process.env / os.Getenv) must not outrank the real
-        # settings module. (Fixes the v0.3 misdetection of a test file over the
-        # real config when the real Settings extends a custom base the pattern's
-        # structural signal doesn't match.)
-        _nm = path.name
-        if (
-            _nm.startswith("test_")                                  # py
-            or _nm == "conftest.py"                                  # py
-            or re.search(r"_test\.(py|go)$", _nm)                    # py / go
-            or re.search(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$", _nm)  # ts / js
-            or ({"tests", "test", "__tests__", "spec", "specs", "e2e", "__mocks__"} & set(path.parts))
-        ):
-            continue
-        # The skill's OWN previously-emitted artifacts must never be detected as
-        # the customer's config on a re-run — the stub Settings module IS a
-        # BaseSettings subclass, so it would otherwise win and the codemod would
-        # wire into its own output (circular). Skip them by their canonical
-        # emitted basenames (language-agnostic).
-        if (
-            re.match(r"^moolabs_settings\.(py|ts|go)$", _nm)
-            or re.match(r"^moolabs_client\.(py|ts|go)$", _nm)
-            or re.match(r"^slugs_[\w-]+\.(py|ts|go)$", _nm)
-        ):
+        # Path-only exclusions (skip dirs, test/smoke files, skill artifacts)
+        # live in _is_excluded_candidate — shared with scan_service_via_registry
+        # so the two scan paths can never drift on what counts as a candidate.
+        if _is_excluded_candidate(path):
             continue
         if path.suffix not in extensions:
             continue
@@ -462,6 +484,192 @@ def scan_service(
     # precise direct-BaseSettings patterns (v1=90, v2=100) — a direct config is
     # a more certain match than a transitive project-base subclass.
     priority_by_id.setdefault("python-pydantic-settings-subclass", 85)
+
+    def sort_key(r: ScanResult) -> tuple:
+        depth = r.file.count("/")
+        return (
+            -r.confidence_score,
+            -priority_by_id.get(r.pattern_id, 0),
+            depth,
+        )
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Registry-driven scan (framework-capability tree)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Mirror of scan_file / scan_service that drives off framework_registry Nodes
+# (shared/assets/frameworks/<lang>/<fw>.yaml) instead of the flat env-loader
+# catalog. It MUST produce the SAME winners as scan_service for the existing
+# fixtures, so it reuses the same _signal_score banding, the same code-detector
+# fallback, the same _is_excluded_candidate exclusions, and the same tiebreak
+# (confidence_score desc -> detection.priority desc -> path depth asc).
+
+
+def scan_file_via_registry(
+    path: Path,
+    language: str,
+    nodes: list | None = None,
+    search_roots: list[Path] | None = None,
+) -> ScanResult | None:
+    """Scan a single file against the language's framework-tree Nodes. Returns
+    the best ScanResult (whose pattern_id is the winning node's id), or None.
+
+    Two-phase, matching scan_file exactly:
+      1. REGEX nodes, evaluated priority-desc, banded by _signal_score:
+         import + structural -> 0.95 (high); structural-only -> 0.65 (medium);
+         import-only -> 0.35 (low); below _LOW_THRESHOLD -> skip. Strict-greater
+         keeps the first node on a score tie (so the higher-priority node wins).
+      2. CODE nodes, run only as a fallback when no regex node reached the HIGH
+         band (best is None or best.confidence_score < _HIGH_THRESHOLD), and
+         only replacing when strictly greater. The detector
+         (strategies.DETECTORS[...]) returns bool; the matched class name (for
+         line_to_insert) and bases come from _first_transitive_settings_class.
+    """
+    if nodes is None:
+        reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+        nodes = list(reg.get(language, {}).values())
+    if not nodes:
+        return None
+
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return None
+
+    regex_nodes = [n for n in nodes if n.detection.get("kind") == "regex"]
+    code_nodes = [n for n in nodes if n.detection.get("kind") == "code"]
+
+    # Phase 1 — regex band scoring, highest priority first (so a same-score tie
+    # is won by the higher-priority node, since we keep on strict-greater).
+    regex_nodes.sort(key=lambda n: -int(n.detection.get("priority", 0)))
+
+    best: ScanResult | None = None
+    best_score: float = 0.0
+
+    for node in regex_nodes:
+        import_signals = list(node.detection.get("import_signals", []) or [])
+        structural_signals = list(node.detection.get("structural_signals", []) or [])
+        import_score, import_evidence = _signal_score(text, import_signals)
+        struct_score, struct_evidence = _signal_score(text, structural_signals)
+
+        if import_score > 0 and struct_score > 0:
+            score = 0.95
+        elif struct_score > 0:
+            score = 0.65
+        elif import_score > 0:
+            score = 0.35
+        else:
+            score = 0.0
+
+        if score < _LOW_THRESHOLD:
+            continue
+
+        if score > best_score:
+            best_score = score
+            line_to_insert = 1
+            if structural_signals:
+                if language == "python":
+                    line_to_insert = _python_insert_line(text, structural_signals[0])
+                elif language == "typescript":
+                    line_to_insert = _ts_insert_line(text, structural_signals[0])
+                elif language == "go":
+                    line_to_insert = _go_insert_line(text, structural_signals[0])
+                else:
+                    line_to_insert = _python_insert_line(text, structural_signals[0])
+            best = ScanResult(
+                pattern_id=node.id,
+                file=str(path),
+                line_to_insert=line_to_insert,
+                confidence=_band(score),
+                confidence_score=score,
+                evidence=import_evidence + struct_evidence,
+                wire_target={},
+            )
+
+    # Phase 2 — code detectors, only when no regex node reached the HIGH band.
+    if best is None or best.confidence_score < _HIGH_THRESHOLD:
+        for node in code_nodes:
+            detector_name = node.detection.get("detector")
+            detector = strategies.DETECTORS.get(detector_name)
+            if detector is None:
+                continue
+            roots = search_roots or [path.parent]
+            if not detector(path, text, roots):
+                continue
+            # Recover the matched class name for the insertion line. The
+            # detectors are bool-returning; _first_transitive_settings_class
+            # gives back (class_name, bases) for the same match.
+            match = strategies._first_transitive_settings_class(path, text, roots)
+            line_to_insert = 1
+            evidence: list[str] = []
+            if match is not None:
+                cname, bases = match
+                line_to_insert = _python_insert_line(
+                    text, rf"class\s+{re.escape(cname)}\s*\("
+                )
+                evidence = [
+                    f"class {cname}({', '.join(bases)}) -> BaseSettings (transitive)"
+                ]
+            sub = ScanResult(
+                pattern_id=node.id,
+                file=str(path),
+                line_to_insert=line_to_insert,
+                confidence="high",
+                confidence_score=0.95,
+                evidence=evidence,
+                wire_target={},
+            )
+            if best is None or sub.confidence_score > best.confidence_score:
+                best = sub
+
+    return best
+
+
+def scan_service_via_registry(
+    service_root: Path,
+    language: str,
+    search_roots: list[Path] | None = None,
+) -> ScanResult | None:
+    """Walk a service directory and return the best framework-tree node match,
+    or None. Registry-driven counterpart of scan_service: same exclusions
+    (_is_excluded_candidate), same per-language extension filter, same tiebreak
+    (confidence_score desc -> node detection.priority desc -> path depth asc).
+    """
+    reg = framework_registry.load_registry(_FRAMEWORKS_DIR)
+    nodes = list(reg.get(language, {}).values())
+    if not nodes:
+        return None
+
+    extensions = _EXTENSION_BY_LANGUAGE.get(language, ())
+    if not extensions:
+        return None
+
+    candidates: list[ScanResult] = []
+    for path in service_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if _is_excluded_candidate(path):
+            continue
+        if path.suffix not in extensions:
+            continue
+        hit = scan_file_via_registry(
+            path, language, nodes=nodes,
+            search_roots=search_roots or [service_root],
+        )
+        if hit is not None:
+            candidates.append(hit)
+
+    if not candidates:
+        return None
+
+    # Priority comes straight from each node's detection.priority — the code
+    # subclass node carries its declared 85 (no setdefault hack needed; the
+    # node IS in the registry now, unlike the old catalog).
+    priority_by_id = {n.id: int(n.detection.get("priority", 0)) for n in nodes}
 
     def sort_key(r: ScanResult) -> tuple:
         depth = r.file.count("/")

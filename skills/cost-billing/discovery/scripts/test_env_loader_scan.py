@@ -1307,5 +1307,33 @@ class ServiceUnderInfraDirNoDoubleScan(unittest.TestCase):
             )
 
 
+class RegistryDrivenScan(unittest.TestCase):
+    def test_scan_service_uses_registry_nodes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = Path(tmp) / "svc"; (svc / "app").mkdir(parents=True)
+            (svc / "app" / "config.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    api: str\n")
+            res = els.scan_service_via_registry(svc, "python", search_roots=[svc])
+            self.assertEqual(res.pattern_id, "python-pydantic-settings-v2")
+
+    def test_code_node_subclass_wins_when_no_regex(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp); svc = repo / "svc"; (svc / "app").mkdir(parents=True)
+            (repo / "shared").mkdir()
+            (repo / "shared" / "base.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class AppBase(BaseSettings):\n    r: str = 'x'\n")
+            (svc / "app" / "config.py").write_text(
+                "from shared.base import AppBase\n"
+                "class Settings(AppBase):\n    y: str = 'z'\n")
+            res = els.scan_service_via_registry(svc, "python", search_roots=[svc, repo])
+            self.assertEqual(res.pattern_id, "python-pydantic-settings-subclass")
+
+
 if __name__ == "__main__":
     unittest.main()
