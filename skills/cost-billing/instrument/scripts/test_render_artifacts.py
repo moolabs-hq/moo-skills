@@ -44,6 +44,28 @@ def _tasks(stub_path="app/services/moolabs_settings.py", deployment_stubs=None,
     }
 
 
+class LoadYamlRobustness(unittest.TestCase):
+    """round-7: a hand-edited / truncated customer tasks.yaml must fail with a
+    clean RuntimeError + non-zero exit, NOT a raw YAMLError traceback."""
+
+    def setUp(self):
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+
+    def test_malformed_yaml_raises_clean_runtime_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "tasks.yaml"
+            p.write_text("tasks:\n  - task_id: 'unterminated\n    file: x:\n  bad: : :\n")
+            with self.assertRaises(RuntimeError) as cm:
+                ra.load_yaml(p)
+            self.assertIn("not valid YAML", str(cm.exception))
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(ra.load_yaml(Path("/nonexistent/tasks.yaml")), {})
+
+
 class LanguageInference(unittest.TestCase):
     def test_python_from_stub_extension(self):
         self.assertEqual(ra.infer_language(_tasks("app/x/moolabs_settings.py")), "python")

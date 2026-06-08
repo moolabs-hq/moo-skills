@@ -66,8 +66,9 @@ _SLUGS_LANG_RULE: dict[str, tuple[str, str]] = {
 # helper templates checked into assets/codemod-templates/.
 # Go is P0 (Decision #2 reversed 2026-05-28): the go-stdlib.j2 callsite template
 # is in progress; the Go SDK helper (go-moolabs-client.go.j2) has landed. Until
-# the callsite template exists, the planner's existence check below skips Go
-# files with a clear message rather than emitting a task against a missing file.
+# the callsite template exists, the planner's existence check below skips ANY
+# file whose mapped template is missing (Go today) with a clear message rather
+# than emitting a task against a missing file.
 TEMPLATE_MAP: dict[tuple[str, str], str] = {
     ("python", "fastapi"): "assets/codemod-templates/python-fastapi.j2",
     ("python", "django"): "assets/codemod-templates/python-django.j2",

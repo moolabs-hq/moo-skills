@@ -109,7 +109,16 @@ def load_yaml(path: Path) -> dict:
         ) from exc
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    try:
+        return yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        # tasks.yaml is customer-editable; a hand-edit / truncation must fail with
+        # a clean, actionable message + non-zero exit, NOT a raw traceback out of
+        # the render stage (round-7 review).
+        raise RuntimeError(
+            f"render_artifacts: {path} is not valid YAML ({exc}). "
+            f"Re-generate it with task_planner.py or fix the edit."
+        ) from exc
 
 
 def infer_language(tasks: dict) -> str:
