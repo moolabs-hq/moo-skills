@@ -18,7 +18,7 @@
 
 Module-level billing-emission singleton, wired by /cost-billing-instrument.
 Generated {{ generated_at }} per the signed gates:
-{% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
+{% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file.split('/')[-1] }} (sha {{ h.sha256[:8] }})
 {% endfor %}
 SDK version: {{ sdk_pinned_version | default("v0.3.0-rc1") }}  (unified-ingest ergonomic methods)
 

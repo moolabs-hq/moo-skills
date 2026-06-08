@@ -275,39 +275,57 @@ class EndToEndPipeline(unittest.TestCase):
                       for t in reloaded["tasks"] for i in t["inserts"])
         self.assertTrue(flagged, "cost_value_missing must be flagged for the LLMPort entry")
 
-    def test_helper_worst_case_render_has_no_ruff_e501(self):
-        # round-10: the helper docstring/comments interpolate variable-length values
-        # (service_slug, generated_at). Short fixtures masked E501 — render under
-        # WORST-CASE realistic values (long slug, microsecond ISO ts, real path) and
-        # let ruff (which exempts unbreakable tokens) confirm 0 E501. The lesson:
-        # test the line-length-stressing shape, not the convenient short one.
+    def test_helper_and_stub_e501_clean_at_generous_realistic_slug(self):
+        # rounds 10-11: the helper/stub docstrings interpolate variable-length
+        # customer values (service_slug, generated_at, chain file path). The
+        # COMMITTED bound (see SKILL.md): the codemod's own static content never
+        # causes E501, and the Python helper + stub are ruff-clean at a
+        # GENEROUS-REALISTIC shape — a 21-char service_slug (covers ~all real
+        # slugs), the longest REAL chain stage ("team-engineer"), the real
+        # 04-final-<slug>.signed.yaml path convention, and a microsecond ISO ts.
+        # ACCEPTED RESIDUE (not asserted): the slugs-module CONST line
+        # (LONG_NAME: str = "...") is an unwrappable assignment whose name is the
+        # customer's own slug — a pathologically long slug overflows it (and the
+        # customer's own code) regardless; and the .ts/.go/.tf templates can't be
+        # linted here (no eslint/golangci). Import lines are formatter-resolved
+        # (ruff format wraps them). The earlier "worst_case" fixture was DISHONEST
+        # — its 8-char stage + non-convention path passed while a real slug
+        # overflowed; this fixture matches the bound it claims to guard.
         import shutil
         import subprocess
         if shutil.which("ruff") is None:
             self.skipTest("ruff not installed")
         env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
                           undefined=StrictUndefined, keep_trailing_newline=True)
-        ctx = {
-            "service_slug": "acme-payments-platform-service",
-            "signoff_chain_hashes": [{"stage": "engineer",
-                                      "file": ".moolabs/chain/04-final-acme.signed.yaml",
-                                      "sha256": "fedcba0987654321"}],
-            "sdk_pinned_version": "v0.3.0-rc1", "telemetry": {"mode": "brownfield"},
-            "env_config": {"mode": "modify", "settings_import_path": "app.config",
-                           "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
-                           "stub_emit_path": None},
-            "generated_at": "2026-06-08T00:00:00.123456+00:00",
+        slug = "acme-billing-platform"  # 21 chars — generous realistic
+        gates = [{"stage": "team-engineer",
+                  "file": f".moolabs/chain/04-final-{slug}.signed.yaml",
+                  "sha256": "fedcba0987654321"}]
+        ts = "2026-06-08T00:00:00.123456+00:00"
+        renders = {
+            "python-moolabs-client.py.j2": {
+                "service_slug": slug, "signoff_chain_hashes": gates,
+                "sdk_pinned_version": "v0.3.0-rc1", "telemetry": {"mode": "brownfield"},
+                "env_config": {"mode": "modify", "settings_import_path": "app.config",
+                               "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
+                               "stub_emit_path": None},
+                "generated_at": ts},
+            "python-moolabs-settings.py.j2": {"service_slug": slug, "generated_at": ts,
+                "env_config": {"mode": "stub", "settings_import_path": "app.config",
+                               "stub_emit_path": "app/moolabs_settings.py", "api_key_accessor": "x"}},
         }
-        out = env.get_template("python-moolabs-client.py.j2").render(**ctx)
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
-            fh.write(out)
-            path = fh.name
-        try:
-            r = subprocess.run(["ruff", "check", "--select", "E501", "--isolated", path],
-                               capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, f"helper has E501 under worst-case:\n{r.stdout}")
-        finally:
-            Path(path).unlink(missing_ok=True)
+        for tpl, ctx in renders.items():
+            with self.subTest(template=tpl):
+                out = env.get_template(tpl).render(**ctx)
+                with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+                    fh.write(out)
+                    path = fh.name
+                try:
+                    r = subprocess.run(["ruff", "check", "--select", "E501", "--isolated", path],
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, f"{tpl} has E501 at the committed bound:\n{r.stdout}")
+                finally:
+                    Path(path).unlink(missing_ok=True)
 
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;

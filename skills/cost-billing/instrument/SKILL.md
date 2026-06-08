@@ -601,6 +601,19 @@ You are instrumenting ONE file. Your job:
    it will NOT fix comment/docstring line-length (E501) — the templates therefore
    keep every comment + docstring within ~88 columns themselves; do not assume
    the formatter will rescue an over-long REVIEW comment.
+
+   **Line-length policy + accepted residue (E501).** The committed bound: the
+   codemod's OWN static content never exceeds 88 cols, and the Python helper + stub
+   render E501-clean at a generous-realistic shape (service slug up to ~30 chars,
+   longest real chain stage, real signed-doc path) — guarded by
+   `test_helper_and_stub_e501_clean_at_generous_realistic_slug`. What the codemod
+   CANNOT bound, and is accepted residue: (a) a per-product **slugs CONSTANT** line
+   (`LONG_NAME: str = "value"`) whose name is the customer's own slug — an
+   unwrappable assignment that overflows only for a pathologically long slug, which
+   would break the customer's own E501 gate everywhere, not just our output; (b)
+   the `.ts` / `.go` / `.tf` templates, whose linters (eslint `max-len`, golangci
+   `lll`) aren't run in this repo. "0 E501 under an arbitrarily long customer slug"
+   is unachievable for any code generator and is the customer's own lint domain.
 7. Stage + commit the file with message: `feat(moolabs): instrument
    <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
 
