@@ -139,6 +139,30 @@ class PythonWireTargetDispatch(unittest.TestCase):
         self.assertEqual(plan["mode"], "stub")
         self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
 
+    def test_pydantic_settings_subclass_routes_to_stub(self):
+        """Dogfood #1b: the project-base Settings pattern (a class extending a
+        custom base, often with a module-level `settings` instance and no
+        get_settings()) MUST route to stub — the modify-mode accessor
+        `get_settings()...` would break a config that doesn't expose it. The
+        pattern is intentionally absent from _PYTHON_PATTERN_ACCESSORS, so
+        `accessor_map.get(pattern) is None` → stub (the stub provides its own
+        get_settings())."""
+        service = {
+            "service_slug": "moo-arc",
+            "app_config": {
+                "pattern": "python-pydantic-settings-subclass",
+                "file": "services/moo-arc/app/config.py",
+                "line_to_insert": 14,
+                "confidence": "high",
+                "stub_required": False,  # high confidence, but no accessor → stub
+                "wire_target": {"kind": "add_pydantic_settings_field"},
+            },
+            "deployment_surfaces": [],
+        }
+        plan = cw.plan_service_env_wire(service, language="python")
+        self.assertEqual(plan["mode"], "stub")
+        self.assertEqual(plan["settings_import_path"], "app.services.moolabs_settings")
+
 
 class TypeScriptWireTargetDispatch(unittest.TestCase):
     """All three recognized TS patterns route to stub mode.

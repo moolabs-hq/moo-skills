@@ -23,6 +23,8 @@ CATALOG_PATH = REPO_ROOT / "skills" / "cost-billing" / "shared" / "assets" / "en
 class CatalogLoad(unittest.TestCase):
     def test_catalog_has_ten_patterns(self):
         catalog = els.load_pattern_catalog(CATALOG_PATH)
+        # python-pydantic-settings-subclass (Dogfood #1a) is a CODE-based
+        # transitive-base detector, not a regex catalog pattern — count stays 10.
         self.assertEqual(len(catalog), 10)
 
     def test_catalog_groups_by_language(self):
@@ -85,6 +87,227 @@ class PythonPydanticV1Settings(unittest.TestCase):
             )
             result = els.scan_file(cfg, self.python_patterns)
             self.assertEqual(result.pattern_id, "python-pydantic-v1-settings")
+
+
+class PydanticSettingsSubclassTransitive(unittest.TestCase):
+    """Dogfood #1a (general fix): a settings class often extends a PROJECT base
+    (`class Settings(CommonBase)`) where CommonBase — not the leaf — is the one
+    that extends BaseSettings. The 'env loader' is the BaseSettings inheritance
+    itself (which makes every field read from OS env vars), NOT an `env_file`
+    (that only loads a local .env for dev). So detection resolves the base
+    chain transitively to BaseSettings — no modeling on any one repo's base
+    name or on env_file."""
+
+    def setUp(self):
+        self.catalog = els.load_pattern_catalog(CATALOG_PATH)
+        self.python_patterns = els.group_patterns_by_language(self.catalog)["python"]
+
+    def test_same_file_intermediate_plus_cross_file_terminal(self):
+        """A same-file intermediate base (Settings -> Mid) chained to a
+        cross-file terminal (Mid -> AppBase(BaseSettings)). The file has NO
+        direct BaseSettings, so the precise v2 regex does not match — the
+        transitive detector must follow Settings -> Mid (same file) ->
+        AppBase (imported) -> BaseSettings."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "shared").mkdir()
+            (root / "shared" / "base.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class AppBase(BaseSettings):\n"
+                "    region: str = 'us'\n"
+            )
+            cfg = root / "config.py"
+            cfg.write_text(
+                "from shared.base import AppBase\n"
+                "\n"
+                "class Mid(AppBase):\n"
+                "    tier: str = 'std'\n"
+                "\n"
+                "class Settings(Mid):\n"
+                "    log_format: str = 'json'\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[root])
+            self.assertIsNotNone(result)
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-subclass")
+            self.assertEqual(result.confidence, "high")
+
+    def test_cross_file_absolute_import_chain(self):
+        """The leaf has NO env_file and NO direct BaseSettings — the base lives
+        in another module reached via an absolute import."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "common.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "\n"
+                "class CommonSettings(BaseSettings):\n"
+                "    region: str = 'us'\n"
+            )
+            cfg = root / "app" / "config.py"
+            cfg.write_text(
+                "from pydantic import Field\n"
+                "from app.common import CommonSettings\n"
+                "\n"
+                "class Settings(CommonSettings):\n"
+                "    log_format: str = 'json'\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[root])
+            self.assertIsNotNone(result)
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
+    def test_cross_file_relative_import_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "common.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class CommonSettings(BaseSettings):\n"
+                "    region: str = 'us'\n"
+            )
+            cfg = root / "app" / "config.py"
+            cfg.write_text(
+                "from .common import CommonSettings\n"
+                "class Settings(CommonSettings):\n"
+                "    x: str = 'y'\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[root])
+            self.assertIsNotNone(result)
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
+    def test_data_model_not_detected(self):
+        """A plain pydantic data model (BaseModel, no settings chain) must NOT
+        be detected as the app config."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "schemas.py"
+            f.write_text(
+                "from pydantic import BaseModel\n"
+                "\n"
+                "class PTPExtraction(BaseModel):\n"
+                "    amount: float\n"
+            )
+            result = els.scan_file(f, self.python_patterns, search_roots=[Path(tmp)])
+            if result is not None:
+                self.assertNotEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
+    def test_unresolvable_base_does_not_crash(self):
+        """A base imported from a 3rd-party package not on disk → not detected,
+        no crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.py"
+            cfg.write_text(
+                "from some_vendor.lib import VendorBase\n"
+                "class Settings(VendorBase):\n"
+                "    x: str = 'y'\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[Path(tmp)])
+            # VendorBase unresolvable → not a settings subclass.
+            if result is not None:
+                self.assertNotEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
+    def test_import_cycle_terminates(self):
+        """Mutually-importing base files must not infinite-loop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text(
+                "from b import BBase\nclass ABase(BBase):\n    x: str = '1'\n")
+            (root / "b.py").write_text(
+                "from a import ABase\nclass BBase(ABase):\n    y: str = '2'\n")
+            cfg = root / "config.py"
+            cfg.write_text("from a import ABase\nclass Settings(ABase):\n    z: str = '3'\n")
+            # No BaseSettings anywhere in the cycle → not detected, terminates.
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[root])
+            if result is not None:
+                self.assertNotEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
+    def test_direct_basesettings_prefers_precise_pattern(self):
+        """A DIRECT BaseSettings subclass keeps the precise v2 pattern (which
+        carries the get_settings() modify accessor) — the transitive detector
+        only fires when no precise high-confidence pattern matched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.py"
+            cfg.write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "\n"
+                "class Settings(BaseSettings):\n"
+                "    api_url: str\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[Path(tmp)])
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-v2")
+
+    def test_skill_own_stub_not_detected_as_config_on_rerun(self):
+        """Re-run safety: a previously-emitted moolabs_settings.py stub (itself a
+        BaseSettings subclass) must NOT be detected as the customer's config —
+        else the codemod would wire into its own output."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            svc = repo / "services" / "svc-x"
+            (svc / "app" / "services").mkdir(parents=True)
+            # The skill's own prior output — a real BaseSettings stub.
+            (svc / "app" / "services" / "moolabs_settings.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class MoolabsSettings(BaseSettings):\n"
+                "    moolabs_api_key: str = ''\n"
+                "def get_settings():\n    return MoolabsSettings()\n"
+            )
+            # The real customer config.
+            (repo / "shared").mkdir()
+            (repo / "shared" / "base.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class AppBase(BaseSettings):\n    region: str = 'us'\n"
+            )
+            (svc / "app" / "config.py").write_text(
+                "from shared.base import AppBase\n"
+                "class Settings(AppBase):\n    log_format: str = 'json'\n"
+            )
+            entry = els._service_entry(
+                repo,
+                {"slug": "svc-x", "root": "services/svc-x", "language": "python"},
+                svc,
+                catalog=self.catalog,
+            )
+            self.assertTrue(entry["app_config"]["file"].endswith("app/config.py"))
+            self.assertNotIn("moolabs_settings", entry["app_config"]["file"])
+
+    def test_service_entry_picks_real_config_over_smoke_script(self):
+        """End-to-end #1a: a service whose Settings extends a base in a
+        REPO-LEVEL shared package (outside the service tree, so it's resolved
+        cross-file but isn't itself a scanned candidate) AND a smoke script
+        using os.getenv → app_config.file must be the real config, not the
+        smoke script (the exact dogfood misdetection). The base is resolved via
+        repo_root in search_roots; only config.py is a scanned candidate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Shared base lives at repo root, OUTSIDE services/ — not scanned,
+            # only resolved.
+            (repo / "shared").mkdir(parents=True)
+            (repo / "shared" / "base.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class AppBase(BaseSettings):\n"
+                "    region: str = 'us'\n"
+            )
+            svc = repo / "services" / "svc-x"
+            (svc / "app").mkdir(parents=True)
+            (svc / "scripts").mkdir(parents=True)
+            (svc / "app" / "config.py").write_text(
+                "from shared.base import AppBase\n"
+                "class Settings(AppBase):\n"
+                "    log_format: str = 'json'\n"
+            )
+            (svc / "scripts" / "smoke_e2e_dev.py").write_text(
+                "import os\nTOKEN = os.getenv('SOME_TOKEN')\n"
+            )
+            entry = els._service_entry(
+                repo,
+                {"slug": "svc-x", "root": "services/svc-x", "language": "python"},
+                svc,
+                catalog=self.catalog,
+            )
+            self.assertTrue(
+                entry["app_config"]["file"].endswith("app/config.py"),
+                f"picked {entry['app_config']['file']} instead of app/config.py",
+            )
+            self.assertEqual(
+                entry["app_config"]["pattern"], "python-pydantic-settings-subclass")
 
 
 class PythonDecouple(unittest.TestCase):
