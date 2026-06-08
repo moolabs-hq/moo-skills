@@ -29,9 +29,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # The transitive pydantic-settings base-resolution detector lives in the shared
-# framework-capability tree (shared/scripts/strategies.py), exposed via its
-# DETECTORS registry. env_loader_scan reuses it through a thin ScanResult shim.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared" / "scripts"))
+# framework-capability tree (strategies.py), exposed via its DETECTORS registry.
+# env_loader_scan reuses it through a thin ScanResult shim.
+#
+# Locate the shared dir across BOTH layouts: the SOURCE monorepo
+# (cost-billing/shared) AND the INSTALLED layout, where install.sh ships shared
+# as a SIBLING skill `cost-billing-shared` (NOT a `shared/` subdir). A hardcoded
+# parents[2]/"shared" path resolved only in source and crashed every installed
+# user with ModuleNotFoundError (fixed after the 2026-06-08 dogfood).
+def _locate_shared_base() -> Path | None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        for name in ("shared", "cost-billing-shared"):
+            base = parent / name
+            if (base / "scripts" / "strategies.py").is_file():
+                return base
+    return None
+
+
+_SHARED_BASE = _locate_shared_base()
+if _SHARED_BASE is not None:
+    sys.path.insert(0, str(_SHARED_BASE / "scripts"))
 import strategies  # noqa: E402
 import framework_registry  # noqa: E402
 
@@ -39,7 +57,11 @@ import framework_registry  # noqa: E402
 # {language: {framework: Node}}; each Node carries detection.kind ("regex" |
 # "code"), detection.import_signals/structural_signals/priority (regex nodes),
 # and detection.detector (code nodes — a key into strategies.DETECTORS).
-_FRAMEWORKS_DIR = Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
+_FRAMEWORKS_DIR = (
+    (_SHARED_BASE / "assets" / "frameworks")
+    if _SHARED_BASE is not None
+    else Path(__file__).resolve().parents[2] / "shared" / "assets" / "frameworks"
+)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1132,6 +1154,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--signed-yaml", default=".moolabs/chain/04-final.signed.yaml")
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
     ap.add_argument("--repo-root", default=".")
+    # Deprecated/ignored: PR #11 retired the env-loader-patterns.yaml catalog in
+    # favor of the framework-node registry. Accepted (and ignored) so stale
+    # runbooks / muscle-memory invocations that still pass `--catalog <path>`
+    # don't hard-fail with an "unrecognized arguments" error.
+    ap.add_argument("--catalog", help=argparse.SUPPRESS, default=None)
     args = ap.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
