@@ -302,12 +302,22 @@ def _py_file_index(root: Path) -> list[str]:
         for fn in filenames:
             if fn.endswith(".py"):
                 paths.append(os.path.join(dirpath, fn))
+    # Sort for DETERMINISTIC src-layout suffix-match: os.walk order is
+    # filesystem-dependent, so two same-named modules under different roots
+    # would otherwise resolve differently across platforms. Shortest path first
+    # (closest-to-root package wins the suffix tie).
+    paths.sort(key=lambda p: (p.count(os.sep), p))
     _PY_INDEX_CACHE[key] = paths
     return paths
 
 _CLASS_DEF_RE = re.compile(r"^[ \t]*class\s+(\w+)\s*\(([^)]*)\)\s*:", re.MULTILINE)
 _FROM_IMPORT_RE = re.compile(
     r"^[ \t]*from\s+(\.*)([\w.]*)\s+import\s+(.+)$", re.MULTILINE
+)
+# Collapses `from x import (\n A,\n B,\n)` to one line. Non-greedy to the first
+# closing paren; [\s\S] spans newlines.
+_PAREN_IMPORT_RE = re.compile(
+    r"(from\s+\.*[\w.]*\s+import\s*)\(([\s\S]*?)\)"
 )
 
 
@@ -338,7 +348,14 @@ def _parse_from_imports(text: str) -> dict[str, tuple[int, str, str]]:
     `from a.b import C` -> {'C': (0, 'a.b', 'C')};
     `from x.config import Settings as CommonSettings`
         -> {'CommonSettings': (0, 'x.config', 'Settings')};
-    `from . import M` -> {'M': (1, '', 'M')}."""
+    `from . import M` -> {'M': (1, '', 'M')}.
+
+    Parenthesized multi-line imports (`from x import (\\n A,\\n B,\\n)`) are
+    collapsed to a single line first so the line-anchored regex matches them."""
+    text = _PAREN_IMPORT_RE.sub(
+        lambda m: m.group(1) + " " + " ".join(m.group(2).split()),
+        text,
+    )
     out: dict[str, tuple[int, str, str]] = {}
     for m in _FROM_IMPORT_RE.finditer(text):
         level = len(m.group(1))

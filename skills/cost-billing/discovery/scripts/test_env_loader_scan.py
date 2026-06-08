@@ -155,6 +155,28 @@ class PydanticSettingsSubclassTransitive(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertEqual(result.pattern_id, "python-pydantic-settings-subclass")
 
+    def test_multiline_parenthesized_base_import_resolves(self):
+        """PR #10 review IMP: a base imported via a parenthesized multi-line
+        `from x import (\\n Base,\\n)` form must still resolve transitively."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "common.py").write_text(
+                "from pydantic_settings import BaseSettings\n"
+                "class CommonSettings(BaseSettings):\n    region: str = 'us'\n"
+            )
+            cfg = root / "app" / "config.py"
+            cfg.write_text(
+                "from app.common import (\n"
+                "    CommonSettings,\n"
+                "    something_else,\n"
+                ")\n"
+                "class Settings(CommonSettings):\n    x: str = 'y'\n"
+            )
+            result = els.scan_file(cfg, self.python_patterns, search_roots=[root])
+            self.assertIsNotNone(result)
+            self.assertEqual(result.pattern_id, "python-pydantic-settings-subclass")
+
     def test_cross_file_relative_import_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

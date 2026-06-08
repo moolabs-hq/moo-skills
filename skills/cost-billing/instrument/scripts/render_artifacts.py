@@ -63,9 +63,18 @@ _SLUGS_DIR = {
 }
 _LANG_EXT = {"python": "py", "typescript": "ts", "go": "go"}
 
-# Sentinel present in every deployment template — used to make `append`
-# idempotent (don't re-append if the file is already wired).
+# Sentinel present in the APPEND-capable deployment templates (dotenv_example,
+# k8s) — used to make `append` idempotent (don't re-append if the file is
+# already wired). The full-file templates (terraform) use new_file mode and are
+# exempt; they carry the `/cost-billing-instrument` generated marker instead.
 _APPEND_SENTINEL = "MOOLABS_API_KEY"
+
+# Kinds whose template is a line/block snippet safe to APPEND to an existing
+# file. Full-file templates (terraform, k8s manifests) must never be appended
+# into another file — that would corrupt it; they are new_file only. config_wire
+# already routes correctly; this is a defensive backstop against a hand-edited
+# tasks.yaml pairing append with a full-file kind.
+_APPEND_SAFE_KINDS = frozenset({"dotenv_example"})
 
 # Marker present in every rendered template's header. Used by new_file to tell
 # OUR previously-generated artifact (safe to overwrite/regenerate) apart from a
@@ -248,7 +257,18 @@ def render_and_write(
         rendered = env.get_template(job.template).render(**job.context)
         dest_path = repo_root / job.dest
 
-        if job.mode == "append":
+        # Defensive: a full-file kind (terraform/k8s) must never be APPENDED
+        # into an existing file — that corrupts it. config_wire routes these to
+        # new_file, but guard against a hand-edited tasks.yaml.
+        effective_mode = job.mode
+        if effective_mode == "append" and job.context.get("kind") not in _APPEND_SAFE_KINDS:
+            sys.stderr.write(
+                f"render_artifacts: kind {job.context.get('kind')!r} is not "
+                f"append-safe; treating {job.dest} as new_file\n"
+            )
+            effective_mode = "new_file"
+
+        if effective_mode == "append":
             existing = dest_path.read_text() if dest_path.is_file() else ""
             if _APPEND_SENTINEL in existing:
                 rec["action"] = "append_skipped_present"
