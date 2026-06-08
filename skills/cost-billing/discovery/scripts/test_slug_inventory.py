@@ -304,5 +304,154 @@ class YamlEmitRoundtrip(unittest.TestCase):
             )
 
 
+class ProductSlugDerivation(unittest.TestCase):
+    """Dogfood #5 ROOT FIX: cost/usage inventory entries are agent-authored and
+    omit product_slug → derive_per_product_constants previously bucketed EVERY
+    entry under 'default', collapsing all products into one. The downstream
+    instrument value-search then only works by accident (single bucket). Fix:
+    derive product_slug per entry from the authoritative per-feature-spec map
+    (exact event_type → namespace prefix → first dotted segment → 'default')."""
+
+    def _arc_spec_map(self):
+        # Mirrors per-feature-spec.yaml: product_slug + namespace_prefix +
+        # features[].event_type.
+        return si._build_product_map_from_specs([
+            {
+                "product_slug": "arc",
+                "event_type_convention": {"namespace_prefix": "arc."},
+                "features": [
+                    {"event_type": "arc.dunning.email-composed"},
+                ],
+            },
+            {
+                "product_slug": "acute",
+                "event_type_convention": {"namespace_prefix": "acute."},
+                "features": [
+                    {"event_type": "acute.scan.completed"},
+                ],
+            },
+        ])
+
+    def test_exact_event_type_match_wins(self):
+        exact, prefix = self._arc_spec_map()
+        self.assertEqual(
+            si._product_for_event("arc.dunning.email-composed", exact, prefix),
+            "arc",
+        )
+
+    def test_namespace_prefix_match(self):
+        exact, prefix = self._arc_spec_map()
+        # Not in features[], but matches the arc. namespace prefix.
+        self.assertEqual(
+            si._product_for_event("arc.shared.llmport-call", exact, prefix),
+            "arc",
+        )
+
+    def test_first_segment_fallback_when_no_spec(self):
+        # No spec map at all → fall back to first dotted segment.
+        self.assertEqual(
+            si._product_for_event("meter.ingest.batch", {}, []),
+            "meter",
+        )
+
+    def test_unmappable_event_returns_empty(self):
+        # Single-token event, no spec → "" (caller defaults to 'default').
+        self.assertEqual(si._product_for_event("standalone", {}, []), "")
+
+    def test_derive_buckets_by_real_product_not_default(self):
+        """The end-to-end #5 fix: cost entries WITHOUT product_slug bucket
+        under their real product (from the spec map), NOT 'default'."""
+        exact, prefix = self._arc_spec_map()
+        cost_inv = {"entries": [
+            {"workflow_id": "arc.shared.llmport-call",
+             "event_type": "arc.shared.llmport-call", "cost_kind": "llm_tokens"},
+        ]}
+        usage_inv = {"entries": [
+            {"workflow_id": "acute.scan.completed",
+             "event_type": "acute.scan.completed"},
+        ]}
+        by_product = si.derive_per_product_constants(
+            cost_inv, usage_inv, {"edges": []}, provider_catalog=None,
+            product_map=(exact, prefix),
+        )
+        self.assertIn("arc", by_product)
+        self.assertIn("acute", by_product)
+        self.assertNotIn("default", by_product)
+        arc_events = {e["value"] for e in by_product["arc"]["EVENT_TYPE"]}
+        self.assertIn("arc.shared.llmport-call", arc_events)
+
+    def test_declared_product_slug_still_wins(self):
+        """If the agent DID emit product_slug, honor it over derivation."""
+        exact, prefix = self._arc_spec_map()
+        cost_inv = {"entries": [
+            {"workflow_id": "arc.shared.llmport-call",
+             "event_type": "arc.shared.llmport-call",
+             "product_slug": "explicit-override"},
+        ]}
+        by_product = si.derive_per_product_constants(
+            cost_inv, {"entries": []}, {"edges": []}, provider_catalog=None,
+            product_map=(exact, prefix),
+        )
+        self.assertIn("explicit-override", by_product)
+
+    def test_backward_compat_no_product_map(self):
+        """Without a product_map (old callers), behavior is unchanged:
+        entries without product_slug → 'default'."""
+        cost_inv = {"entries": [
+            {"workflow_id": "x.y", "event_type": "x.y"},
+        ]}
+        by_product = si.derive_per_product_constants(
+            cost_inv, {"entries": []}, {"edges": []}, provider_catalog=None,
+        )
+        # first-segment fallback gives "x" even with no spec map (deterministic).
+        self.assertIn("x", by_product)
+
+
+class ConsolidationDoubleCountDetection(unittest.TestCase):
+    """Dogfood #4 ENFORCEMENT: the SKILL.md guidance (line 174) says a
+    cost-consolidation site (one cost feeding >=2 usage events) must be
+    cost-only, NOT sibling-pair (sibling-pair double-counts + emits a garbage
+    cost lane per agent). f70ce55 was prose only; the agent ignored it and
+    shipped pattern: sibling-pair. This adds the deterministic detector the
+    guidance lacked — invert the output-input-map, flag any sibling-pair cost
+    entry whose workflow feeds >=2 usage outputs."""
+
+    def test_flags_sibling_pair_on_consolidation_site(self):
+        cost_inv = {"entries": [
+            {"workflow_id": "arc.shared.llmport-call", "pattern": "sibling-pair"},
+        ]}
+        omap = {"edges": [
+            {"output_workflow_id": "arc.dunning.email-composed",
+             "inputs": [{"cost_workflow_id": "arc.shared.llmport-call"}]},
+            {"output_workflow_id": "arc.ptp.extracted",
+             "inputs": [{"cost_workflow_id": "arc.shared.llmport-call"}]},
+        ]}
+        errors = si.check_consolidation_double_count(cost_inv, omap)
+        self.assertTrue(any("arc.shared.llmport-call" in e for e in errors),
+                        f"expected double-count flag: {errors}")
+
+    def test_no_flag_when_cost_feeds_one_output(self):
+        cost_inv = {"entries": [
+            {"workflow_id": "arc.solo.call", "pattern": "sibling-pair"},
+        ]}
+        omap = {"edges": [
+            {"output_workflow_id": "arc.one.thing",
+             "inputs": [{"cost_workflow_id": "arc.solo.call"}]},
+        ]}
+        # Feeds only 1 output → legitimate sibling-pair, not consolidation.
+        self.assertEqual(si.check_consolidation_double_count(cost_inv, omap), [])
+
+    def test_no_flag_when_already_cost_only(self):
+        cost_inv = {"entries": [
+            {"workflow_id": "arc.shared.llmport-call", "pattern": "cost-only"},
+        ]}
+        omap = {"edges": [
+            {"output_workflow_id": "a", "inputs": [{"cost_workflow_id": "arc.shared.llmport-call"}]},
+            {"output_workflow_id": "b", "inputs": [{"cost_workflow_id": "arc.shared.llmport-call"}]},
+        ]}
+        # Correctly marked cost-only → no flag.
+        self.assertEqual(si.check_consolidation_double_count(cost_inv, omap), [])
+
+
 if __name__ == "__main__":
     unittest.main()
