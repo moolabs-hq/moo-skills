@@ -1019,7 +1019,14 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
                 nid = str(ac["node_id"]).replace('\\', '\\\\').replace('"', '\\"')
                 lines.append(f'      node_id: "{nid}"')
             if ac.get("file"):
-                lines.append(f"      file: {ac['file']}")
+                # Quote+escape: `file` is an arbitrary customer FS path. Emitting
+                # it unquoted lets a legal path like `v #2/config.py` lose ` #...`
+                # to PyYAML's comment rule (SILENT truncation) — that corrupted
+                # path then flows into task_planner's modify-mode insert target
+                # (PR #11 review round 5). The sibling emit_path/import_path are
+                # already quoted; match them.
+                f_safe = str(ac['file']).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(f'      file: "{f_safe}"')
                 lines.append(f"      line_to_insert: {ac['line_to_insert']}")
                 lines.append(f"      confidence: {ac['confidence']}")
                 lines.append(f"      confidence_score: {ac['confidence_score']}")

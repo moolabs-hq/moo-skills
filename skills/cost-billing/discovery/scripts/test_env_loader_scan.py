@@ -892,6 +892,38 @@ class InventoryYamlEmit(unittest.TestCase):
             # PR #8 review #3-sibling guard: generated_at must round-trip as a
             # string, not be coerced to datetime by PyYAML.
             self.assertIsInstance(parsed["generated_at"], str)
+            # PR #11 review round 5: the config FILE path must round-trip intact
+            # (it is an arbitrary customer FS path).
+            self.assertEqual(svc["app_config"]["file"], "services/svc-a/app/config.py")
+
+    def test_emit_yaml_file_path_with_space_hash_not_truncated(self):
+        """PR #11 review round 5: a legal path containing ` #` must NOT be
+        silently truncated by PyYAML's comment rule (unquoted emit bug)."""
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "inv.yaml"
+            inventory = {
+                "generated_at": "2026-06-06T00:00:00+00:00",
+                "granularity": "per-service", "granularity_source": "declared",
+                "services": [{
+                    "service_slug": "svc",
+                    "app_config": {
+                        "pattern": "python-pydantic-settings-v2",
+                        "node_id": "python-pydantic-settings-v2",
+                        "file": "weird #2/config.py",
+                        "line_to_insert": 3, "confidence": "high",
+                        "confidence_score": 0.95, "stub_required": False,
+                        "evidence": [], "wire_target": {},
+                        "emit_path": "weird #2/moolabs_settings.py",
+                        "import_path": "x.moolabs_settings",
+                    },
+                    "deployment_surfaces": [],
+                }],
+            }
+            els.emit_inventory_yaml(inventory, out)
+            parsed = yaml.safe_load(out.read_text())
+            self.assertEqual(
+                parsed["services"][0]["app_config"]["file"], "weird #2/config.py")
 
     def test_emit_yaml_handles_backslash_in_evidence(self):
         """Regression guard for the backslash YAML escape bug. Source
