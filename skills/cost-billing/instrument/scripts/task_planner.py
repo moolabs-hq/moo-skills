@@ -943,6 +943,12 @@ def build_tasks(
                 # under StrictUndefined (round-3 review — the sibling of E missed by
                 # the first sweep). The templates fall back to workflow_id when None.
                 "event_type": entry.get("event_type"),
+                # D1: the function discovery KNOWS is the billable one (from
+                # derivation_note / the consolidation pointer); passed to
+                # find_insertion_point so placement RE-ANCHORS there when entry.line
+                # points at the wrong function. None until discovery emits it
+                # structured (the discovery-owned capture side).
+                "target_function": entry.get("target_function"),
                 # CFO-signed emission guard (e.g. "result.get('blocked') is not
                 # True"): emit ONLY when this holds, so BLOCKED/kill-switch ops
                 # aren't billed (dogfood O). Guaranteed present (None when absent)

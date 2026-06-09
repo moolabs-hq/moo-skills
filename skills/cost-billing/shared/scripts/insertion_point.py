@@ -72,10 +72,17 @@ def _leading_ws(source: str, line_1based: int) -> str:
     return ""
 
 
-def find_insertion_point(source: str, lineno: int,
-                         language: str = "python") -> "InsertionPoint | None":
+def find_insertion_point(source: str, lineno: int, language: str = "python",
+                         target_function: str | None = None) -> "InsertionPoint | None":
     """Return the deterministic placement target for an emit insert for the call at
     `lineno` in `source`, or None.
+
+    `target_function` (D1): when discovery KNOWS the billable function by name (it
+    records it in `derivation_note` / the consolidation pointer) but `entry.line`
+    points at a sibling/prompt-builder/reconcile-loop, pass that name and placement
+    uses the NAMED function instead of the line's — flagging the disagreement so the
+    re-anchor is reviewer-visible. A name that isn't found falls back to the line
+    function (also flagged).
 
     `lineno` only SELECTS the enclosing function; placement then targets that
     function's SUCCESS-RETURN path — before the final return, after the last work
@@ -95,9 +102,9 @@ def find_insertion_point(source: str, lineno: int,
     """
     lang = (language or "python").lower()
     if lang == "python":
-        return _python_insertion_point(source, lineno)
+        return _python_insertion_point(source, lineno, target_function)
     if lang in ("typescript", "javascript", "go"):
-        return _treesitter_insertion_point(source, lineno, lang)
+        return _treesitter_insertion_point(source, lineno, lang, target_function)
     return None
 
 
@@ -211,12 +218,35 @@ def _success_target(body, source: str):
     return after, indent, False
 
 
-def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
+def _select_function(tree, lineno, target_function, line_func):
+    """D1: prefer the discovery-NAMED billable function over the line-derived one.
+    Returns (chosen_func_node, mismatch_reason | None)."""
+    if not target_function:
+        return line_func, None
+    named = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == target_function]
+    if not named:
+        return line_func, (f"discovery named '{target_function}' as the billable "
+                           "function but it was not found in this file — placed at the "
+                           "anchor line's function; verify the site")
+    chosen = min(named, key=lambda n: (getattr(n, "end_lineno", None) or n.lineno) - n.lineno)
+    line_name = line_func.name if line_func is not None else "module level"
+    if line_name != target_function:
+        return chosen, (f"anchor line is in '{line_name}' but discovery names "
+                        f"'{target_function}' as the billable function — placed in "
+                        f"'{target_function}' (re-anchored); verify")
+    return chosen, None
+
+
+def _python_insertion_point(source: str, lineno: int,
+                            target_function: str | None = None) -> "InsertionPoint | None":
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return None
-    func = _innermost_function(tree, lineno)
+    line_func = _innermost_function(tree, lineno)
+    func, _fn_mismatch = _select_function(tree, lineno, target_function, line_func)
     if func is None:
         return _module_level_point(source, tree, lineno)
 
@@ -236,23 +266,26 @@ def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None"
 
     # make-it-loud: placement is a best guess (not certain) in these shapes.
     reasons: list[str] = []
-    if lineno < body[0].lineno:
-        reasons.append("anchor was the def signature, not a work statement — confirm "
-                       "this is the right function and the emit is on the success path")
+    if _fn_mismatch:
+        reasons.append(_fn_mismatch)
+    # The def-signature + conditional-work checks compare entry.line to the function;
+    # they are only meaningful when entry.line is actually IN the chosen function
+    # (i.e. NOT re-anchored to a different one).
+    if func is line_func:
+        if lineno < body[0].lineno:
+            reasons.append("anchor was the def signature, not a work statement — confirm "
+                           "this is the right function and the emit is on the success path")
+        for s in body:
+            if isinstance(s, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+                end = getattr(s, "end_lineno", None) or s.lineno
+                if s.lineno < lineno <= end:
+                    reasons.append("the anchored work is inside a conditional/loop block "
+                                   "but the emit is hoisted to the function level — confirm "
+                                   "it should fire even when that block did not execute")
+                    break
     if sum(1 for s in body if isinstance(s, ast.Return)) >= 2:
         reasons.append("function has multiple top-level returns — confirm the emit "
                        "fires on the SUCCESS path, not after an early-return guard")
-    # conditional/looped work: entry.line is INSIDE a top-level CONDITIONAL/LOOP block
-    # (NOT try/with, which run unconditionally), but the emit is hoisted to the
-    # function level — so it would fire even when that block did not run (over-bill).
-    for s in body:
-        if isinstance(s, (ast.If, ast.For, ast.AsyncFor, ast.While)):
-            end = getattr(s, "end_lineno", None) or s.lineno
-            if s.lineno < lineno <= end:
-                reasons.append("the anchored work is inside a conditional/loop block "
-                               "but the emit is hoisted to the function level — confirm "
-                               "it should fire even when that block did not execute")
-                break
     if unreachable:
         reasons.append("the emit is placed after a block that always returns or raises "
                        "on every path — it may be UNREACHABLE; confirm it lands on the "
@@ -285,8 +318,24 @@ def _ts_parser(language: str):
         return None
 
 
-def _treesitter_insertion_point(source: str, lineno: int,
-                                language: str) -> "InsertionPoint | None":
+def _ts_named_function(root, target_function: str):
+    """Find a ts/go function node named `target_function` (smallest span), or None."""
+    best = None
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in _TS_FUNC_TYPES:
+            nm = n.child_by_field_name("name")
+            if nm is not None and nm.text.decode() == target_function:
+                span = n.end_byte - n.start_byte
+                if best is None or span < (best.end_byte - best.start_byte):
+                    best = n
+        stack.extend(n.children)
+    return best
+
+
+def _treesitter_insertion_point(source: str, lineno: int, language: str,
+                                target_function: str | None = None) -> "InsertionPoint | None":
     parser = _ts_parser(language)
     if parser is None:
         return None  # absent / skewed -> manual fallback (NOT an error)
@@ -306,13 +355,31 @@ def _treesitter_insertion_point(source: str, lineno: int,
         return None
     # Walk up to the enclosing function (mirrors the python rule: entry.line SELECTS
     # the function; placement then targets the function's success-return path).
-    func = None
+    line_func = None
     cur = node
     while cur is not None:
         if cur.type in _TS_FUNC_TYPES:
-            func = cur
+            line_func = cur
             break
         cur = cur.parent
+    # D1: prefer the discovery-named function over the line's, flag the disagreement.
+    func = line_func
+    fn_mismatch = None
+    if target_function:
+        named = _ts_named_function(tree.root_node, target_function)
+        if named is None:
+            fn_mismatch = (f"discovery named '{target_function}' as the billable function "
+                           "but it was not found in this file — placed at the anchor line's "
+                           "function; verify the site")
+        else:
+            func = named
+            ln = (line_func.child_by_field_name("name").text.decode()
+                  if line_func is not None and line_func.child_by_field_name("name") is not None
+                  else "module level")
+            if ln != target_function:
+                fn_mismatch = (f"anchor line is in '{ln}' but discovery names "
+                               f"'{target_function}' as the billable function — placed in "
+                               f"'{target_function}' (re-anchored); verify")
     if func is None:
         # module/top-level: fall back to the innermost block-child statement.
         stmt = node
@@ -344,24 +411,30 @@ def _treesitter_insertion_point(source: str, lineno: int,
         after_line = last.end_point[0] + 1
 
     reasons: list[str] = []
-    # def-line anchor: entry.line is at/above the FIRST body statement (the
-    # signature/brace line) — not container.start (the `{` shares the signature line).
-    if lineno < stmts[0].start_point[0] + 1:
-        reasons.append("anchor was the function signature, not a work statement — "
-                       "confirm this is the right function and the emit is on the success path")
+    if fn_mismatch:
+        reasons.append(fn_mismatch)
+    # The def-signature + conditional-work checks compare entry.line to the function;
+    # only meaningful when entry.line is actually IN the chosen function (NOT
+    # re-anchored to a discovery-named different one).
+    if func is line_func:
+        # def-line anchor: entry.line is at/above the FIRST body statement (the
+        # signature/brace line) — not container.start (the `{` shares the sig line).
+        if lineno < stmts[0].start_point[0] + 1:
+            reasons.append("anchor was the function signature, not a work statement — "
+                           "confirm this is the right function and the emit is on the success path")
+        # conditional/looped work: the anchored node's nearest enclosing block is a
+        # NESTED block (not the function's own body container), so hoisting the emit
+        # to the function level would fire it even when that block did not run.
+        blk = node
+        while blk is not None and blk.type not in _TS_BLOCK_TYPES:
+            blk = blk.parent
+        if blk is not None and blk.start_byte != container.start_byte:
+            reasons.append("the anchored work is inside a conditional/loop block but the "
+                           "emit is hoisted to the function level — confirm it should fire "
+                           "even when that block did not execute")
     if sum(1 for s in stmts if s.type == "return_statement") >= 2:
         reasons.append("function has multiple top-level returns — confirm the emit "
                        "fires on the SUCCESS path, not after an early-return guard")
-    # conditional/looped work: the anchored node's nearest enclosing block is a
-    # NESTED block (not the function's own body container), so hoisting the emit to
-    # the function level would fire it even when that block did not run.
-    blk = node
-    while blk is not None and blk.type not in _TS_BLOCK_TYPES:
-        blk = blk.parent
-    if blk is not None and blk.start_byte != container.start_byte:
-        reasons.append("the anchored work is inside a conditional/loop block but the "
-                       "emit is hoisted to the function level — confirm it should fire "
-                       "even when that block did not execute")
     # Conservative unreachability mark (ts/go): full reachability analysis is
     # Python-only (stdlib ast); here we flag the direct analog of the proven dead-
     # placement shape — a function ending in a try/catch (or a switch), where placing

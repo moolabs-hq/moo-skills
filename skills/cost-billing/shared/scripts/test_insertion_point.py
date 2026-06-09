@@ -192,6 +192,35 @@ class Python(unittest.TestCase):
         self.assertTrue(marked.startswith("# REVIEW PLACEMENT: multiple returns\n"))
         self.assertEqual(ip.with_placement_marker("EMIT()", None, "# "), "EMIT()")
 
+    def test_target_function_overrides_a_wrong_line_anchor(self):
+        # D1: discovery's entry.line points at the WRONG function (a prompt builder),
+        # but discovery NAMES the right billable function (derivation_note). When the
+        # engine is given that name, it places in the NAMED function, not the line's,
+        # and flags the disagreement loudly.
+        src = ("def _build_prompt(x):\n"          # line 1 — where entry.line wrongly points
+               "    return f'p {x}'\n"
+               "\n"
+               "def generate_dunning_email_async(c):\n"  # line 4 — the REAL billable fn
+               "    email = compose(c)\n"
+               "    return email\n")
+        p = ip.find_insertion_point(src, 2, "python", target_function="generate_dunning_email_async")
+        self.assertEqual(p.function, "generate_dunning_email_async")   # NOT _build_prompt
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("generate_dunning_email_async", p.review_reason)
+
+    def test_target_function_not_found_falls_back_and_flags(self):
+        src = "def handler(x):\n    y = work(x)\n    return y\n"
+        p = ip.find_insertion_point(src, 2, "python", target_function="does_not_exist")
+        self.assertEqual(p.function, "handler")           # fell back to the line function
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("not found", p.review_reason)
+
+    def test_target_function_matching_line_is_quiet(self):
+        src = "def handler(x):\n    y = work(x)\n    return y\n"
+        p = ip.find_insertion_point(src, 2, "python", target_function="handler")
+        self.assertEqual(p.function, "handler")
+        self.assertIsNone(p.review_reason)               # line + named agree -> quiet
+
     def test_syntax_error_returns_none(self):
         self.assertIsNone(ip.find_insertion_point("def (:\n", 1, "python"))
 

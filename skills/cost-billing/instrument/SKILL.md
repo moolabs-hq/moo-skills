@@ -617,7 +617,8 @@ You are instrumenting ONE file. Your job:
    it handles ALL THREE supported languages:
      a. Compute the target:
         `shared/scripts/insertion_point.find_insertion_point(source, entry.line,
-        language)` → `(function, after_line, indent, review_reason)`. `entry.line`
+        language, target_function=entry.target_function)` →
+        `(function, after_line, indent, review_reason)`. `entry.line`
         only SELECTS the enclosing function; placement then targets that function's
         SUCCESS-RETURN path — before the final return, after the last work statement
         AND after any early-failure guards — so the emit fires on success. This is
