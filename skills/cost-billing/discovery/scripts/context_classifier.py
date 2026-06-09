@@ -245,6 +245,12 @@ class InsertionPoint:
 def find_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
     """Where a usage/cost emit insert for the call at `lineno` should be placed.
 
+    PYTHON-ONLY: this uses `ast`, so it parses Python only. On TypeScript/Go source
+    it raises SyntaxError internally and returns None — callers MUST treat None for
+    a non-Python file as "no deterministic capture" (fall back to manual placement),
+    NOT as an error to stop on. (The mechanical splice — instrument/splice.apply_insert
+    — IS language-agnostic; only this capture is Python-bound.)
+
     Placement bug (N): without a structured target the codemod placed inserts
     line-driven — landing mid-multiline-statement, after a `return` (dead code),
     or at the wrong indent. `py_compile` cannot catch any of these (dead code

@@ -20,6 +20,11 @@ def apply_insert(source: str, after_line: int, insert_text: str, indent: int) ->
     """Splice ``insert_text`` into ``source`` immediately AFTER the 1-based
     ``after_line``, re-indented to ``indent`` spaces.
 
+    LANGUAGE-AGNOSTIC: this is pure text-line manipulation, so it works for Python,
+    TypeScript, and Go alike. The only Python-bound piece is the CAPTURE
+    (``find_insertion_point``); for TS/Go the caller supplies ``after_line`` +
+    ``indent`` by the same rule, manually.
+
     - ``after_line`` is the insertion point's ``after_line`` (the end line of the
       "work" statement) — the block lands in the SAME block as the work, before the
       function's return, never as dead code after it.

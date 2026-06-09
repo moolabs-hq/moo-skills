@@ -584,19 +584,27 @@ You are instrumenting ONE file. Your job:
    SEMANTIC problem `py_compile` cannot catch (dead-after-`return` code compiles
    fine), so eyeballing it from `entry.line` is exactly what mis-placed every
    usage-only insert in the dogfood (mid-multiline-statement, after the function's
-   `return`, wrong indent). Instead:
-     a. Compute the target: `discovery/scripts/context_classifier.find_insertion_point(
-        source, entry.line)` → `(function, after_line, indent)`. It returns the
-        innermost statement containing `entry.line` (the "work") and the line after
-        its FULL span + that statement's indentation — so the emit lands right after
-        the work, in the SAME block, before the function's return, never as dead code.
-     b. Apply it: `instrument/scripts/splice.apply_insert(source, after_line,
-        rendered_insert, indent)`. This re-indents the rendered block to `indent`
-        and splices it after `after_line`. Both helpers are deterministic + covered
-        by `test_splice.py` (the gate that FAILS on misplacement — the gate
-        py_compile could never be).
-   Preserve all existing imports + business logic. If `find_insertion_point` returns
-   None (syntax error / no enclosing statement), STOP and surface it — do not guess.
+   `return`, wrong indent). The capture is AST-based, so it is **Python-only**:
+     - **Python:** `discovery/scripts/context_classifier.find_insertion_point(source,
+       entry.line)` → `(function, after_line, indent)` — the innermost statement
+       containing `entry.line` (the "work") and the line after its FULL span + that
+       statement's indentation, so the emit lands right after the work, in the SAME
+       block, before the function's return, never dead code. Then
+       `instrument/scripts/splice.apply_insert(source, after_line, rendered_insert,
+       indent)`. If `find_insertion_point` returns None for a PYTHON file (real
+       syntax error / no enclosing statement), STOP and surface it — do not guess.
+     - **TypeScript / Go:** the stdlib has no TS/Go AST, so `find_insertion_point`
+       returns None — that is EXPECTED, **NOT a stop** (do not block TS/Go inserts).
+       Identify the point by the SAME rule MANUALLY: the line after the WORK
+       statement at `entry.line` (its full span if multi-line), in the same block,
+       before the enclosing function's return, at its indentation — then
+       `splice.apply_insert(...)` does the mechanical splice (it is
+       language-agnostic). This TS/Go path is human-PR-review-gated (no fixture
+       proves placement); the PR reviewer confirms it. (A deterministic TS/Go
+       capture would need a non-stdlib parser — tracked as a follow-up.)
+   `apply_insert` is deterministic + language-agnostic; the Python capture + splice
+   are covered by `test_splice.py` (the gate that FAILS on misplacement — the gate
+   py_compile could never be). Preserve all existing imports + business logic.
 4. Do NOT add a separate top-level helper import. The template renders ALL the
    imports its insert needs (the `emit_*_safe` helper, the per-product slug
    constants, and the attribution-binding imports from `entry.attribution_imports`)
