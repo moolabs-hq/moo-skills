@@ -597,6 +597,7 @@ def build_slugs_emit_tasks(
     inventory: dict,
     language: str = "python",
     anchor: tuple[str, str] | None = None,
+    used_products: set[str] | None = None,
 ) -> list[SlugsEmitTask]:
     """One slugs-emit task per product in the inventory.
 
@@ -620,6 +621,13 @@ def build_slugs_emit_tasks(
     for idx, product in enumerate(inventory.get("products") or [], start=1):
         slug = product.get("product_slug", "")
         if not slug:
+            continue
+        # I2: when the caller passes the set of products THIS service uses (the
+        # resolved product_slugs on the service-scoped entries), emit slugs only
+        # for those — an org-wide inventory otherwise leaks every product's slugs
+        # module into the service (slugs_acute/bff/meter into a moo-arc run). An
+        # empty/None set means "no scoping" (back-compat: single-service runs).
+        if used_products is not None and slug not in used_products:
             continue
         slugs_emit_path: str | None = None
         if anchor is not None and language == "python":
@@ -919,6 +927,11 @@ def build_tasks(
                 # template raises UndefinedError on entry.pattern under
                 # StrictUndefined (advisor catch — the render contract).
                 "pattern": pattern,
+                # The RESOLVED product_slug (not the raw inventory one) — lets main
+                # scope build_slugs_emit_tasks to the products THIS service actually
+                # uses (I2: org-wide slugs leaked slugs_acute/bff/meter into a
+                # moo-arc run that only imports slugs_arc).
+                "product_slug": product_slug,
                 # Imports the rendered insert needs for its attribution-binding
                 # expressions (e.g. get_correlation_id) — emitted with the helper /
                 # slug imports so the insert doesn't NameError (dogfood ruff F821).
@@ -1320,7 +1333,17 @@ def main(argv: list[str] | None = None) -> int:
     # constants — reuse the same inventory here. Task 12: pass the language +
     # stub anchor so each task's slugs_emit_path lands beside the customer's
     # real config (None when no single anchor — render_artifacts falls back).
-    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv, primary_lang, anchor)
+    # I2: scope slugs to the products THIS service's (already --service-filtered)
+    # entries actually use, so an org-wide inventory doesn't leak other products'
+    # slugs modules into the service. Empty -> None (no scoping; back-compat).
+    _used_products = {
+        ins.entry.get("product_slug")
+        for t in tasks for ins in t.inserts
+        if ins.entry.get("product_slug")
+    }
+    slugs_emit_tasks = build_slugs_emit_tasks(
+        slug_inv, primary_lang, anchor, used_products=_used_products or None
+    )
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

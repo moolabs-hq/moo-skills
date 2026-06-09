@@ -904,7 +904,15 @@ def _service_entry(
     service_path = repo_root / service["root"]
     surfaces: list[DeploymentSurface] = []
     if service_path.exists():
-        surfaces.extend(scan_deployment_surfaces(service_path, scope="service"))
+        # path_anchor=repo_root keeps emitted surface paths REPO-relative
+        # (services/<svc>/.env.example), matching the repo-scope scan + the
+        # app_config path. Without it the anchor defaulted to service_path, so a
+        # service surface was recorded service-relative (.env.example) and the
+        # emit side — which treats paths as repo-relative — wrote a stray
+        # repo-root ./.env.example instead of appending to the service's file
+        # (dogfood Q).
+        surfaces.extend(scan_deployment_surfaces(
+            service_path, scope="service", path_anchor=repo_root))
 
     # PR #7 review IMPORTANT (Challenge 3): when a service root lives UNDER one
     # of the repo-level infra dirs (e.g. service at `deploy/myservice/`), the

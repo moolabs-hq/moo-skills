@@ -213,6 +213,22 @@ class RenderAndWrite(unittest.TestCase):
                 after_first, after_second,
                 "append must be idempotent — MOOLABS_API_KEY duplicated on re-run")
 
+    def test_append_absent_target_checklists_not_stray_file(self):
+        # Q (non-deterministic paths): an append surface whose detected file is
+        # ABSENT at emit time (wrong/drifted path) must NOT create a stray file at
+        # the guessed path — record a CHECKLIST so the developer wires it.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            tasks = _tasks(deployment_stubs=[
+                {"kind": "dotenv_example", "emit_path": ".env.example",
+                 "mode": "append"},   # no such file exists in repo
+            ])
+            manifest = ra.render_and_write(
+                ra.plan_render_jobs(tasks, _TEMPLATES_DIR, repo), repo, _TEMPLATES_DIR)
+            self.assertFalse((repo / ".env.example").exists(),
+                             "must NOT create a stray .env.example at a guessed path")
+            self.assertTrue(any(m["action"] == "checklist" for m in manifest))
+
     def test_new_file_refuses_to_clobber_customer_file(self):
         """new_file must NOT overwrite a hand-written customer file (no
         generated marker) at the destination path — file corruption guard."""

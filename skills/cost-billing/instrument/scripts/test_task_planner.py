@@ -1098,6 +1098,31 @@ class HelperImportDerivation(unittest.TestCase):
             "@/services/moolabs-client")
 
 
+class SlugsEmitScoping(unittest.TestCase):
+    """I2: build_slugs_emit_tasks is org-wide; a --service run leaked slugs_acute /
+    slugs_bff / slugs_meter into a moo-arc run that only imports slugs_arc. Scope to
+    the products the service's entries actually use."""
+
+    def _inv(self):
+        return {"products": [
+            {"product_slug": p, "constants": {"EVENT_TYPE": [], "METER_SLUG": [],
+                                              "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": []}}
+            for p in ("arc", "acute", "bff", "meter")]}
+
+    def test_scopes_to_used_products_leak_gone(self):
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", None,
+                                          used_products={"arc"})
+        slugs = {t.product_slug for t in tasks}
+        self.assertEqual(slugs, {"arc"})
+        for leaked in ("acute", "bff", "meter"):
+            self.assertNotIn(leaked, slugs)   # the cross-product leak the review found
+
+    def test_no_used_products_emits_all_backcompat(self):
+        # None (single-service / unresolved product_slug) -> emit all, unchanged.
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", None, used_products=None)
+        self.assertEqual({t.product_slug for t in tasks}, {"arc", "acute", "bff", "meter"})
+
+
 class ServiceScoping(unittest.TestCase):
     """Verbatim-dogfood finding: the cost/usage inventories are ORG-WIDE, but
     task_planner runs per-service. Without scoping, a --service run emits a task
