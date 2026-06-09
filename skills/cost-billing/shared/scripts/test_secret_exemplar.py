@@ -74,6 +74,50 @@ class ProposeExemplar(unittest.TestCase):
         self.assertIsNone(se.propose_exemplar("class S:\n    a: int = 1\n"))
 
 
+class AccessIdiomSearch(unittest.TestCase):
+    """SEARCH for HOW the config is read (the dimension blame can't see). The
+    singleton case is moo-arc's — and the one the get_settings()-hardcoded helper
+    broke on (ImportError: no get_settings in app/config.py)."""
+
+    def test_singleton_module_var(self):
+        src = ("from pydantic_settings import BaseSettings\n"
+               "class Settings(BaseSettings):\n"
+               "    arc_global_api_key: str = ''\n"
+               "settings = Settings()\n")          # moo-arc shape
+        idiom = se.detect_access_idiom(src)
+        self.assertEqual(idiom.kind, "singleton")
+        self.assertEqual(idiom.import_name, "settings")
+        self.assertEqual(idiom.read("moolabs_api_key"), "settings.moolabs_api_key")
+
+    def test_factory_function(self):
+        src = ("class Settings:\n    api_key: str = ''\n"
+               "def get_settings():\n    return Settings()\n")
+        idiom = se.detect_access_idiom(src)
+        self.assertEqual(idiom.kind, "factory")
+        self.assertEqual(idiom.import_name, "get_settings")
+        self.assertEqual(idiom.read("moolabs_api_key"), "get_settings().moolabs_api_key")
+
+    def test_factory_wins_when_both_present(self):
+        src = ("class Settings:\n    api_key: str = ''\n"
+               "settings = Settings()\n"
+               "def get_settings():\n    return settings\n")
+        self.assertEqual(se.detect_access_idiom(src).kind, "factory")
+
+    def test_unknown_when_neither(self):
+        # DI / custom: a Settings class but no module singleton, no factory.
+        src = "class Settings:\n    api_key: str = ''\n"
+        idiom = se.detect_access_idiom(src)
+        self.assertEqual(idiom.kind, "unknown")
+        self.assertIsNone(idiom.import_name)
+        self.assertIsNone(idiom.read("moolabs_api_key"))   # caller -> flag / stub
+
+    def test_singleton_only_when_rhs_is_a_settings_class(self):
+        # a module-level `x = SomethingElse()` must NOT be read as the settings singleton
+        src = ("class Settings:\n    api_key: str = ''\n"
+               "logger = Logger()\n")
+        self.assertEqual(se.detect_access_idiom(src).kind, "unknown")
+
+
 class BlamePorcelain(unittest.TestCase):
     def test_parses_author_time_per_sha_incl_repeated_commit(self):
         a = "a" * 40

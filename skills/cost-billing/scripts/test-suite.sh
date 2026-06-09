@@ -223,6 +223,7 @@ helper_ctx = {
     "env_config": {
         "mode": "modify",
         "settings_import_path": "app.config",
+        "settings_import_name": "get_settings",
         "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
         "stub_emit_path": None,
     },

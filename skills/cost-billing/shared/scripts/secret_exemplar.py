@@ -46,6 +46,20 @@ class Exemplar:
     confidence: str         # "blame" (dated, most-recently-added) | "position" (last-defined fallback)
 
 
+@dataclass(frozen=True)
+class AccessIdiom:
+    kind: str               # "singleton" | "factory" | "unknown"
+    import_name: str | None  # the symbol to import: "settings" / "get_settings" / None
+    # `read("moolabs_api_key")` -> "settings.moolabs_api_key" / "get_settings().moolabs_api_key"
+
+    def read(self, field: str) -> str | None:
+        if self.kind == "singleton":
+            return f"{self.import_name}.{field}"
+        if self.kind == "factory":
+            return f"{self.import_name}().{field}"
+        return None
+
+
 def _secret_reason(name: str, annotation: str | None) -> str | None:
     a = annotation or ""
     if any(tok in a for tok in _SECRET_ANNOTATIONS):
@@ -101,6 +115,54 @@ def propose_exemplar(source: str, line_dates: dict[int, float] | None = None) ->
             best = max(dated, key=lambda dl: (dl[0], dl[1].lineno))
             return Exemplar(field=best[1], confidence="blame")
     return Exemplar(field=fields[-1], confidence="position")
+
+
+def _last_name(node) -> str | None:
+    s = _unparse(node)
+    return s.rsplit(".", 1)[-1] if s else None
+
+
+def _class_is_settings(node: ast.ClassDef) -> bool:
+    """A Settings class: subclasses *Settings (BaseSettings/Settings), is named
+    *Settings, or carries secret fields."""
+    if node.name.lower().endswith("settings"):
+        return True
+    if any((_last_name(b) or "").lower().endswith("settings") for b in node.bases):
+        return True
+    return any(isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+               and _secret_reason(s.target.id, _unparse(s.annotation)) for s in node.body)
+
+
+def detect_access_idiom(source: str) -> AccessIdiom:
+    """SEARCH (not blame) for HOW the config is read — the dimension blame can't see.
+    Mirroring the secret FIELD is not enough; the helper must read it the way the
+    customer's code does:
+      - factory:   `def get_settings(): ...`         -> `from <mod> import get_settings`
+                                                         + `get_settings().moolabs_api_key`
+      - singleton: `settings = Settings()` (module)  -> `from <mod> import settings`
+                                                         + `settings.moolabs_api_key`
+      - unknown:   neither (DI / custom)             -> FLAG; caller falls to the stub.
+    Returns the idiom + the import symbol; `.read(field)` builds the accessor. moo-arc
+    is a singleton — the common case the get_settings()-hardcoded helper breaks on."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return AccessIdiom("unknown", None)
+    settings_classes = {n.name for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef) and _class_is_settings(n)}
+    # factory first: an explicit accessor function is the intended public API.
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            nm = node.name.lower()
+            if node.name == "get_settings" or (nm.endswith("settings") and nm != "settings"):
+                return AccessIdiom("factory", node.name)
+    # singleton: a module-level `name = <SettingsClass>()`.
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and _last_name(node.value.func) in settings_classes):
+            return AccessIdiom("singleton", node.targets[0].id)
+    return AccessIdiom("unknown", None)
 
 
 def blame_line_dates(file_path: str, linenos: list[int]) -> dict[int, float]:

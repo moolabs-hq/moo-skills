@@ -772,6 +772,7 @@ class AccessorRuntimeRegression(unittest.TestCase):
                     'env_config': {
                         'mode': 'modify',
                         'settings_import_path': 'mock.settings',
+                        'settings_import_name': 'get_settings',
                         'api_key_accessor': accessor,
                         'stub_emit_path': None,
                     },
@@ -874,6 +875,53 @@ class NodeDrivenWiring(unittest.TestCase):
                          "get_settings().moolabs_api_key.get_secret_value()")
         # modify imports the CUSTOMER module (file-derived), not the stub
         self.assertEqual(plan["settings_import_path"], "app.config")
+
+
+class AccessIdiomMirror(unittest.TestCase):
+    """Phase 1.7 mirror: the modify accessor + imported symbol follow the customer's
+    ACCESS IDIOM (singleton vs factory), not a hardcoded get_settings(). The singleton
+    case is moo-arc's — and the one that ImportError'd (no get_settings in app/config.py)."""
+
+    _MODIFY_NODE = "python-pydantic-v1-settings"
+
+    def _plan(self, config_src, repo_root):
+        import os
+        os.makedirs(os.path.join(repo_root, "app"), exist_ok=True)
+        with open(os.path.join(repo_root, "app", "config.py"), "w") as f:
+            f.write(config_src)
+        svc = {"service_slug": "svc",
+               "app_config": {"node_id": self._MODIFY_NODE, "file": "app/config.py"},
+               "deployment_surfaces": []}
+        return cw.plan_service_env_wire(svc, "python", repo_root=repo_root)
+
+    def test_singleton_config_imports_settings_not_get_settings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            plan = self._plan(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    arc_global_api_key: str = ''\n"
+                "settings = Settings()\n", d)
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["settings_import_name"], "settings")
+        self.assertEqual(plan["api_key_accessor"],
+                         "settings.moolabs_api_key.get_secret_value()")
+
+    def test_factory_config_keeps_get_settings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            plan = self._plan(
+                "class Settings:\n    api_key: str = ''\n"
+                "def get_settings():\n    return Settings()\n", d)
+        self.assertEqual(plan["settings_import_name"], "get_settings")
+        self.assertEqual(plan["api_key_accessor"],
+                         "get_settings().moolabs_api_key.get_secret_value()")
+
+    def test_no_repo_root_defaults_to_factory(self):
+        svc = {"service_slug": "svc",
+               "app_config": {"node_id": self._MODIFY_NODE, "file": "app/config.py"},
+               "deployment_surfaces": []}
+        plan = cw.plan_service_env_wire(svc, "python", repo_root=None)
+        self.assertEqual(plan["settings_import_name"], "get_settings")  # back-compat default
 
 
 if __name__ == "__main__":

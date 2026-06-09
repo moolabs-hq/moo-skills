@@ -373,11 +373,13 @@ class EndToEndPipeline(unittest.TestCase):
                 "service_slug": slug, "signoff_chain_hashes": gates,
                 "sdk_pinned_version": "v0.3.0-rc1", "telemetry": {"mode": "brownfield"},
                 "env_config": {"mode": "modify", "settings_import_path": "app.config",
+                               "settings_import_name": "get_settings",
                                "api_key_accessor": "get_settings().moolabs_api_key.get_secret_value()",
                                "stub_emit_path": None},
                 "generated_at": ts},
             "python-moolabs-settings.py.j2": {"service_slug": slug, "generated_at": ts,
                 "env_config": {"mode": "stub", "settings_import_path": "app.config",
+                               "settings_import_name": "get_settings",
                                "stub_emit_path": "app/moolabs_settings.py", "api_key_accessor": "x"}},
         }
         for tpl, ctx in renders.items():

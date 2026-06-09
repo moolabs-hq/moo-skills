@@ -50,6 +50,7 @@ _SHARED_BASE = _locate_shared_base()
 if _SHARED_BASE is not None:
     sys.path.insert(0, str(_SHARED_BASE / "scripts"))
 import framework_registry  # noqa: E402
+import secret_exemplar  # noqa: E402
 
 _FRAMEWORKS_DIR = (
     (_SHARED_BASE / "assets" / "frameworks")
@@ -273,13 +274,35 @@ def _resolve_node(
     return None
 
 
-def plan_service_env_wire(service: dict, language: str) -> dict:
+def _detect_access_idiom(app_config: dict, repo_root, language: str):
+    """SEARCH the customer's config for HOW it is read — a factory (`get_settings()`)
+    vs a module singleton (`settings`). Blame finds the exemplar FIELD; only this finds
+    the ACCESS expression, the dimension the get_settings()-hardcoded helper broke on
+    (moo-arc is a singleton). Python only (ts/go keep their node accessor); best-effort
+    — returns None on no repo_root / unreadable file / unknown idiom (caller defaults to
+    the factory shape, the back-compatible behavior)."""
+    if language != "python" or repo_root is None:
+        return None
+    rel = app_config.get("file")
+    if not rel:
+        return None
+    try:
+        src = (Path(repo_root) / rel).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    idiom = secret_exemplar.detect_access_idiom(src)
+    return idiom if idiom.kind in ("singleton", "factory") else None
+
+
+def plan_service_env_wire(service: dict, language: str, repo_root=None) -> dict:
     """Derive the per-service env-wiring plan from an inventory entry.
 
     Node-driven: the winning framework node (app_config.node_id) decides the
     wiring mode + accessor. Stub paths come from the inventory (emit_path/
     import_path, derived from the customer's real layout in Phase A); modify
-    paths come from the customer's existing config module (file-derived)."""
+    paths come from the customer's existing config module (file-derived). When
+    `repo_root` is given, the modify accessor + imported symbol MIRROR the
+    customer's access idiom (singleton vs factory) instead of assuming a factory."""
     app_config = service.get("app_config") or {}
     node_key = app_config.get("node_id") or app_config.get("pattern") or ""
     service_slug = service.get("service_slug", "")
@@ -302,6 +325,8 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
             "service_slug": service_slug,
             "mode": "stub",
             "settings_import_path": app_config.get("import_path"),
+            # the stub artifact always exposes a get_settings() factory.
+            "settings_import_name": "get_settings",
             "api_key_accessor": _STUB_ACCESSORS.get(language, ""),
             "stub_emit_path": app_config.get("emit_path"),
             "deployment_stubs": deployment_stubs,
@@ -316,11 +341,22 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
         "typescript": _ts_settings_import_path,
         "go": _go_settings_import_path,
     }[language](app_config.get("file", ""), service_slug)
+    # Mirror the access idiom: singleton -> import `settings` + `settings.X`; factory
+    # (or undetected) -> import `get_settings` + `get_settings().X` (the node default,
+    # back-compatible). The accessor reads OUR moolabs_api_key (a SecretStr).
+    idiom = _detect_access_idiom(app_config, repo_root, language)
+    if idiom is not None:
+        import_name = idiom.import_name
+        accessor = idiom.read("moolabs_api_key") + ".get_secret_value()"
+    else:
+        import_name = "get_settings"
+        accessor = node.wiring.get("accessor")
     return {
         "service_slug": service_slug,
         "mode": "modify",
         "settings_import_path": import_path,
-        "api_key_accessor": node.wiring.get("accessor"),
+        "settings_import_name": import_name,
+        "api_key_accessor": accessor,
         "stub_emit_path": None,
         "deployment_stubs": deployment_stubs,
         "infra_discovery_gap": infra_discovery_gap,
@@ -331,18 +367,19 @@ def plan_service_env_wire(service: dict, language: str) -> dict:
 # Plan build (orchestrator)
 # ──────────────────────────────────────────────────────────────────────
 
-def build_plan(inventory: dict, services_languages: dict[str, str]) -> dict:
+def build_plan(inventory: dict, services_languages: dict[str, str], repo_root=None) -> dict:
     """Orchestrate per-service plan derivation across the whole inventory.
 
     services_languages: {service_slug: "python" | "typescript" | "go"}.
     When a service slug is absent, defaults to python (matches Phase A's
-    parse_services_and_granularity fallback).
+    parse_services_and_granularity fallback). `repo_root` (the customer repo) lets
+    modify-mode mirror each service's config access idiom; omitted -> factory default.
     """
     service_plans: list[dict] = []
     for svc in inventory.get("services") or []:
         slug = svc.get("service_slug", "")
         language = services_languages.get(slug, "python")
-        service_plans.append(plan_service_env_wire(svc, language))
+        service_plans.append(plan_service_env_wire(svc, language, repo_root))
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -387,6 +424,11 @@ def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
                 )
             else:
                 lines.append("    settings_import_path: null")
+            # the symbol the helper imports — `settings` (singleton) | `get_settings`
+            # (factory). Default factory so older plans without the field still render.
+            lines.append(
+                f"    settings_import_name: {_quote(svc.get('settings_import_name') or 'get_settings')}"
+            )
             lines.append(f"    api_key_accessor: {_quote(svc['api_key_accessor'])}")
             if svc.get("stub_emit_path"):
                 lines.append(f"    stub_emit_path: {_quote(svc['stub_emit_path'])}")
