@@ -249,13 +249,51 @@ class GrepTokens(unittest.TestCase):
             self.assertIn("config.py", files)
             self.assertNotIn("node_modules/x/main.tf", files)   # gitignored -> untracked -> unseen
 
+    @unittest.skipUnless(shutil.which("git"), "git not available")
+    def test_resolves_toplevel_finds_infra_ABOVE_the_service(self):
+        # The complete path often lives ABOVE the service dir (moo-arc: service at
+        # services/moo-arc, infra at repo-root infrastructure/). `git -C <subdir> grep`
+        # would scope to the subdir and miss it -> #550 false-negative. The toplevel
+        # resolution must find infra above the service even when repo_root IS the service.
+        with tempfile.TemporaryDirectory() as d:
+            import subprocess
+            os.makedirs(os.path.join(d, "infrastructure"))
+            os.makedirs(os.path.join(d, "services", "foo"))
+            with open(os.path.join(d, "infrastructure", "main.tf"), "w") as f:
+                f.write('name = "ARC_GLOBAL_API_KEY"\n')          # centralized infra ABOVE the svc
+            with open(os.path.join(d, "services", "foo", "config.py"), "w") as f:
+                f.write("arc_global_api_key: SecretStr\n")
+            subprocess.run(["git", "init", "-q", d], check=True)
+            subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+            # repo_root is the SERVICE SUBDIR — must still find infra above it. The
+            # agent passes BOTH the env var (deployment) and the field name (config),
+            # since grep is case-sensitive and the two forms differ.
+            files = {h[0] for h in se.grep_tokens(
+                os.path.join(d, "services", "foo"),
+                ["ARC_GLOBAL_API_KEY", "arc_global_api_key"])}
+            self.assertIn("infrastructure/main.tf", files)        # found despite being above
+            self.assertIn("services/foo/config.py", files)
+
     def test_timeout_RAISES_never_masks_as_empty(self):
         # THE #550 fix: a timeout must never look like 'no hits' (which ships an empty
-        # secret path). It propagates, it does not return [].
+        # secret path). It propagates, it does not return [] — on BOTH the git-grep path
+        # and the grep -rn fallback.
         import subprocess as sp
         orig = sp.run
+        # raise TimeoutExpired on every run -> git-grep path raises
         sp.run = lambda *a, **k: (_ for _ in ()).throw(sp.TimeoutExpired(cmd="grep", timeout=1))
         try:
+            with self.assertRaises(sp.TimeoutExpired):
+                se.grep_tokens("/whatever", ["TOKEN"])
+            # fallback path: toplevel-resolve + git-grep OSError (git "absent"), grep times out
+            calls = {"n": 0}
+
+            def _git_absent_then_timeout(*a, **k):
+                calls["n"] += 1
+                if a and a[0] and a[0][0] == "git":
+                    raise OSError("git absent")
+                raise sp.TimeoutExpired(cmd="grep", timeout=1)
+            sp.run = _git_absent_then_timeout
             with self.assertRaises(sp.TimeoutExpired):
                 se.grep_tokens("/whatever", ["TOKEN"])
         finally:

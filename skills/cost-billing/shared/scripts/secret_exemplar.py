@@ -273,24 +273,37 @@ def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 120) -> list[t
     if not toks:
         return []
     pattern = "|".join(re.escape(t) for t in toks)
+    # Resolve the git TOPLEVEL and search from there. A secret's complete path often
+    # lives ABOVE the service dir — moo-arc's service is services/moo-arc but its infra
+    # is at the repo-root infrastructure/terraform. `git -C <subdir> grep` would scope to
+    # the subdir and SILENTLY MISS centralized infra (the same #550 false-negative class
+    # as a swallowed timeout). Searching from the toplevel covers the whole repo.
+    root = str(repo_root)
     try:
-        r = subprocess.run(["git", "-C", str(repo_root), "grep", "-nIE", pattern],
+        tl = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+                            capture_output=True, text=True, timeout=10)
+        if tl.returncode == 0 and tl.stdout.strip():
+            root = tl.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass  # not a git checkout / git absent -> grep -rn from repo_root below
+    try:
+        r = subprocess.run(["git", "-C", root, "grep", "-nIE", pattern],
                            capture_output=True, text=True, timeout=timeout)
         if r.returncode in (0, 1):  # 0 = matches, 1 = no matches — both are valid results
-            return _parse_grep_lines(r.stdout, repo_root=None)  # paths already repo-relative
+            return _parse_grep_lines(r.stdout, repo_root=None)  # paths repo-relative to toplevel
     except subprocess.TimeoutExpired:
         raise  # NEVER swallow a timeout into [] — that masks the #550 empty-path gap
     except (OSError, subprocess.SubprocessError):
         pass  # git absent / not a git checkout -> fall back
     excludes = [f"--exclude-dir={d}" for d in _GREP_SKIP_DIRS]
     try:
-        r = subprocess.run(["grep", "-rnIE", pattern, *excludes, str(repo_root)],
+        r = subprocess.run(["grep", "-rnIE", pattern, *excludes, root],
                            capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise
     except (OSError, subprocess.SubprocessError):
         return []
-    return _parse_grep_lines(r.stdout, repo_root=str(repo_root))
+    return _parse_grep_lines(r.stdout, repo_root=root)
 
 
 def blame_line_dates(file_path: str, linenos: list[int]) -> dict[int, float]:
