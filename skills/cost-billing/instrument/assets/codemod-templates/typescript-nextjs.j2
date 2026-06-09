@@ -10,6 +10,13 @@
    Variables: same shape as python-fastapi.j2 (incl. entry.attribution_imports —
    each binding's requires_import, in TS import syntax; emitted verbatim).
 #}
+{%- macro guarded(g) -%}
+{% if g %}if ({{ g }}) {
+{{ caller() | trim | indent(2, first=True) }}
+}
+{% else %}{{ caller() | trim }}
+{% endif %}
+{%- endmacro -%}
 {% for _moolabs_imp in entry.attribution_imports %}{{ _moolabs_imp }}
 {% endfor %}{% if entry.pattern == "sibling-pair" %}
 // ─────────────────────────────────────────────────────────────────────────
@@ -29,6 +36,7 @@ const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ?
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}// REVIEW idempotency: confirm entity_id is STABLE across a retry of this
 // event — a per-request / correlation id double-counts on retry.{% endif %}
+{% call guarded(entry.emission_guard) -%}
 await emitEventSafe({
   eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
@@ -49,6 +57,7 @@ await emitEventSafe({
     {% endif %}
   },
 });
+{%- endcall %}
 {% elif entry.pattern == "usage-only" %}
 // ─────────────────────────────────────────────────────────────────────────
 // moolabs SDK insert (usage-only, v0.3.0-rc1) — emitUsageEventSafe.
@@ -64,6 +73,7 @@ const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto 
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}// REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}// REVIEW idempotency: confirm entity_id is STABLE across a retry of this
 // event — a per-request / correlation id double-counts on retry.{% endif %}
+{% call guarded(entry.emission_guard) -%}
 await emitUsageEventSafe({
   eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
@@ -78,6 +88,7 @@ await emitUsageEventSafe({
     {% endif %}
   },
 });
+{%- endcall %}
 {% elif entry.pattern == "cost-only" %}
 // ─────────────────────────────────────────────────────────────────────────
 // moolabs SDK insert (cost-only, v0.3.0-rc1) — emitCostEventSafe.
@@ -92,6 +103,7 @@ import { emitCostEventSafe } from '{{ entry.helper_import_path }}';
 const _moolabsSpanId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% if not attribution_sources.request_id %}const _moolabsEventId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2);
 {% endif %}
+{% call guarded(entry.emission_guard) -%}
 await emitCostEventSafe({
   eventType: {{ entry.event_type_const if entry.event_type_const else "'" ~ (entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id)) ~ "'" }},
   customerId: String({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else "'unknown'") }} ?? ''),
@@ -110,4 +122,5 @@ await emitCostEventSafe({
     {% endif %}
   },
 });
+{%- endcall %}
 {% endif %}

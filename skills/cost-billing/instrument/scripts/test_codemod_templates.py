@@ -53,6 +53,7 @@ def _usage_entry():
         # codemod must emit it or the insert NameErrors (dogfood ruff F821).
         "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
         "helper_import_path": "app.services.moolabs_client",
+        "emission_guard": None,
     }
 
 
@@ -70,6 +71,7 @@ def _cost_entry():
         "feature_key_const": "FEATURE_KEY_SHARED",
         "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
         "helper_import_path": "app.services.moolabs_client",
+        "emission_guard": None,
     }
 
 
@@ -138,6 +140,7 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 "cost_micros_source": "r.cm",
                 "refund_unit": {"unit": "event", "derivation": 1},
                 "attribution_imports": [], "helper_import_path": "app.services.moolabs_client",
+        "emission_guard": None,
             }
             for tpl in _PY_TEMPLATES:
                 with self.subTest(tpl=tpl, pattern=pattern):
@@ -158,6 +161,41 @@ class CallsiteRenderSmoke(unittest.TestCase):
             with self.subTest(tpl=tpl):
                 out = self._render(tpl, _sibling_entry())
                 self._assert_py_compiles(out, f"{tpl} sibling-pair")
+
+    def test_emission_guard_gates_the_emit(self):
+        # O: a CFO emission_guard must GATE the emit (bill only when not blocked).
+        # py_compile can't catch an UNGUARDED emit (it compiles fine — that's why
+        # it shipped), so assert the GATING: guard present -> `if <guard>:` precedes
+        # the INDENTED emit; absent -> no wrapper, emit at column 0.
+        guard = "result.get('blocked') is not True"
+        for tpl in _PY_TEMPLATES:
+            with self.subTest(tpl=tpl):
+                e = _usage_entry(); e["emission_guard"] = guard
+                out = self._render(tpl, e)
+                self._assert_py_compiles(out, f"{tpl} guarded")
+                lines = out.splitlines()
+                gi = next(i for i, ln in enumerate(lines) if ln.strip() == f"if {guard}:")
+                ei = next(i for i, ln in enumerate(lines) if "emit_usage_event_safe(" in ln)
+                self.assertLess(gi, ei, "guard must precede the emit")
+                self.assertTrue(lines[ei].startswith("    emit_usage_event_safe("),
+                                "emit must be indented under the guard")
+                # absent -> plain, no wrapper, emit at column 0
+                e2 = _usage_entry(); e2["emission_guard"] = None
+                out2 = self._render(tpl, e2)
+                self.assertNotIn("if result.get('blocked')", out2)
+                self.assertIn("\nemit_usage_event_safe(", "\n" + out2)
+
+    def test_emission_guard_gates_typescript_emit(self):
+        # TS form: `if (<guard>) { <emit> }` (render-only — no tsc here).
+        guard = "!result.blocked"
+        for tpl in _TS_TEMPLATES:
+            with self.subTest(tpl=tpl):
+                e = _usage_entry(); e["emission_guard"] = guard
+                out = self._render(tpl, e)
+                self.assertIn(f"if ({guard}) {{", out)
+                gi = out.index(f"if ({guard})")
+                ei = out.index("await emitUsageEventSafe({")
+                self.assertLess(gi, ei, "guard must precede the emit")
 
     def test_usage_only_preserves_idempotency_review_surface(self):
         # The E guard must not SILENTLY drop the idempotency review prompt for

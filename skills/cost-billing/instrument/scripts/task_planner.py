@@ -943,6 +943,12 @@ def build_tasks(
                 # under StrictUndefined (round-3 review — the sibling of E missed by
                 # the first sweep). The templates fall back to workflow_id when None.
                 "event_type": entry.get("event_type"),
+                # CFO-signed emission guard (e.g. "result.get('blocked') is not
+                # True"): emit ONLY when this holds, so BLOCKED/kill-switch ops
+                # aren't billed (dogfood O). Guaranteed present (None when absent)
+                # so the template's `{% if entry.emission_guard %}` is StrictUndefined
+                # -safe; the template wraps the emit in `if <guard>:` when set.
+                "emission_guard": entry.get("emission_guard"),
                 "cost_kind": effective_cost_kind,
                 # Guarantee the optional cost-value key EXISTS (None when absent)
                 # so the template's `{% if entry.cost_micros_source %}` guard works

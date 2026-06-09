@@ -573,7 +573,12 @@ You are instrumenting ONE file. Your job:
                               back to workflow_id), the `*_const` slug names (or
                               null), `slugs_import_path`, `cost_kind` /
                               `cost_micros_source` / `cost_value_missing`,
-                              `refund_unit`, and `idempotency_anchor` (cost-only only).
+                              `refund_unit`, `idempotency_anchor` (cost-only only),
+                              and `emission_guard` (a CFO-signed condition, e.g.
+                              "result.get('blocked') is not True", or null). The
+                              template AUTO-WRAPS the emit in `if <emission_guard>:`
+                              when set, so BLOCKED/kill-switch ops aren't billed —
+                              the subagent does nothing extra for it.
      - `attribution_sources` = the insert's `attribution_sources` block verbatim
                               (always carries customer_id / request_id / consumer_agent,
                               each an expression or null).

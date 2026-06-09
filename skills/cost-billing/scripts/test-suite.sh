@@ -183,6 +183,7 @@ entry_base = {
     "cost_workflow_ids":["s.llm"],"consumer_agent_source":'"agent"',
     "slugs_import_path": "app.services.moolabs.slugs_billing",
     "helper_import_path": "app.services.moolabs_client",
+    "emission_guard": None,
     "attribution_imports": [],
     "event_type_const": "EVENT_TYPE_COMPLETION_DELIVERED",
     "meter_slug_const": "METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED",
