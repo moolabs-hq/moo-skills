@@ -1072,6 +1072,32 @@ class EmitTasksYamlEscaping(unittest.TestCase):
         self.assertEqual(tp._yaml_scalar(3), "3")
 
 
+class HelperImportDerivation(unittest.TestCase):
+    """P0 portability: the callsite helper-module import must be a SIBLING basename
+    swap on the stub anchor (so it resolves wherever the helper is emitted), not a
+    hardcoded app.services.moolabs_client."""
+
+    def test_python_derives_from_anchor_sibling(self):
+        self.assertEqual(
+            tp._helper_import_for_entry("python", ("x/src/mypkg/services/moolabs_settings.py",
+                                                   "mypkg.services.moolabs_settings")),
+            "mypkg.services.moolabs_client")
+        # bare module anchor -> bare moolabs_client
+        self.assertEqual(
+            tp._helper_import_for_entry("python", ("app/config.py", "config")),
+            "moolabs_client")
+
+    def test_no_anchor_falls_back_to_legacy(self):
+        self.assertEqual(tp._helper_import_for_entry("python", None),
+                         "app.services.moolabs_client")
+
+    def test_typescript_uses_layout_independent_alias(self):
+        # TS `@/` alias is layout-independent — not the leak; always the alias.
+        self.assertEqual(
+            tp._helper_import_for_entry("typescript", ("src/x/moolabs-settings.ts", "@/x/moolabs-settings")),
+            "@/services/moolabs-client")
+
+
 class ServiceScoping(unittest.TestCase):
     """Verbatim-dogfood finding: the cost/usage inventories are ORG-WIDE, but
     task_planner runs per-service. Without scoping, a --service run emits a task

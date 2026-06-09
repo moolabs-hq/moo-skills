@@ -15,7 +15,7 @@
 // moolabs SDK insert (sibling-pair, v0.3.0-rc1). Both lanes in ONE call via
 // emitEventSafe -> client.events.ingest(...).
 // ─────────────────────────────────────────────────────────────────────────
-import { emitEventSafe } from '@/services/moolabs-client';
+import { emitEventSafe } from '{{ entry.helper_import_path }}';
 {% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const or entry.span_type_const %}import {
 {% if entry.event_type_const %}  {{ entry.event_type_const }},
 {% endif %}{% if entry.meter_slug_const %}  {{ entry.meter_slug_const }},
@@ -51,7 +51,7 @@ await emitEventSafe({
 // ─────────────────────────────────────────────────────────────────────────
 // moolabs SDK insert (usage-only, v0.3.0-rc1) — emitUsageEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
-import { emitUsageEventSafe } from '@/services/moolabs-client';
+import { emitUsageEventSafe } from '{{ entry.helper_import_path }}';
 {% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const %}import {
 {% if entry.event_type_const %}  {{ entry.event_type_const }},
 {% endif %}{% if entry.meter_slug_const %}  {{ entry.meter_slug_const }},
@@ -79,7 +79,7 @@ await emitUsageEventSafe({
 // ─────────────────────────────────────────────────────────────────────────
 // moolabs SDK insert (cost-only, v0.3.0-rc1) — emitCostEventSafe.
 // ─────────────────────────────────────────────────────────────────────────
-import { emitCostEventSafe } from '@/services/moolabs-client';
+import { emitCostEventSafe } from '{{ entry.helper_import_path }}';
 {% if entry.event_type_const or entry.feature_key_const or entry.span_type_const %}import {
 {% if entry.event_type_const %}  {{ entry.event_type_const }},
 {% endif %}{% if entry.feature_key_const %}  {{ entry.feature_key_const }},

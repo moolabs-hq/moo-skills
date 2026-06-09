@@ -445,12 +445,22 @@ regenerates them.
 4. **The signoff chain is auditable from inside the code.** The helper's docstring header lists the 5 signed-stage sha256 hashes (cfo/pm/cfo/engineer/pm) — when an engineer reads the file 6 months later, the provenance is `head -20 services/<svc>/.../moolabs_client.py`, not "go ask git blame".
 5. **Brownfield directive lives next to the code that would violate it.** If `telemetry.mode == brownfield`, the helper's top-of-file comment says "do NOT register a second TracerProvider" — the next person editing this file sees it.
 
-**Where to write the helper:**
+**Where to write the helper — it MUST be a sibling of the stub/config module so
+the callsite import resolves.** The callsite templates import the helper via
+`entry.helper_import_path`, which the planner derives as a basename swap on the
+service's stub/config anchor (e.g. stub `mypkg.services.moolabs_settings` →
+helper `mypkg.services.moolabs_client`). So emit the helper file at the SAME
+directory as that anchor module, basename `moolabs_client` — NOT a hardcoded
+`app/services/`. The table below is the `app`-rooted EXAMPLE; for a `src/<pkg>/`
+or otherwise-rooted repo, the helper goes next to the stub (e.g.
+`services/svc/src/mypkg/services/moolabs_client.py`), matching
+`entry.helper_import_path`. (Portability P0: hardcoding `app.services.moolabs_client`
+only resolved for an `app`-rooted repo; a `src/<pkg>/` customer got ModuleNotFoundError.)
 
-| Language | Path (relative to service root) |
+| Language | Path (relative to service root) — `app`-rooted EXAMPLE |
 |---|---|
-| Python | `app/services/moolabs_client.py` (or `<package>/services/moolabs_client.py` matching service's existing module layout) |
-| TypeScript | `src/services/moolabs-client.ts` |
+| Python | `<anchor-dir>/moolabs_client.py` (example: `app/services/moolabs_client.py`) |
+| TypeScript | `src/services/moolabs-client.ts` (resolved via the `@/` alias — layout-independent) |
 | Go (P0) | `internal/moolabsclient/client.go` |
 
 **What goes in the helper (generated from `assets/codemod-templates/<lang>-moolabs-client.<ext>.j2`):**

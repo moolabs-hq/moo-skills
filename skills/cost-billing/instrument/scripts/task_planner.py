@@ -714,6 +714,37 @@ def _slugs_import_for_entry(
     return _slugs_import_path_for(language, product_slug)
 
 
+# Legacy helper-module import paths (when no stub anchor exists — the all-modify
+# limitation, same as the slugs anchor). Python is the only LAYOUT-DEPENDENT one
+# (a dotted package path); TS uses a layout-independent `@/` alias and Go has no
+# callsite template.
+_HELPER_MODULE_LEGACY = {
+    "python": "app.services.moolabs_client",
+    "typescript": "@/services/moolabs-client",
+}
+
+
+def _helper_import_for_entry(language: str, anchor: tuple[str, str] | None) -> str:
+    """Per-callsite helper (moolabs_client) MODULE import path.
+
+    PORTABILITY (verbatim-dogfood P0): the callsite templates used to HARDCODE
+    `from app.services.moolabs_client import ...`, which only resolves for an
+    `app`-rooted repo — a customer rooted at `src/<pkg>/` got ModuleNotFoundError.
+    The helper is a SIBLING of the service's stub/config module (same dir,
+    basename `moolabs_client`), so deriving its import as a basename swap on the
+    stub anchor's import path (python) makes the callsite import resolve to
+    wherever the helper is emitted. TS keeps the layout-independent `@/` alias;
+    Go has no callsite. Falls back to the legacy convention when no stub anchor
+    exists (all-modify — same documented limitation as `_slugs_import_for_entry`).
+    """
+    if anchor is not None and language == "python":
+        dotted = [p for p in (anchor[1] or "").split(".") if p]
+        if dotted:
+            dotted[-1] = "moolabs_client"
+            return ".".join(dotted)
+    return _HELPER_MODULE_LEGACY.get(language, _HELPER_MODULE_LEGACY["python"])
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -917,6 +948,11 @@ def build_tasks(
                 "slugs_import_path": _slugs_import_for_entry(
                     primary_lang, product_slug, anchor
                 ),
+                # P0 portability: the helper-module import path, derived from the
+                # same stub anchor as the slugs (a sibling basename swap), so the
+                # callsite `from <here> import emit_*` resolves to wherever the
+                # helper is emitted — never a hardcoded `app.services.moolabs_client`.
+                "helper_import_path": _helper_import_for_entry(primary_lang, anchor),
             }
             # Dogfood finding H: the usage-only / sibling-pair templates render
             # `value={{ entry.refund_unit.derivation }}` as a Python expression

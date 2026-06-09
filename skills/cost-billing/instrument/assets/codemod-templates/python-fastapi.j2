@@ -33,7 +33,7 @@
 # join key (preserves request_id for join downstream). Attribution sources
 # bound in Phase 1.6 (attribution-bindings.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
-from app.services.moolabs_client import emit_event_safe
+from {{ entry.helper_import_path }} import emit_event_safe
 {% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const or entry.span_type_const %}from {{ entry.slugs_import_path }} import (
 {% if entry.event_type_const %}    {{ entry.event_type_const }},
 {% endif %}{% if entry.meter_slug_const %}    {{ entry.meter_slug_const }},
@@ -74,7 +74,7 @@ emit_event_safe(
 # moolabs SDK insert (usage-only, v0.3.0-rc1) — emit_usage_event_safe.
 # Single usage event; no cost-bearing call at this site.
 # ─────────────────────────────────────────────────────────────────────────────
-from app.services.moolabs_client import emit_usage_event_safe
+from {{ entry.helper_import_path }} import emit_usage_event_safe
 {% if entry.event_type_const or entry.meter_slug_const or entry.feature_key_const %}from {{ entry.slugs_import_path }} import (
 {% if entry.event_type_const %}    {{ entry.event_type_const }},
 {% endif %}{% if entry.meter_slug_const %}    {{ entry.meter_slug_const }},
@@ -104,7 +104,7 @@ emit_usage_event_safe(
 # moolabs SDK insert (cost-only, v0.3.0-rc1) — emit_cost_event_safe.
 # Helper routes via the env-gated rail (SDK in prod; structured-log on failure).
 # ─────────────────────────────────────────────────────────────────────────────
-from app.services.moolabs_client import emit_cost_event_safe
+from {{ entry.helper_import_path }} import emit_cost_event_safe
 {% if entry.event_type_const or entry.feature_key_const or entry.span_type_const %}from {{ entry.slugs_import_path }} import (
 {% if entry.event_type_const %}    {{ entry.event_type_const }},
 {% endif %}{% if entry.feature_key_const %}    {{ entry.feature_key_const }},

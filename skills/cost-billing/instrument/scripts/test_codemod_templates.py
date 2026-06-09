@@ -52,6 +52,7 @@ def _usage_entry():
         # binding-import for the request_id source (get_correlation_id) — the
         # codemod must emit it or the insert NameErrors (dogfood ruff F821).
         "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
+        "helper_import_path": "app.services.moolabs_client",
     }
 
 
@@ -68,6 +69,7 @@ def _cost_entry():
         "span_type_const": "SPAN_TYPE_LLM_TOKENS",
         "feature_key_const": "FEATURE_KEY_SHARED",
         "attribution_imports": ["from app.monitoring.logging import get_correlation_id"],
+        "helper_import_path": "app.services.moolabs_client",
     }
 
 
@@ -135,7 +137,7 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 "slugs_import_path": "app.slugs", "cost_kind": "llm-tokens",
                 "cost_micros_source": "r.cm",
                 "refund_unit": {"unit": "event", "derivation": 1},
-                "attribution_imports": [],
+                "attribution_imports": [], "helper_import_path": "app.services.moolabs_client",
             }
             for tpl in _PY_TEMPLATES:
                 with self.subTest(tpl=tpl, pattern=pattern):
@@ -326,6 +328,38 @@ class EndToEndPipeline(unittest.TestCase):
                     self.assertEqual(r.returncode, 0, f"{tpl} has E501 at the committed bound:\n{r.stdout}")
                 finally:
                     Path(path).unlink(missing_ok=True)
+
+    def test_callsite_helper_import_resolves_for_non_app_layout(self):
+        # P0 GATE (verbatim-dogfood): the portability leak moo-arc STRUCTURALLY
+        # could not catch — its package root is `app`, so the old hardcoded
+        # `from app.services.moolabs_client import ...` resolved by coincidence; a
+        # customer rooted at src/<pkg>/ got ModuleNotFoundError. With the helper
+        # import derived from the service's stub anchor, a NON-app anchor must
+        # produce `from <pkg>.services.moolabs_client import ...` — never app.services.
+        import io
+        import contextlib
+        import task_planner as tp
+        anchor = ("services/svc/src/mypkg/services/moolabs_settings.py",
+                  "mypkg.services.moolabs_settings")  # a src/<pkg>/ layout
+        usage_inv = {"entries": [{"file": "services/svc/src/mypkg/api.py", "line": 5,
+                                  "workflow_id": "svc.checkout", "event_type": "svc.checkout",
+                                  "product_slug": "svc"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            tasks = tp.build_tasks(
+                {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}}, signed,
+                {"language": "python", "framework": "fastapi"},
+                attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+                attribution_overrides=[], slug_inventory=None, anchor=anchor)
+        ins = tasks[0].inserts[0]
+        self.assertEqual(ins.entry["helper_import_path"], "mypkg.services.moolabs_client")
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
+        out = env.get_template("python-fastapi.j2").render(
+            entry=ins.entry, attribution_sources=ins.attribution_sources)
+        self.assertIn("from mypkg.services.moolabs_client import", out)
+        self.assertNotIn("from app.services.moolabs_client import", out)  # leak gone
 
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
