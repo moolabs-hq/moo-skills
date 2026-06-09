@@ -284,6 +284,9 @@ def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 120) -> list[t
                             capture_output=True, text=True, timeout=10)
         if tl.returncode == 0 and tl.stdout.strip():
             root = tl.stdout.strip()
+    except subprocess.TimeoutExpired:
+        raise  # consistency with the grep timeout: a timeout must never SILENTLY degrade
+               # scope (service-dir instead of whole-repo) -> it would re-mask the gap
     except (OSError, subprocess.SubprocessError):
         pass  # not a git checkout / git absent -> grep -rn from repo_root below
     try:
