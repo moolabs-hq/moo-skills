@@ -308,12 +308,11 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    fresh UUID (no dedup). Bind the metered entity per workflow, then re-run. This is
    the fix for the retry-double-count: dedup is per-entity, not per-request. (The
    per-request correlation id is preserved separately in `meta.correlation_id` for
-   tracing.) **OPEN — owner: you/SDK, not the codemod:** the SDK wire mapping (FR-4
-   maps `entity_id → data.request_id`, read by moo-meter's request_id column, acute
-   threading, BFF lookups) must be revisited so the metered-entity value isn't
-   misinterpreted by those three consumers; and the usage↔cost sibling-pair join
-   requires both lanes to carry the SAME entity (the LLM-cost consolidation at
-   `call_llm_json` may carry a different entity than the per-action usage event).
+   tracing.) **Consolidated-cost caveat:** when a single cost is emitted ONCE at a
+   shared site but bills MANY usage events (a consolidated cost — see discovery's
+   cost-consolidation rule), that cost site's entity may differ from the per-action
+   usage entities. Choose `entity_id` deliberately so the dedup grain — and any
+   usage↔cost relationship you rely on downstream — still holds.
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
@@ -550,7 +549,7 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
 
 ### Phase 2c-render: Emit env-wiring, slugs, and deployment artifacts (DETERMINISTIC — run the driver, do NOT hand-author)
 
-**Why this exists** (added 2026-06-08 after the moo-arc dogfood caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
+**Why this exists** (added 2026-06-08 after a dogfood run caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
 
 Run the deterministic render driver — it enumerates every template referenced by `tasks.yaml`'s `env_wire_tasks` / `slugs_emit_tasks` and renders each to the customer repo:
 
