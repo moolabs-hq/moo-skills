@@ -234,6 +234,12 @@ def classify_call_site(source: str, lineno: int) -> ContextClassification:
     return classify_function(enclosing, imports=imports, has_main_guard=has_main)
 
 
+# NOTE: deterministic emit-insert placement (verbatim-dogfood N) moved to
+# shared/scripts/insertion_point.py — it handles all THREE supported languages
+# (python via ast, typescript/go via tree-sitter) and ships in cost-billing-shared
+# so both discovery and instrument import it without a cross-skill dependency.
+
+
 def classify_file(source: str) -> list[tuple[str, int, ContextClassification]]:
     """Classify every function in a file. Returns (name, lineno, classification)."""
     tree = ast.parse(source)

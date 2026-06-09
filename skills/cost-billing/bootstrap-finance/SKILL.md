@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-finance
 description: >-
-  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks 10-12 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes (SOC2/HIPAA/GDPR/FedRAMP), PII + PHI field blocklists, region(s) the customer routes to, environments to instrument, and multi-tenant shape (tenant model + tenant_id source). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
+  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks ~10 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes only (SOC2/HIPAA/GDPR/FedRAMP — the sensitive-data-category enumeration now lives at the CPO stage and field-path translation at the engineer stage), region(s) the customer routes to, environments to instrument, and multi-tenant shape (tenant model + tenant_id source). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
 license: MIT
 metadata:
   author: Moolabs
@@ -53,7 +53,7 @@ Persist each answer immediately to `.moolabs/chain/01-finance.draft.yaml`. Crash
 
 **Nothing upstream — finance is FIRST in the chain.** Phase 1 is just a sanity check that no stale `.moolabs/chain/` directory exists from a prior abandoned bootstrap. If one exists, ask: "Existing chain detected — start fresh, or `--refresh` keeps prior answers as defaults?"
 
-## Questions for this stage (~12 total)
+## Questions for this stage (~10 total)
 
 Reference structure — you ask these one at a time. Each can spawn 1-2 follow-up clarifying questions (also one at a time).
 
@@ -119,19 +119,23 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 ### Q6 — Compliance regimes
 > "Which compliance regimes does this customer / your platform need to honor? Pick all that apply: SOC2, HIPAA, GDPR, FedRAMP (which level), PCI-DSS (which level), CCPA, other? Each one triggers different downstream constraints (data residency, audit trail, PII handling)."
 
-### Q7 — PII field blocklist
-> "What fields in your handlers should NEVER be logged as span attributes by the Moolabs SDK? Examples: user emails, full prompt content, payment tokens. List specific field paths or regex patterns. I'll add these to the codemod's PII guard."
+> NOTE — the SENSITIVE-DATA enumeration that used to live here (PII/PHI field
+> blocklist, old Q7/Q8) has MOVED OUT of finance (fixed 2026-06-08 after a
+> dogfood run). The CFO owns the *regime* (above) — which laws bind us. But
+> *which of the product's data is sensitive* (debtor contact, payment, prompt
+> bodies) is product-domain knowledge → the **CPO stage** enumerates the
+> sensitive-data CATEGORIES (informed by the regimes you select here), and the
+> **engineer stage** translates those categories into concrete field paths/regex
+> against the real handlers. Finance neither knows the product's data model nor
+> the code's field names, so it captures neither.
 
-### Q8 — PHI field blocklist (if HIPAA was selected in Q6)
-> "Specifically PHI under HIPAA — which fields are protected? I'll make the codemod's PII guard stricter for these (refuses indirect references too, not just direct values)."
-
-### Q9 — Region(s)
+### Q7 — Region(s)
 > "Which Moolabs region(s) does this customer route through? `sk_use1_*` (US East 1), `sk_apse1_*` (Asia-Pacific SE 1), `sk_euw1_*` (EU West 1), other? Multi-region with primary + failover, or single-region?"
 
-### Q10 — Environments
+### Q8 — Environments
 > "How many environments are we instrumenting? Dev only? Dev + staging + prod? Per-environment quirks (different API keys, different LLM providers in test vs prod)?"
 
-### Q11 — Multi-tenant shape
+### Q9 — Multi-tenant shape
 > "Are your end-users isolated by tenant? Pick:
 > - Single-tenant (one customer's data only)
 > - Multi-tenant on the same DB with `tenant_id` column
@@ -141,7 +145,7 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 >
 > The codemod uses tenant identity for attribution — you decide the shape here so the engineer can wire it correctly."
 
-### Q12 — Tenant_id field + source
+### Q10 — Tenant_id field + source
 > "What's the field name that identifies a tenant in YOUR data model? Examples: `tenant_id`, `workspace_id`, `account_id`, `org_id`. And where does it come from on a request — JWT claim, subdomain, header, request body? (You can defer the exact technical source to the engineer if you're not sure — but the FIELD NAME is yours to set.)
 >
 > **Note**: whatever name you pick, downstream the codemod binds it to the envelope's `customer_id` slot — we don't track 'tenant' as a separate envelope field (that name collides with the Moolabs-internal term for 'the Moolabs customer'). Your field name stays your field name in source code; the wire-format envelope just has `customer_id`."
@@ -154,7 +158,7 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 Verify no stale `.moolabs/chain/` (or confirm `--refresh` / `--resume` intent).
 
 ### Phase 2 — Interactive Q&A
-Ask Q1 → Q12 one at a time. Save each answer to `.moolabs/chain/01-finance.draft.yaml`.
+Ask Q1 → Q10 one at a time. Save each answer to `.moolabs/chain/01-finance.draft.yaml`.
 
 ### Phase 3 — AI synthesizes draft
 Once all questions answered, generate the full structured `01-finance.draft.yaml` with the schema in `assets/01-finance.schema.yaml`.
@@ -163,8 +167,8 @@ Once all questions answered, generate the full structured `01-finance.draft.yaml
 Invoke `/cost-billing-adversarial-review --phase post-bootstrap-finance --target .moolabs/chain/01-finance.draft.yaml`. R-specific risks for this stage:
 - **Pricing-model contradiction** — does Q1 (type) actually fit what Q3 (units) describe? Customers often pick "Hybrid" then list pure-subscription units (no usage components).
 - **Source-of-truth ambiguity** — multiple authoritative sources without conflict-resolution rule.
-- **Compliance regime + PII blocklist mismatch** — HIPAA selected (Q6) but no PHI blocklist (Q8).
-- **Multi-tenant shape + tenant_id field gap** — Q11 says multi-tenant but Q12 left blank.
+- **Regime selected with no downstream owner** — a regime in Q6 (HIPAA/GDPR/PCI/CCPA) must be carried to the CPO stage so the CPO enumerates the sensitive-data categories it implies. Finance does NOT enumerate categories or field paths (that's CPO + engineer); flag only that the regime is recorded for handoff.
+- **Multi-tenant shape + tenant_id field gap** — Q9 says multi-tenant but Q10 left blank.
 - **Region + environment combinatorial blind spot** — multi-region + multi-env without explicit per-env region mapping.
 
 ### Phase 5 — Human reviews R findings + draft
@@ -255,9 +259,11 @@ pricing_model:
   per_customer_custom: { ... }
 
 compliance:
+  # Finance owns the REGIMES only (which laws bind us). The sensitive-data
+  # CATEGORIES they imply are enumerated at the CPO stage (02-cpo.yaml >
+  # sensitive_data.categories) and translated to field paths at the engineer
+  # stage (04-final > pii_field_blocklist). Finance captures neither.
   regimes: [SOC2, HIPAA, GDPR, ...]
-  pii_field_blocklist: []
-  phi_field_blocklist: []          # only if HIPAA
 
 deployment:
   regions: []
@@ -278,7 +284,7 @@ deployment:
 - **Never** install codegraph / npm tools / SDK packages.
 - **Never** invoke `/cost-billing-discovery` or any downstream skill — finance hands off, period.
 - **Never** auto-export the signed doc to email/Slack/Drive. The CUSTOMER chooses the channel. You print instructions; they send.
-- **Never** persist outside `.moolabs/chain/` unless the customer answered Q6/Q7 with a regime requiring external storage (FedRAMP-Moderate / HIPAA-strict) AND passed `--external-context-path=<path>`.
+- **Never** persist outside `.moolabs/chain/` unless the customer answered Q6 with a regime requiring external storage (FedRAMP-Moderate / HIPAA-strict) AND passed `--external-context-path=<path>`.
 
 ---
 

@@ -14,10 +14,11 @@
      sdk_pinned_version          — from Phase 1.5 snapshot (resolved tag; must be >= v0.3.0-rc1)
      telemetry.mode              — brownfield | greenfield
 #}
-"""Moolabs SDK client — module-level singleton for {{ service_slug }} billing emissions.
+"""Moolabs SDK client for {{ service_slug }}.
 
-Wired by /cost-billing-instrument codemod on {{ generated_at }} per the signed gates:
-{% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file }} (sha {{ h.sha256[:8] }})
+Module-level billing-emission singleton, wired by /cost-billing-instrument.
+Generated {{ generated_at }} per the signed gates:
+{% for h in signoff_chain_hashes %}  - {{ h.stage }}: {{ h.file.split('/')[-1] }} (sha {{ h.sha256[:8] }})
 {% endfor %}
 SDK version: {{ sdk_pinned_version | default("v0.3.0-rc1") }}  (unified-ingest ergonomic methods)
 
@@ -27,7 +28,8 @@ Three emission helpers mapping 1:1 to the v0.3.0 SDK methods:
   emit_event_safe(...)        -> client.events.ingest(...)   # sibling-pair, dual-lane
 
 tenant_id is intentionally absent from every helper signature — the server
-derives tenant identity from the API key (FR-3 in the SDK unified-ingest PRD).
+derives tenant identity from the API key (never pass tenant_id — the server
+derives it from the key).
 entity_id is the threading key for sibling-pair join downstream.
 
 Error handling is env-gated (single decision point in _handle_emit_err):
@@ -44,7 +46,7 @@ from __future__ import annotations
 import os
 import re
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 {# Phase 1.7 env-wire (NEW v0.3 env-routing migration):
    env_config.mode               — "modify" | "stub"
@@ -85,7 +87,7 @@ def _scrub_secrets(text: str) -> str:
     return _SECRET_TOKEN_RE.sub("[REDACTED]", text)
 
 {% if telemetry.mode == "brownfield" %}
-# Brownfield directive: {{ service_slug }} already has a live TracerProvider.
+# Brownfield directive: this service already has a live TracerProvider.
 # Do NOT register a second provider — get spans via
 # ``opentelemetry.trace.get_tracer(__name__)`` where needed.
 {% endif %}
@@ -109,8 +111,8 @@ def _resolve_api_key() -> str:
 
 @lru_cache(maxsize=1)
 def get_client() -> Moolabs:
-    """Return the singleton Moolabs SDK client (lru_cache = idempotent + thread-safe)."""
-    from moolabs import Moolabs  # noqa: PLC0415 — lazy so the module imports without the SDK installed
+    """Return the singleton Moolabs SDK client (cached; idempotent, thread-safe)."""
+    from moolabs import Moolabs  # noqa: PLC0415 (lazy; SDK optional at import time)
 
     return Moolabs(api_key=_resolve_api_key())
 
@@ -139,17 +141,17 @@ def emit_usage_event_safe(
     meter_slug: str,
     value: float,
     # Well-known top-level data.* keys (canonical wire shape).
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Wraps client.usage.ingest_event with the env-gated never-drop rail.
     Required: event_type, customer_id, entity_id, meter_slug, value (finite)."""
@@ -181,17 +183,17 @@ def emit_cost_event_safe(
     customer_id: str,
     entity_id: str,
     spans: list[dict],
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Wraps client.cost.ingest_event with the env-gated never-drop rail.
     Required: event_type, customer_id, entity_id, spans (each MUST carry a
@@ -222,22 +224,22 @@ def emit_event_safe(
     event_type: str,
     customer_id: str,
     entity_id: str,
-    meter_slug: Optional[str] = None,
-    value: Optional[float] = None,
-    spans: Optional[list[dict]] = None,
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    total_input_tokens: Optional[int] = None,
-    total_output_tokens: Optional[int] = None,
-    total_tokens: Optional[int] = None,
-    latency_ms: Optional[int] = None,
-    status: Optional[str] = None,
-    event_id: Optional[str] = None,
-    source: Optional[str] = None,
-    time: Optional[datetime] = None,
-    meta: Optional[dict] = None,
+    meter_slug: str | None = None,
+    value: float | None = None,
+    spans: list[dict] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    total_input_tokens: int | None = None,
+    total_output_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+    status: str | None = None,
+    event_id: str | None = None,
+    source: str | None = None,
+    time: datetime | None = None,
+    meta: dict | None = None,
 ) -> None:
-    """Wraps client.events.ingest (US-011, dual-lane). Use for sibling-pair
+    """Wraps client.events.ingest (dual-lane). Use for sibling-pair
     emission. Required: event_type, customer_id, entity_id + at least one of
     (meter_slug+value) or non-empty spans — the SDK raises ValueError on empty-
     lane synchronously."""
@@ -287,7 +289,7 @@ def _cost_fallback_fields(spans: list[dict], **kwargs: Any) -> dict:
     return fields
 
 
-def _event_fallback_fields(spans: Optional[list[dict]], **kwargs: Any) -> dict:
+def _event_fallback_fields(spans: list[dict] | None, **kwargs: Any) -> dict:
     fields = {
         "transport": "log_recovery_rail",
         "policy": "never_drop_event",

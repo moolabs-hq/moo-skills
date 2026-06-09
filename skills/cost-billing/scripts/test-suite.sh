@@ -182,6 +182,9 @@ entry_base = {
     "cost_kind":"llm-tokens","cost_micros_source":"resp.cm",
     "cost_workflow_ids":["s.llm"],"consumer_agent_source":'"agent"',
     "slugs_import_path": "app.services.moolabs.slugs_billing",
+    "helper_import_path": "app.services.moolabs_client",
+    "emission_guard": None,
+    "attribution_imports": [],
     "event_type_const": "EVENT_TYPE_COMPLETION_DELIVERED",
     "meter_slug_const": "METER_SLUG_CHECKOUT_RECOMMENDATION_DELIVERED",
     "feature_key_const": "FEATURE_KEY_RECOMMENDATION",
@@ -189,7 +192,7 @@ entry_base = {
     "provider_const": None,
 }
 sources = {"tenant_id":"req.state.tid","request_id":"req.state.rid","customer_id":"req.state.cid",
-           "consumer_agent":None,"feature_key":None}
+           "consumer_agent":None,"feature_key":None,"entity_id":"req.state.entity_id"}
 templates = ["python-fastapi.j2","python-django.j2","python-flask.j2",
              "typescript-express.j2","typescript-nestjs.j2","typescript-nextjs.j2"]
 patterns = ["sibling-pair","usage-only","cost-only"]
@@ -614,6 +617,7 @@ for tpl in templates:
         entry = {**entry_base, "pattern": pat}
         if tpl.startswith("typescript-"):
             entry["slugs_import_path"] = "@/services/moolabs/slugs_billing"
+            entry["helper_import_path"] = "@/services/moolabs-client"
         try:
             r = env.get_template(tpl).render(entry=entry, attribution_sources=sources)
         except Exception as e:

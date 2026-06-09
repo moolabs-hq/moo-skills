@@ -2,7 +2,7 @@
 
 **Stage 1 of 4 in the bootstrap chain. Runs on the CFO's machine.**
 
-Interactively walks the CFO through pricing model, billable units (with classification — customer-facing vs vendor-COGS vs sibling-pair), fair-usage thresholds, compliance regimes, PII blocklists, regions, and multi-tenant shape. Adversarial-reviews the draft before signoff. Outputs `01-finance.signed.yaml`.
+Interactively walks the CFO through pricing model, billable units (with classification — customer-facing vs vendor-COGS vs sibling-pair), fair-usage thresholds, compliance regimes (regimes only — the sensitive-data categories they imply are enumerated at the CPO stage, field paths at the engineer stage), regions, and multi-tenant shape. Adversarial-reviews the draft before signoff. Outputs `01-finance.signed.yaml`.
 
 ## Trigger
 

@@ -135,5 +135,39 @@ class CatalogMatch(unittest.TestCase):
         self.assertIn("anthropic", vendors)
 
 
+@unittest.skipUnless(_HAVE_YAML, "PyYAML not installed")
+class ScanRepoRobustness(unittest.TestCase):
+    """Dogfood 2026-06-08 finding C: scan_repo crashed on a real monorepo —
+    a `.direnv` (Nix) tree contains DIRECTORIES named like `*.py`, which hit
+    read_text() with IsADirectoryError."""
+
+    @classmethod
+    def setUpClass(cls):
+        catalog = yaml.safe_load(_CATALOG_PATH.read_text(encoding="utf-8"))
+        cls.ops = cm.load_operations(catalog)
+
+    def test_dir_named_dot_py_does_not_crash(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            r = Path(t)
+            (r / "real.py").write_text("import openai\nopenai.chat.completions.create()\n")
+            (r / "gen_cs_glue_version.py").mkdir()        # a DIRECTORY named *.py
+            sites = cm.scan_repo(r, self.ops)             # must not raise
+            self.assertTrue(any(s.file == "real.py" for s in sites))
+
+    def test_direnv_and_terraform_dirs_are_skipped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            r = Path(t)
+            for d in (".direnv", ".terraform"):
+                (r / d).mkdir()
+                # a syntactically-broken .py under an ignored dir must be skipped,
+                # not parsed (would otherwise raise).
+                (r / d / "broken.py").write_text("def (")
+            (r / "real.py").write_text("import openai\nopenai.chat.completions.create()\n")
+            sites = cm.scan_repo(r, self.ops)            # must not raise
+            self.assertEqual([s.file for s in sites], ["real.py"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

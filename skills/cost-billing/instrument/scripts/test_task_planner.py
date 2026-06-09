@@ -291,6 +291,40 @@ class BuildTasksWiresSlugConstants(unittest.TestCase):
             entry = tasks[0].inserts[0].entry
             self.assertIsNone(entry["event_type_const"])
 
+    def test_emit_tasks_yaml_serializes_none_const_as_yaml_null(self):
+        """F (dogfood 2026-06-08): a None const was written as the YAML bareword
+        `None`, which safe_load reloads as the STRING "None" — truthy in the
+        template's `{% if entry.event_type_const %}` guard, producing
+        `from app.slugs import None` (SyntaxError). None consts MUST round-trip to
+        Python None (YAML `null`) so the guard stays falsy and the inline-literal
+        fallback fires."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        usage_inv = {"entries": [{
+            "file": "app/services/seat.py", "line": 10,
+            "workflow_id": "seat.assigned", "event_type": "seat.assigned",
+            "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=None)
+        self.assertTrue(tasks, "fastapi+python should yield a task")
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "tasks.yaml"
+            tp.emit_tasks_yaml(tasks, dest)
+            text = dest.read_text()
+            # raw serialization must NOT contain the Python bareword for a const
+            self.assertNotIn("_const: None", text)
+            reloaded = yaml.safe_load(text)
+            entry = reloaded["tasks"][0]["inserts"][0]["entry"]
+            for k in ("event_type_const", "meter_slug_const", "provider_const"):
+                self.assertIsNone(entry[k], f"{k} must reload as None, not the string 'None'")
+
     def test_slugs_import_path_for_typescript_uses_at_aliased_path(self):
         self.assertEqual(
             tp._slugs_import_path_for("typescript", "billing"),
@@ -770,6 +804,371 @@ class EmitTasksYamlSlugsEmitPath(unittest.TestCase):
             tp.emit_tasks_yaml([], out, slugs_emit_tasks=sets)
             parsed = yaml.safe_load(out.read_text())
             self.assertIsNone(parsed["slugs_emit_tasks"][0]["slugs_emit_path"])
+
+
+class AttributionKeyContract(unittest.TestCase):
+    """Sibling-of-E (found via the e2e render check): the callsite templates
+    reference attribution_sources.{customer_id, request_id, consumer_agent}
+    directly; under StrictUndefined an ABSENT key raises. The producer must
+    guarantee all three keys exist (None for absent), regardless of what the
+    attribution bindings populated."""
+
+    def test_resolve_sources_always_has_canonical_keys(self):
+        # defaults omit consumer_agent entirely
+        out = tp._resolve_sources_for_file(
+            "app/x.py", {"customer_id": "req.cid", "request_id": "req.rid"}, [])
+        self.assertIn("consumer_agent", out)
+        self.assertIsNone(out["consumer_agent"])
+        self.assertEqual(out["customer_id"], "req.cid")
+
+    def test_emitted_attribution_sources_includes_consumer_agent(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        usage_inv = {"entries": [{"file": "app/s.py", "line": 1,
+                                  "workflow_id": "x.y", "event_type": "x.y",
+                                  "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "c", "request_id": "r"},  # no consumer_agent
+            attribution_overrides=[], slug_inventory=None)
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "tasks.yaml"
+            tp.emit_tasks_yaml(tasks, dest)
+            reloaded = yaml.safe_load(dest.read_text())
+        srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
+        self.assertIn("consumer_agent", srcs)
+        self.assertIsNone(srcs["consumer_agent"])
+
+    def test_binding_requires_import_threads_to_attribution_imports(self):
+        # Dogfood ruff F821: a binding's requires_import must reach the insert so
+        # the codemod emits it (else the rendered insert NameErrors on the symbol).
+        tasks = tp.build_tasks(
+            {"entries": []},
+            {"entries": [{"file": "app/s.py", "line": 1, "workflow_id": "x.y",
+                          "event_type": "x.y", "product_slug": "billing"}]},
+            {"edges": []}, {"capabilities": {}},
+            {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}},
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id",
+                                  "request_id": "get_correlation_id()"},
+            attribution_overrides=[], slug_inventory=None,
+            attribution_import_defaults={
+                "request_id": "from app.obs import get_correlation_id",
+                # an import for a binding whose source is NOT used must be dropped:
+                "consumer_agent": "from app.unused import nope"})
+        imports = tasks[0].inserts[0].entry["attribution_imports"]
+        self.assertEqual(imports, ["from app.obs import get_correlation_id"])
+
+    def test_attribution_imports_empty_when_no_requires_import(self):
+        tasks = tp.build_tasks(
+            {"entries": []},
+            {"entries": [{"file": "app/s.py", "line": 1, "workflow_id": "x.y",
+                          "event_type": "x.y", "product_slug": "billing"}]},
+            {"edges": []}, {"capabilities": {}},
+            {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}},
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+            attribution_overrides=[], slug_inventory=None)
+        self.assertEqual(tasks[0].inserts[0].entry["attribution_imports"], [])
+
+
+class DerivationCoercion(unittest.TestCase):
+    """H (dogfood 2026-06-08): refund_unit.derivation must be a numeric scalar
+    (rendered as `value=<derivation>`); prose must be coerced + preserved."""
+
+    def test_prose_derivation_coerced_to_leading_scalar(self):
+        out = tp._coerce_derivation(
+            {"unit": "completion", "derivation": "1 apply_remittance completion (post-success)"})
+        self.assertEqual(out["derivation"], 1)
+        self.assertEqual(out["derivation_note"],
+                         "1 apply_remittance completion (post-success)")
+
+    def test_numeric_derivation_unchanged_no_note(self):
+        out = tp._coerce_derivation({"unit": "completion", "derivation": 3})
+        self.assertEqual(out["derivation"], 3)
+        self.assertNotIn("derivation_note", out)
+
+    def test_string_numeric_derivation_no_redundant_note(self):
+        out = tp._coerce_derivation({"unit": "x", "derivation": "1"})
+        self.assertEqual(out["derivation"], 1)
+        self.assertNotIn("derivation_note", out)  # "1" == str(1) → no note
+
+    def test_non_numeric_prose_defaults_to_one(self):
+        out = tp._coerce_derivation({"unit": "x", "derivation": "per session"})
+        self.assertEqual(out["derivation"], 1)
+        self.assertEqual(out["derivation_note"], "per session")
+        self.assertTrue(out["derivation_needs_review"])
+
+    def test_runtime_expression_emitted_verbatim(self):
+        # round-5: derivation is a runtime EXPRESSION (usage-events schema); a valid
+        # expression MUST emit verbatim into value=<expr>, NOT collapse to 1.
+        for expr in ("response.usage.completion_tokens", "len(text.split())",
+                     "req.body.tokens"):
+            out = tp._coerce_derivation({"unit": "x", "derivation": expr})
+            self.assertEqual(out["derivation"], expr, f"{expr} must stay verbatim")
+            self.assertNotIn("derivation_note", out)
+            self.assertNotIn("derivation_needs_review", out)
+
+    def test_prose_is_flagged_for_review(self):
+        out = tp._coerce_derivation(
+            {"unit": "x", "derivation": "1 apply_remittance completion"})
+        self.assertEqual(out["derivation"], 1)
+        self.assertTrue(out["derivation_needs_review"])
+
+    def test_build_tasks_coerces_prose_derivation(self):
+        usage_inv = {"entries": [{
+            "file": "app/services/seat.py", "line": 10,
+            "workflow_id": "seat.assigned", "event_type": "seat.assigned",
+            "product_slug": "billing",
+            "refund_unit": {"unit": "completion", "derivation": "1 _send_sms() completion"}}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=None)
+        self.assertTrue(tasks)
+        ru = tasks[0].inserts[0].entry["refund_unit"]
+        self.assertEqual(ru["derivation"], 1)
+        self.assertEqual(ru["derivation_note"], "1 _send_sms() completion")
+
+
+class CostKindAndValueMissing(unittest.TestCase):
+    """G (dogfood 2026-06-08): template reads entry.cost_kind (inventories may
+    name it cost_dimension); a cost-bearing entry with no cost value source must
+    be flagged loudly."""
+
+    def _cost_only_inv(self, **entry_extra):
+        base = {"file": "app/llm.py", "line": 5,
+                "workflow_id": "arc.shared.llmport-call",
+                "event_type": "arc.shared.llmport-call",
+                "classification": "cost-only", "product_slug": "billing"}
+        base.update(entry_extra)
+        return {"entries": [base]}
+
+    def _build(self, cost_inv):
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        return tp.build_tasks(
+            cost_inv, {"entries": []}, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=None)
+
+    def test_cost_dimension_mapped_to_cost_kind(self):
+        tasks = self._build(self._cost_only_inv(
+            cost_dimension="llm_tokens", cost_micros_source="resp.cm"))
+        self.assertTrue(tasks)
+        self.assertEqual(tasks[0].inserts[0].entry["cost_kind"], "llm_tokens")
+
+    def test_explicit_cost_kind_preferred_over_dimension(self):
+        tasks = self._build(self._cost_only_inv(
+            cost_kind="gpu-seconds", cost_dimension="llm_tokens",
+            cost_micros_source="resp.cm"))
+        self.assertEqual(tasks[0].inserts[0].entry["cost_kind"], "gpu-seconds")
+
+    def test_cost_bearing_without_value_source_flagged(self):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            tasks = self._build(self._cost_only_inv(cost_dimension="llm_tokens"))
+        self.assertTrue(tasks[0].inserts[0].entry["cost_value_missing"])
+        self.assertIn("cost_micros_source", buf.getvalue())  # loud stderr warning
+
+    def test_cost_bearing_with_value_source_not_flagged(self):
+        tasks = self._build(self._cost_only_inv(
+            cost_dimension="llm_tokens", cost_micros_source="resp.cm"))
+        self.assertFalse(tasks[0].inserts[0].entry["cost_value_missing"])
+
+    def test_usage_only_never_flagged(self):
+        usage_inv = {"entries": [{"file": "app/s.py", "line": 1,
+                                  "workflow_id": "x.y", "event_type": "x.y",
+                                  "product_slug": "billing"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}},
+            signed, {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "x", "request_id": "y"},
+            attribution_overrides=[], slug_inventory=None)
+        self.assertFalse(tasks[0].inserts[0].entry["cost_value_missing"])
+
+
+class EmitTasksYamlEscaping(unittest.TestCase):
+    """round-5 CRITICAL: the main tasks block emitted quote-bearing string values
+    (helper_import, attribution bindings) WITHOUT escaping, so a TypeScript service
+    (helper_import = `import {...} from "@/services/moolabs-client";`) produced a
+    tasks.yaml that yaml.safe_load couldn't parse at all."""
+
+    def _emit_reload(self, language, framework, attribution_defaults):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        usage_inv = {"entries": [{"file": "src/x", "line": 5,
+                                  "workflow_id": "a.b.c", "event_type": "a.b",
+                                  "product_slug": "p"}]}
+        signed = {"service_slug": "svc",
+                  "repo": {"languages": [language], "frameworks": [framework]}}
+        tasks = tp.build_tasks(
+            {"entries": []}, usage_inv, {"edges": []}, {"capabilities": {}}, signed,
+            {"language": language, "framework": framework},
+            attribution_defaults=attribution_defaults, attribution_overrides=[],
+            slug_inventory=None)
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "tasks.yaml"
+            tp.emit_tasks_yaml(tasks, dest)
+            text = dest.read_text()
+            return yaml.safe_load(text)  # raises ScannerError if unescaped
+
+    def test_typescript_tasks_yaml_parses(self):
+        # TS helper_import carries literal double-quotes.
+        reloaded = self._emit_reload("typescript", "express",
+                                     {"customer_id": "req.user.id", "request_id": "r"})
+        hi = reloaded["tasks"][0]["helper_import"]
+        self.assertIn("from", hi)
+        self.assertIn('"@/services/moolabs-client"', hi)  # quotes survived intact
+
+    def test_quote_bearing_attribution_binding_parses(self):
+        reloaded = self._emit_reload(
+            "python", "fastapi",
+            {"customer_id": 'req.headers["x-customer"]', "request_id": "r"})
+        srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
+        self.assertEqual(srcs["customer_id"], 'req.headers["x-customer"]')
+
+    def test_mixed_quote_binding_parses(self):
+        # round-6 CRITICAL: a binding with BOTH quote styles broke repr-based
+        # _yaml_scalar (it emitted a single-quoted Python literal with \' that YAML
+        # rejects). The double-quoted serializer handles it.
+        reloaded = self._emit_reload(
+            "python", "fastapi",
+            {"customer_id": 'request.headers.get(\'X\', "")', "request_id": "r"})
+        srcs = reloaded["tasks"][0]["inserts"][0]["attribution_sources"]
+        self.assertEqual(srcs["customer_id"], 'request.headers.get(\'X\', "")')
+
+    def test_yaml_scalar_roundtrips_all_special_chars(self):
+        # _yaml_scalar is now the SINGLE emit serializer — it must round-trip every
+        # special char through yaml.safe_load (round-6 root fix).
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for v in ('plain', "a'b", 'a"b', 'a\'"b', 'l1\nl2', 'a\\b',
+                  'svc: prod', 'a #c', '', '   ', '@alias'):
+            with self.subTest(value=v):
+                tok = tp._yaml_scalar(v)
+                self.assertEqual(yaml.safe_load(f"k: {tok}")["k"], v)
+        # non-strings
+        self.assertEqual(tp._yaml_scalar(None), "null")
+        self.assertEqual(tp._yaml_scalar(True), "true")
+        self.assertEqual(tp._yaml_scalar(False), "false")
+        self.assertEqual(tp._yaml_scalar(3), "3")
+
+
+class HelperImportDerivation(unittest.TestCase):
+    """P0 portability: the callsite helper-module import must be a SIBLING basename
+    swap on the stub anchor (so it resolves wherever the helper is emitted), not a
+    hardcoded app.services.moolabs_client."""
+
+    def test_python_derives_from_anchor_sibling(self):
+        self.assertEqual(
+            tp._helper_import_for_entry("python", ("x/src/mypkg/services/moolabs_settings.py",
+                                                   "mypkg.services.moolabs_settings")),
+            "mypkg.services.moolabs_client")
+        # bare module anchor -> bare moolabs_client
+        self.assertEqual(
+            tp._helper_import_for_entry("python", ("app/config.py", "config")),
+            "moolabs_client")
+
+    def test_no_anchor_falls_back_to_legacy(self):
+        self.assertEqual(tp._helper_import_for_entry("python", None),
+                         "app.services.moolabs_client")
+
+    def test_typescript_uses_layout_independent_alias(self):
+        # TS `@/` alias is layout-independent — not the leak; always the alias.
+        self.assertEqual(
+            tp._helper_import_for_entry("typescript", ("src/x/moolabs-settings.ts", "@/x/moolabs-settings")),
+            "@/services/moolabs-client")
+
+
+class SlugsEmitScoping(unittest.TestCase):
+    """I2: build_slugs_emit_tasks is org-wide; a --service run leaked slugs_acute /
+    slugs_bff / slugs_meter into a moo-arc run that only imports slugs_arc. Scope to
+    the products the service's entries actually use."""
+
+    def _inv(self):
+        return {"products": [
+            {"product_slug": p, "constants": {"EVENT_TYPE": [], "METER_SLUG": [],
+                                              "FEATURE_KEY": [], "PROVIDER": [], "SPAN_TYPE": []}}
+            for p in ("arc", "acute", "bff", "meter")]}
+
+    def test_scopes_to_used_products_leak_gone(self):
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", None,
+                                          used_products={"arc"})
+        slugs = {t.product_slug for t in tasks}
+        self.assertEqual(slugs, {"arc"})
+        for leaked in ("acute", "bff", "meter"):
+            self.assertNotIn(leaked, slugs)   # the cross-product leak the review found
+
+    def test_no_used_products_emits_all_backcompat(self):
+        # None (single-service / unresolved product_slug) -> emit all, unchanged.
+        tasks = tp.build_slugs_emit_tasks(self._inv(), "python", None, used_products=None)
+        self.assertEqual({t.product_slug for t in tasks}, {"arc", "acute", "bff", "meter"})
+
+
+class ServiceScoping(unittest.TestCase):
+    """Verbatim-dogfood finding: the cost/usage inventories are ORG-WIDE, but
+    task_planner runs per-service. Without scoping, a --service run emits a task
+    for every service's files AND stamps this service's language/framework + slugs
+    onto them. build_tasks filters file_buckets to the roots the signed doc
+    declares under integration.services[].root."""
+
+    def _inv(self):
+        cost = {"entries": []}
+        usage = {"entries": [
+            {"file": "services/moo-arc/app/a.py", "line": 1, "workflow_id": "arc.x",
+             "event_type": "arc.x", "product_slug": "arc"},
+            {"file": "services/other-svc/app/b.py", "line": 1, "workflow_id": "other.y",
+             "event_type": "other.y", "product_slug": "other"},
+        ]}
+        return cost, usage
+
+    def _build(self, signed):
+        cost, usage = self._inv()
+        return tp.build_tasks(
+            cost, usage, {"edges": []}, {"capabilities": {}}, signed,
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+            attribution_overrides=[], slug_inventory=None)
+
+    def test_filters_to_declared_service_root(self):
+        tasks = self._build({"service_slug": "moo-arc",
+                             "integration": {"services": [{"root": "services/moo-arc"}]},
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        files = {t.file for t in tasks}
+        self.assertEqual(files, {"services/moo-arc/app/a.py"})
+        self.assertNotIn("services/other-svc/app/b.py", files)
+
+    def test_no_declared_services_keeps_all_files_backcompat(self):
+        # Single-service / whole-repo runs (no integration.services) are unaffected.
+        tasks = self._build({"service_slug": "moo-arc",
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        files = {t.file for t in tasks}
+        self.assertEqual(files, {"services/moo-arc/app/a.py", "services/other-svc/app/b.py"})
+
+    def test_root_prefix_does_not_match_sibling(self):
+        # "services/moo" must NOT match "services/moo-arc/..." — boundary-correct.
+        tasks = self._build({"service_slug": "moo",
+                             "integration": {"services": [{"root": "services/moo"}]},
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        self.assertEqual(tasks, [])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 ---
 name: cost-billing-instrument
 description: >-
-  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires usage and cost ingest events into customer code via the Moolabs SDK v0.3.0-rc1 unified-ingest ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`), based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency anchors derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js; Go P0 — adapter in progress), and PII guards. Implements three patterns — sibling-pair (default, single `emit_event_safe` call), usage-only, cost-only. Error handling is env-gated via `SDK_DEVELOPMENT`: strict throw in dev, never-drop structured-log recovery rail in prod. Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
+  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires usage and cost ingest events into customer code via the Moolabs SDK v0.3.0-rc1 unified-ingest ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`), based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency anchors derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js; Go P0 — adapter in progress), and PII guards. Implements three patterns — sibling-pair (default, single `emit_event_safe` call), usage-only, cost-only. Error handling is env-gated via `SDK_DEVELOPMENT`: strict throw in dev, never-drop structured-log recovery rail in prod. Default insert mode is BLOCKING (the PR documents ~35ms latency). Only runs after all three role signoffs + the holistic adversarial-review verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls".
 license: MIT
 metadata:
   author: Moolabs
@@ -15,7 +15,7 @@ metadata:
     - cost-billing-adversarial-review   # holistic gate required
 ---
 
-# /cost-billing-instrument — Skill 2: Codemod (the framework's core deliverable)
+# /cost-billing-instrument — Codemod (the framework's core deliverable)
 
 You are an expert codemod author who wires Moolabs SDK calls into customer code based on confirmed inventories. **You are the entire framework's point.** Every upstream skill exists to produce a correct input to you. Discovery is a means; this codemod is the end.
 
@@ -62,7 +62,7 @@ See `cost-billing-shared/operating-principles.md`. Codemod-specific manifestatio
 ## Read first (shared/)
 
 - `sdk-surface-reference.md` — **load this every time.** It carries the verified v0.3.0-rc1 call shapes (`client.usage.ingest_event` singular for usage, `client.cost.ingest_event` for cost, `client.events.ingest` for sibling-pair, what NOT to call).
-- `v1-decisions-log.md` — your defaults come from here (Option B blocking insert, Python+TS v1, coverage-first).
+- `v1-decisions-log.md` — your defaults come from here (blocking insert, Python+TS v1, coverage-first).
 - `anchor-taxonomy.md` — the three patterns (sibling-pair / usage-only / cost-only).
 
 ## Refuse-to-run preconditions
@@ -177,7 +177,7 @@ warnings:
 1. **The SDK evolves between curation and customer runs.** Method names, namespace structure, even the import name can change. A static reference rots silently.
 2. **New capabilities should not require a new codemod release.** When the unified SDK adds a new lane (e.g. a future `client.span_ingest.*` for OTLP-format spans), customers re-running the codemod against the new snapshot will surface the addition automatically. Existing lanes (`usage`, `cost`, `events`) keep working without a skill update.
 3. **The snapshot is auditable customer-context.** Lives at `.moolabs/customer-context/sdk-surface-snapshot.yaml` alongside the other signed Phase 4 artifacts; travels with the PR; future codemod re-runs can diff against it.
-4. **Refuse-to-emit on contract break.** If any of the three v0.3 ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`) is missing from the snapshot, the codemod stops before writing — `unified_ingest_present=false` surfaces as a CRITICAL finding for Skill R, rather than producing a PR that fails at customer runtime.
+4. **Refuse-to-emit on contract break.** If any of the three v0.3 ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`) is missing from the snapshot, the codemod stops before writing — `unified_ingest_present=false` surfaces as a CRITICAL finding for the adversarial review, rather than producing a PR that fails at customer runtime.
 
 **Steps:**
 
@@ -196,7 +196,7 @@ warnings:
    ```yaml
    # Real output, verified against moolabs-py@v0.3.0-rc1 (re-verified 2026-06-05).
    # The actual SDK exposes 11 FLAT capability namespaces (CAPABILITY_MAP-routed)
-   # PLUS one special `client.events` accessor (US-008 — @property on Moolabs,
+   # PLUS one special `client.events` accessor (a @property on the Moolabs client,
    # not in CAPABILITY_MAP). The snapshot is ground truth.
    generated_at: 2026-06-05T12:30:00Z
    sdk_versions:
@@ -208,7 +208,7 @@ warnings:
        - path: "client.cost"
          methods: [ingest_event, ingest_events_batch, ingest_sdk_spans, submit_adjustment]
        - path: "client.events"
-         methods: [ingest]                                       # US-008 — sibling-pair lane
+         methods: [ingest]                                       # sibling-pair lane
        - path: "client.wallets"
          methods: [allocate_credits, create_wallet, ...]
        # ... remaining flat capabilities (customers, catalog, subscriptions, ...)
@@ -221,14 +221,14 @@ warnings:
      cost_method_path:          "client.cost.ingest_event"
      events_method_path:        "client.events.ingest"
    contract_drift:
-     # populated when expected methods are MISSING — codemod aborts; surfaced to Skill R
+     # populated when expected methods are MISSING — codemod aborts; surfaced to the adversarial review
      missing_expected_methods: []
      renamed_methods: []
    ```
 
 5. **Contract check (gates Phase 2):**
    - `capabilities.unified_ingest_present` MUST be true. If any of the three ergonomic methods is missing the v0.3 helpers cannot render — there is no fallback transport. Abort with a clear error naming the missing lane(s); user can pin to a v0.3+ SDK tag and re-run.
-   - `contract_drift.missing_expected_methods` MUST be empty. Any entry → abort + surface to Skill R.
+   - `contract_drift.missing_expected_methods` MUST be empty. Any entry → abort + surface to the adversarial review.
    - `contract_drift.renamed_methods` MAY have entries → warn but proceed; emit notes into the PR description so the customer reviews them.
 
 The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-site inserts). Neither phase reads `sdk-surface-reference.md` directly anymore; that doc is now a fallback hint for human reviewers, not a runtime input.
@@ -279,6 +279,15 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
        source: null                  # explicit null → codemod skips this attribute everywhere
        confidence: n_a
        confirmed_by: kritivas.shukla@moolabs.com
+     entity_id:
+       # THE METERED ENTITY — the id of the thing the event bills FOR (the document,
+       # email, account, render job…), NOT the per-request correlation id. It is the
+       # dedup grain + the sibling-pair join key: a retry of the SAME logical event
+       # must produce the SAME entity_id, or it double-counts. Bind it PER WORKFLOW
+       # (it differs per event); usually an override, rarely a service-wide default.
+       source: "result.email_id"
+       confidence: confirmed
+       confirmed_by: kritivas.shukla@moolabs.com
    overrides:
      - file: services/billing-api/app/api/v1/webhooks/router.py
        reason: "webhook handler — bypasses TenantMiddleware; signature-verified path"
@@ -290,6 +299,20 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    ```
 
 5. **Refuse to proceed if confirmations are missing.** Phase 2c reads `attribution-bindings.yaml` and aborts if any key the templates need is neither confirmed nor explicitly marked `source: null`. Fail loud — never silently substitute.
+
+   **`entity_id` is REQUIRED for billable events — unbound = refuse, never fall back.**
+   `entity_id` is the metered entity (above). When it is UNBOUND for a billable
+   callsite, the codemod does NOT emit a billing call — the template renders a loud
+   `MOOLABS BILLING NOT EMITTED … entity_id is UNBOUND` comment instead. It must
+   NOT fall back to the correlation id (per-request → retries double-count) or a
+   fresh UUID (no dedup). Bind the metered entity per workflow, then re-run. This is
+   the fix for the retry-double-count: dedup is per-entity, not per-request. (The
+   per-request correlation id is preserved separately in `meta.correlation_id` for
+   tracing.) **Consolidated-cost caveat:** when a single cost is emitted ONCE at a
+   shared site but bills MANY usage events (a consolidated cost — see discovery's
+   cost-consolidation rule), that cost site's entity may differ from the per-action
+   usage entities. Choose `entity_id` deliberately so the dedup grain — and any
+   usage↔cost relationship you rely on downstream — still holds.
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
@@ -445,12 +468,22 @@ regenerates them.
 4. **The signoff chain is auditable from inside the code.** The helper's docstring header lists the 5 signed-stage sha256 hashes (cfo/pm/cfo/engineer/pm) — when an engineer reads the file 6 months later, the provenance is `head -20 services/<svc>/.../moolabs_client.py`, not "go ask git blame".
 5. **Brownfield directive lives next to the code that would violate it.** If `telemetry.mode == brownfield`, the helper's top-of-file comment says "do NOT register a second TracerProvider" — the next person editing this file sees it.
 
-**Where to write the helper:**
+**Where to write the helper — it MUST be a sibling of the stub/config module so
+the callsite import resolves.** The callsite templates import the helper via
+`entry.helper_import_path`, which the planner derives as a basename swap on the
+service's stub/config anchor (e.g. stub `mypkg.services.moolabs_settings` →
+helper `mypkg.services.moolabs_client`). So emit the helper file at the SAME
+directory as that anchor module, basename `moolabs_client` — NOT a hardcoded
+`app/services/`. The table below is the `app`-rooted EXAMPLE; for a `src/<pkg>/`
+or otherwise-rooted repo, the helper goes next to the stub (e.g.
+`services/svc/src/mypkg/services/moolabs_client.py`), matching
+`entry.helper_import_path`. (Portability P0: hardcoding `app.services.moolabs_client`
+only resolved for an `app`-rooted repo; a `src/<pkg>/` customer got ModuleNotFoundError.)
 
-| Language | Path (relative to service root) |
+| Language | Path (relative to service root) — `app`-rooted EXAMPLE |
 |---|---|
-| Python | `app/services/moolabs_client.py` (or `<package>/services/moolabs_client.py` matching service's existing module layout) |
-| TypeScript | `src/services/moolabs-client.ts` |
+| Python | `<anchor-dir>/moolabs_client.py` (example: `app/services/moolabs_client.py`) |
+| TypeScript | `src/services/moolabs-client.ts` (resolved via the `@/` alias — layout-independent) |
 | Go (P0) | `internal/moolabsclient/client.go` |
 
 **What goes in the helper (generated from `assets/codemod-templates/<lang>-moolabs-client.<ext>.j2`):**
@@ -461,7 +494,7 @@ regenerates them.
 | `get_client()` | Singleton `Moolabs(...)` instance; `lru_cache(maxsize=1)` | First-call lazy; never raises |
 | `emit_usage_event_safe(args)` | Wraps `client.usage.ingest_event(args)`. Per-call-site templates call this — they NEVER instantiate `Moolabs()` inline or touch the SDK namespaces directly. | Env-gated by `SDK_DEVELOPMENT`: dev mode re-raises so the developer sees the failure at the call site; prod mode logs a structured `moolabs.usage.event` line via the recovery rail. |
 | `emit_cost_event_safe(args)` | Wraps `client.cost.ingest_event(args)`. Cost-only sibling of `emit_usage_event_safe`. | Same env-gated rail. Per-span cost breakdowns travel inside `args.spans`. |
-| `emit_event_safe(args)` | Wraps `client.events.ingest(args)` — the sibling-pair lane that emits BOTH usage and cost in one envelope (US-008). Called from the sibling-pair callsite template. | Same env-gated rail. |
+| `emit_event_safe(args)` | Wraps `client.events.ingest(args)` — the sibling-pair lane that emits BOTH usage and cost in one envelope. Called from the sibling-pair callsite template. | Same env-gated rail. |
 
 **Why a single env-gated rail** — v0.2 helpers branched at customer-render time between a direct SDK call and an OTel-span fallback, gated by a `cost_event_direct_emit` capability flag. That design silently dropped cost data whenever the tracer wasn't sampling the path (head-sampling at 10% drops 90%; background workers without trace context drop all of theirs; dev/CI without OTel drops everything). v0.3.0-rc1 moves the never-drop guarantee inside the SDK: the in-process buffer + F2 fallback chain + structured-log rail handle transport failure without involving the customer's tracer at all. The helper's only job is to call `client.X.ingest_event(args)` (or `client.events.ingest(args)` for sibling-pair) and log via the recovery rail when the SDK call raises. Phase 1.5's `unified_ingest_present` check already refused-to-run if any lane's ergonomic method is missing — there is no template-time branching path to take.
 
@@ -492,10 +525,14 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
     events_method_path:       "client.events.ingest"
   inserts:
     - line: 729
-      pattern: sibling-pair
-      entry:                       # the inventory entry — JUST this one
+      pattern: sibling-pair        # insert-level — for the subagent's routing
+      entry:                       # the inventory entry — JUST this one. The
+                                   # planner mirrors `pattern` IN HERE too (the
+                                   # template branches on entry.pattern); render
+                                   # with THIS block, do not hand-merge anything.
+        pattern: sibling-pair
         workflow_id: messaging.email.sent
-        event_type: completion.delivered
+        event_type: completion.delivered    # absent on cost entries (cost schema has no event_type) — templates fall back to workflow_id
         idempotency_anchor: { handler: compose_email, path_param: customer_id, confidence: 0.95 }
         refund_unit: { unit: email, derivation: "1" }
         cost_kind: llm-tokens
@@ -512,7 +549,7 @@ Run `scripts/task_planner.py` against the inventories + the Phase 1.5 snapshot. 
 
 ### Phase 2c-render: Emit env-wiring, slugs, and deployment artifacts (DETERMINISTIC — run the driver, do NOT hand-author)
 
-**Why this exists** (added 2026-06-08 after the moo-arc dogfood caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
+**Why this exists** (added 2026-06-08 after a dogfood run caught a template-bypass): the suite ships Jinja templates for the stub Settings module, the per-product slugs modules, and the deployment-surface stubs — but the execution step used to **hand-author** these files in prose, which produces equivalent output by luck, not by the skill. Renaming a slug or fixing a template silently stopped propagating.
 
 Run the deterministic render driver — it enumerates every template referenced by `tasks.yaml`'s `env_wire_tasks` / `slugs_emit_tasks` and renders each to the customer repo:
 
@@ -549,16 +586,118 @@ For each task in `tasks.yaml`, fire a subagent via the `Agent` tool with `subage
 You are instrumenting ONE file. Your job:
 
 1. Read the file at <task.file>.
-2. For each insert in <task.inserts>, render the helper call by substituting
-   the inventory entry into <task.template>.
-3. Apply each insert immediately AFTER the source line specified in the
-   inventory entry's idempotency_anchor.handler return path. Preserve all
-   existing imports + business logic.
-4. Add the helper import at the top of the file if not already present:
-   <task.helper_import>
-5. Run `python -m py_compile <file>` (or the language equivalent). If it
-   fails, FIX the rendered output — do NOT proceed with broken Python.
-6. Stage + commit the file with message: `feat(moolabs): instrument
+2. For each insert in <task.inserts>, render <task.template> with EXACTLY this
+   context — nothing added, nothing merged:
+     - `entry`              = the insert's `entry` block verbatim. Every key the
+                              template references is PRESENT (value-or-null), so a
+                              StrictUndefined render never hits an absent key:
+                              `pattern`, `workflow_id`, `event_type` (null on cost
+                              entries — the cost schema has none; templates fall
+                              back to workflow_id), the `*_const` slug names (or
+                              null), `slugs_import_path`, `cost_kind` /
+                              `cost_micros_source` / `cost_value_missing`,
+                              `refund_unit`, `idempotency_anchor` (cost-only only),
+                              and `emission_guard` (a CFO-signed condition, e.g.
+                              "result.get('blocked') is not True", or null). The
+                              template AUTO-WRAPS the emit in `if <emission_guard>:`
+                              when set, so BLOCKED/kill-switch ops aren't billed —
+                              the subagent does nothing extra for it.
+     - `attribution_sources` = the insert's `attribution_sources` block verbatim
+                              (always carries customer_id / request_id / consumer_agent,
+                              each an expression or null).
+   Render under a STRICT-undefined jinja env (an absent key is a DEFECT to report,
+   not a silently-blank field). Do NOT inject `entry.pattern` or any other key by
+   hand — the planner already put everything the template needs in the entry block.
+3. Place each insert DETERMINISTICALLY — do NOT eyeball the line. Placement is a
+   SEMANTIC problem `py_compile` (and a TS/Go type-check) CANNOT catch (dead code
+   after a `return` compiles fine), so eyeballing `entry.line` is exactly what
+   mis-placed every usage-only insert in the dogfood (mid-multiline-statement,
+   after the function's `return`, wrong indent). Use the shared placement module —
+   it handles ALL THREE supported languages:
+     a. Compute the target:
+        `shared/scripts/insertion_point.find_insertion_point(source, entry.line,
+        language, target_function=entry.target_function)` →
+        `(function, after_line, indent, review_reason)`. `entry.line`
+        only SELECTS the enclosing function; placement then targets that function's
+        SUCCESS-RETURN path — before the final return, after the last work statement
+        AND after any early-failure guards — so the emit fires on success. This is
+        robust to the anchor being a def line, a `return`, or the work call, and it
+        NEVER places after the whole function (an F821/scope crash) or after a
+        return (dead code). tab/space-correct (Go tabs preserved). Python uses the
+        stdlib `ast`; TypeScript/Go use tree-sitter.
+     b. **Make low-confidence placement LOUD.** When `review_reason` is set —
+        the anchor was a def signature, the function has multiple top-level returns
+        (success-vs-guard is then a guess), the work is inside a conditional/loop
+        block but the emit is hoisted to function level, or the after-position may be
+        UNREACHABLE (terminal all-return if/try/else) — wrap the rendered insert with
+        `insertion_point.with_placement_marker(rendered_insert, review_reason,
+        comment_prefix)` (`"# "` python, `"// "` ts/go). This prepends a
+        `# REVIEW PLACEMENT: …` line so an un-verifiable placement is reviewer-
+        catchable, NOT a silent mis-bill. Do not skip this — a wrongly-placed emit
+        that py_compiles + lints clean is the worst failure (wrong money, no error).
+     c. Apply it: `shared/scripts/insertion_point.apply_insert(source, after_line,
+        marked_insert, indent)` — language-agnostic text splice.
+   Handling `None`:
+     - **Python** None = a real syntax error / no enclosing statement → STOP and
+       surface it; do not guess.
+     - **TypeScript / Go** None = tree-sitter is absent or version-skewed (it is a
+       SOFT dep) → NOT an error and NOT a stop. Fall back to MANUAL placement by
+       the SAME rule (after the work statement's full span, in its block, before
+       the function's return, at its indentation), then `apply_insert` does the
+       mechanical splice. This fallback is human-PR-review-gated (no fixture proves
+       it); install tree-sitter (see below) to make TS/Go placement deterministic.
+   Covered by `shared/scripts/test_insertion_point.py` — the gate that FAILS on the
+   misplacements py_compile can't see, across python (always) and ts/go (when
+   tree-sitter is present), plus a test that the tree-sitter-absent path degrades
+   to manual cleanly. Preserve all existing imports + business logic.
+
+   **Soft dependency (TS/Go placement):** deterministic TypeScript/Go placement needs
+   `tree_sitter` + `tree_sitter_typescript` + `tree_sitter_go` (`pip install`). They
+   are OPTIONAL — Python needs none, and TS/Go degrade to manual placement when they
+   are absent. The capture catches version-skew (ImportError/TypeError/AttributeError)
+   and degrades rather than crashing.
+4. Do NOT add a separate top-level helper import. The template renders ALL the
+   imports its insert needs (the `emit_*_safe` helper, the per-product slug
+   constants, and the attribution-binding imports from `entry.attribution_imports`)
+   at the insert site. Adding `task.helper_import` at the top too produces an
+   UNUSED top-level import + a redefinition (dogfood ruff F401/F811). `helper_import`
+   in the task is informational only.
+5. Run `python -m py_compile <file>` (or the language equivalent). If it fails,
+   that is a TEMPLATE or task_planner DEFECT, NOT a per-file fixup — STOP, leave
+   the file unwritten, and report it for a skill-folder fix (a failing render
+   means a missing template guard or a planner data bug that affects EVERY
+   customer on that pattern). Do NOT hand-patch the rendered output: hand-patching
+   around broken templates is exactly what hid dogfood findings E/F for rounds —
+   it produces compilable output by luck, so the template defect never surfaces.
+   The render-smoke (`instrument/scripts/test_codemod_templates.py`) is the gate
+   that should catch these before you ever reach a customer file.
+6. Run the customer's OWN formatter/linter autofix on every file you touched
+   (NOT a moolabs tool — the customer's): Python `ruff check --fix <file> && ruff
+   format <file>` (or `isort` + `black`); TypeScript `eslint --fix` / `prettier
+   --write`; Go `gofmt -w` / `goimports -w`. The inserts are correct + compilable
+   but NOT pre-sorted to the customer's import order — their formatter is the
+   source of truth for the AUTOFIXABLE classes: it sorts the imports the template
+   added (I001), strips blank-line whitespace (W293), and modernizes typing
+   (UP). If the customer has no formatter configured, skip + note it in the PR.
+   This clears the bulk of a strict gate (dogfood: 84 of 100 ruff findings were
+   autofixable). CAVEAT: a formatter does NOT reflow comments or docstrings, so
+   it will NOT fix comment/docstring line-length (E501) — the templates therefore
+   keep every comment + docstring within ~88 columns themselves; do not assume
+   the formatter will rescue an over-long REVIEW comment.
+
+   **Line-length policy + accepted residue (E501).** The committed bound: the
+   codemod's OWN static content never exceeds 88 cols, and the Python helper + stub
+   render E501-clean at a generous-realistic shape (service slug up to ~30 chars,
+   longest real chain stage, real signed-doc path) — guarded by
+   `test_helper_and_stub_e501_clean_at_generous_realistic_slug`. What the codemod
+   CANNOT bound, and is accepted residue: (a) a per-product **slugs CONSTANT** line
+   (`LONG_NAME: str = "value"`) whose name is the customer's own slug — an
+   unwrappable assignment that overflows only for a pathologically long slug, which
+   would break the customer's own E501 gate everywhere, not just our output; (b)
+   the `.ts` / `.go` / `.tf` templates, whose linters (eslint `max-len`, golangci
+   `lll`) aren't run in this repo. "0 E501 under an arbitrarily long customer slug"
+   is unachievable for any code generator and is the customer's own lint domain.
+7. Stage + commit the file with message: `feat(moolabs): instrument
    <basename> — <N> sibling-pair, <M> usage-only, <K> cost-only`.
 
 You may NOT:
@@ -584,7 +723,7 @@ For each insert, pick the right adapter and pattern. Every emission MUST go thro
 
 | Condition | Pattern | Helper call emitted (v0.3.0-rc1) |
 |---|---|---|
-| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_event_safe(...)` — single call carrying BOTH lanes in one envelope (US-008 / `client.events.ingest`); `entity_id` threads the lanes for downstream join |
+| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_event_safe(...)` — single call carrying BOTH lanes in one envelope (`client.events.ingest`); `entity_id` threads the lanes for downstream join |
 | Usage event has no inputs in this handler (terminal-only) | usage-only | `emit_usage_event_safe(...)` only |
 | Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only | `emit_cost_event_safe(...)` only — unconditionally routes to `client.cost.ingest_event(args)`; SDK's in-process buffer + structured-log rail handle never-drop. No transport-picking branch (Phase 1.5's `unified_ingest_present` already refused-to-run if the method is missing). |
 
@@ -615,7 +754,7 @@ The codemod inserts OTel attribute writes onto the *current span*. The current s
 
 **Error/failure path coverage:**
 
-- Don't emit usage events on errors by default (per requirements §4.3). Wrap in `try/except` or `try/catch`.
+- Don't emit usage events on errors by default. Wrap in `try/except` or `try/catch`.
 - Cost events still fire on errors (they reflect spend that already happened).
 - Partial-stream collapse → emit a single usage event at stream-complete; cost events fire as tokens flow.
 
@@ -637,7 +776,7 @@ Run `scripts/pr_writer.py` **(aspirational — not yet on disk; see the Scripts 
     - **Pipeline prerequisites (accepted v1 risk):** The default install pipeline assumes `git`, `awk`, `grep`, `sort` are on the customer's PATH. Minimal containers (Alpine without `apk add git`, distroless) will fail — customer-context's Q16 lets the customer override with `strategy: custom` + a verbatim command for their environment. PR pre-merge note documents this dependency.
     - Run `pytest` (or equivalent) — codemod does NOT run this.
     - Verify three-role signoff files still present + unchanged since codemod ran.
-  - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod chose Option B (blocking + documented) per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."
+  - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod uses blocking + documented insert per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."
   - **TODOs:** the list of cost-only-blocked annotations.
   - **Idempotency review:** the list of `REVIEW: idempotency key derivation` comments.
 
@@ -645,7 +784,7 @@ If `--dry-run`, write everything to `.moolabs/codemod/dry-run/` instead of openi
 
 ### Phase 4: Hand off to /cost-billing-adversarial-review (invocation 6 of 6)
 
-The codemod itself is not the final gate. After the PR(s) are emitted, invoke `/cost-billing-adversarial-review` with `--phase post-codemod --pr <pr-url>`. Per requirements §9, this is the 6th and final Skill R invocation per pipeline run.
+The codemod itself is not the final gate. After the PR(s) are emitted, invoke `/cost-billing-adversarial-review` with `--phase post-codemod --pr <pr-url>`. Per requirements §9, this is the 6th and final the adversarial review invocation per pipeline run.
 
 If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 of `/cost-billing-adversarial-review`) and re-emit.
 
@@ -654,7 +793,7 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 | Condition | Behavior |
 |---|---|
 | Framework adapter missing (e.g., Litestar) | Insert `// TODO: framework=<x> has no v1 adapter; manual instrumentation required` with the suggested call shape. Do not break compilation. Flag CRITICAL for adversarial review. |
-| Confirmed entry's `file:line` is stale (code moved since Skill A ran) | Flag, do not edit. Surface in PR as "REGENERATE: file:line drift detected". Hand off to drift-lint. |
+| Confirmed entry's `file:line` is stale (code moved since cost-billing-discovery ran) | Flag, do not edit. Surface in PR as "REGENERATE: file:line drift detected". Hand off to drift-lint. |
 | Cost-only pattern (subscription customer) | Insert `emit_cost_event_safe()` call. v0.3.0-rc1 unconditionally routes to `client.cost.ingest_event(...)`; the SDK's in-process buffer + structured-log recovery rail provide the never-drop guarantee. There is no v0.2-style "fall back to OTel-span" branch — Phase 1.5's `unified_ingest_present` check already refused-to-run if the cost method is absent. |
 | Existing OpenLLMetry / Helicone / Langfuse span | Extend existing span with `moolabs.*` attributes; do not wrap or duplicate (brownfield branch). |
 | Idempotency key heuristic fails (no path param, no domain identity) | Insert key fallback `{handler}.{epoch_millis}` + comment `// REVIEW: idempotency key derivation — domain identity not detected`. Flag MEDIUM for adversarial review. |
@@ -673,8 +812,8 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 
 - `references/codemod-patterns.md` — sibling-pair / usage-only / cost-only deep-dive.
 - `references/trace-context-providers.md` — per-framework adapter details (OTel / Datadog / Sentry / custom).
-- `references/idempotency-derivation.md` — heuristic + edge cases + the §6.4 #23 open question.
-- `references/sdk-blocking-rationale.md` — why Option B for v1.
+- `references/idempotency-derivation.md` — heuristic + edge cases + the documented open question.
+- `references/sdk-blocking-rationale.md` — why blocking insert for v1.
 - `references/pr-chunking.md` — service-grouped chunking strategy.
 - `references/pii-guard.md` — the patterns + the test fixtures.
 

@@ -44,6 +44,28 @@ def _tasks(stub_path="app/services/moolabs_settings.py", deployment_stubs=None,
     }
 
 
+class LoadYamlRobustness(unittest.TestCase):
+    """round-7: a hand-edited / truncated customer tasks.yaml must fail with a
+    clean RuntimeError + non-zero exit, NOT a raw YAMLError traceback."""
+
+    def setUp(self):
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+
+    def test_malformed_yaml_raises_clean_runtime_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "tasks.yaml"
+            p.write_text("tasks:\n  - task_id: 'unterminated\n    file: x:\n  bad: : :\n")
+            with self.assertRaises(RuntimeError) as cm:
+                ra.load_yaml(p)
+            self.assertIn("not valid YAML", str(cm.exception))
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(ra.load_yaml(Path("/nonexistent/tasks.yaml")), {})
+
+
 class LanguageInference(unittest.TestCase):
     def test_python_from_stub_extension(self):
         self.assertEqual(ra.infer_language(_tasks("app/x/moolabs_settings.py")), "python")
@@ -190,6 +212,22 @@ class RenderAndWrite(unittest.TestCase):
             self.assertEqual(
                 after_first, after_second,
                 "append must be idempotent — MOOLABS_API_KEY duplicated on re-run")
+
+    def test_append_absent_target_checklists_not_stray_file(self):
+        # Q (non-deterministic paths): an append surface whose detected file is
+        # ABSENT at emit time (wrong/drifted path) must NOT create a stray file at
+        # the guessed path — record a CHECKLIST so the developer wires it.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            tasks = _tasks(deployment_stubs=[
+                {"kind": "dotenv_example", "emit_path": ".env.example",
+                 "mode": "append"},   # no such file exists in repo
+            ])
+            manifest = ra.render_and_write(
+                ra.plan_render_jobs(tasks, _TEMPLATES_DIR, repo), repo, _TEMPLATES_DIR)
+            self.assertFalse((repo / ".env.example").exists(),
+                             "must NOT create a stray .env.example at a guessed path")
+            self.assertTrue(any(m["action"] == "checklist" for m in manifest))
 
     def test_new_file_refuses_to_clobber_customer_file(self):
         """new_file must NOT overwrite a hand-written customer file (no

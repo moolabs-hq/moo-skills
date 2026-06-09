@@ -1547,14 +1547,14 @@ You're Stage 1 of 4 in the chain.
 1. Open Claude Code (or your agent surface):
      /cost-billing-bootstrap-finance
 
-2. You'll be asked ~12 questions, ONE AT A TIME:
+2. You'll be asked ~10 questions, ONE AT A TIME:
      - Pricing model TYPE + sub-aspects
      - Pricing source of truth
      - Billable units (in your own words)
      - Fair-usage thresholds + overages + bundling
      - Per-customer custom pricing
-     - Compliance regimes (SOC2/HIPAA/GDPR/FedRAMP)
-     - PII / PHI field blocklists
+     - Compliance regimes (SOC2/HIPAA/GDPR/FedRAMP) — regimes only; the
+       sensitive-data categories they imply are asked at the CPO stage
      - Region(s), environments, multi-tenant shape
 
 3. AI synthesizes a draft, Skill R reviews adversarially, you read R's

@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import re
 import sys
@@ -65,8 +66,9 @@ _SLUGS_LANG_RULE: dict[str, tuple[str, str]] = {
 # helper templates checked into assets/codemod-templates/.
 # Go is P0 (Decision #2 reversed 2026-05-28): the go-stdlib.j2 callsite template
 # is in progress; the Go SDK helper (go-moolabs-client.go.j2) has landed. Until
-# the callsite template exists, the planner's existence check below skips Go
-# files with a clear message rather than emitting a task against a missing file.
+# the callsite template exists, the planner's existence check below skips ANY
+# file whose mapped template is missing (Go today) with a clear message rather
+# than emitting a task against a missing file.
 TEMPLATE_MAP: dict[tuple[str, str], str] = {
     ("python", "fastapi"): "assets/codemod-templates/python-fastapi.j2",
     ("python", "django"): "assets/codemod-templates/python-django.j2",
@@ -316,21 +318,38 @@ def _attribution_keys_for(framework: str) -> list[str]:
     return ["request_id", "customer_id"]
 
 
-def _load_attribution_bindings(path: Path) -> tuple[dict[str, str | None], list[dict[str, Any]]]:
-    """Read attribution-bindings.yaml. Returns (default_bindings, overrides[])."""
+def _load_attribution_bindings(
+    path: Path,
+) -> tuple[dict[str, str | None], list[dict[str, Any]], dict[str, str]]:
+    """Read attribution-bindings.yaml. Returns (default_bindings, overrides[],
+    default_imports).
+
+    A binding's `source` may be an expression that references a customer symbol
+    (e.g. `get_correlation_id()`), and the binding carries the import that puts
+    that symbol in scope under `requires_import`. The codemod MUST emit that
+    import or the rendered insert raises NameError at runtime (dogfood ruff F821).
+    `default_imports` maps binding-key -> import statement."""
     if not path.exists():
-        return {}, []
+        return {}, [], {}
     data = _read_yaml(path) or {}
     defaults: dict[str, str | None] = {}
+    default_imports: dict[str, str] = {}
     for key, val in (data.get("bindings") or {}).items():
         if isinstance(val, dict):
             defaults[key] = val.get("source")
+            if val.get("requires_import"):
+                default_imports[key] = val["requires_import"]
         else:
             defaults[key] = None
     overrides = data.get("overrides") or []
     if not isinstance(overrides, list):
         overrides = []
-    return defaults, overrides
+    return defaults, overrides, default_imports
+
+
+# Attribution keys the callsite templates reference directly — must always be
+# present in attribution_sources (value or None) for the StrictUndefined render.
+_TEMPLATE_ATTRIBUTION_KEYS = ("customer_id", "request_id", "consumer_agent", "entity_id")
 
 
 def _resolve_sources_for_file(
@@ -338,7 +357,14 @@ def _resolve_sources_for_file(
     defaults: dict[str, str | None],
     overrides: list[dict[str, Any]],
 ) -> dict[str, str | None]:
-    """Apply per-file override on top of service-level defaults."""
+    """Apply per-file override on top of service-level defaults.
+
+    The callsite templates reference attribution_sources.{customer_id, request_id,
+    consumer_agent} directly. Under the codemod's StrictUndefined jinja env an
+    ABSENT key raises UndefinedError (sibling of dogfood finding E — found via the
+    end-to-end render check). The template contract is "each key is present — a
+    Python expression or None", so guarantee the canonical keys exist here rather
+    than depending on what the attribution-bindings happened to populate."""
     resolved = dict(defaults)
     for ov in overrides:
         if ov.get("file") != file_path:
@@ -346,6 +372,8 @@ def _resolve_sources_for_file(
         for key, val in (ov.get("bindings") or {}).items():
             if isinstance(val, dict):
                 resolved[key] = val.get("source")
+    for key in _TEMPLATE_ATTRIBUTION_KEYS:
+        resolved.setdefault(key, None)
     return resolved
 
 
@@ -569,6 +597,7 @@ def build_slugs_emit_tasks(
     inventory: dict,
     language: str = "python",
     anchor: tuple[str, str] | None = None,
+    used_products: set[str] | None = None,
 ) -> list[SlugsEmitTask]:
     """One slugs-emit task per product in the inventory.
 
@@ -592,6 +621,13 @@ def build_slugs_emit_tasks(
     for idx, product in enumerate(inventory.get("products") or [], start=1):
         slug = product.get("product_slug", "")
         if not slug:
+            continue
+        # I2: when the caller passes the set of products THIS service uses (the
+        # resolved product_slugs on the service-scoped entries), emit slugs only
+        # for those — an org-wide inventory otherwise leaks every product's slugs
+        # module into the service (slugs_acute/bff/meter into a moo-arc run). An
+        # empty/None set means "no scoping" (back-compat: single-service runs).
+        if used_products is not None and slug not in used_products:
             continue
         slugs_emit_path: str | None = None
         if anchor is not None and language == "python":
@@ -686,6 +722,37 @@ def _slugs_import_for_entry(
     return _slugs_import_path_for(language, product_slug)
 
 
+# Legacy helper-module import paths (when no stub anchor exists — the all-modify
+# limitation, same as the slugs anchor). Python is the only LAYOUT-DEPENDENT one
+# (a dotted package path); TS uses a layout-independent `@/` alias and Go has no
+# callsite template.
+_HELPER_MODULE_LEGACY = {
+    "python": "app.services.moolabs_client",
+    "typescript": "@/services/moolabs-client",
+}
+
+
+def _helper_import_for_entry(language: str, anchor: tuple[str, str] | None) -> str:
+    """Per-callsite helper (moolabs_client) MODULE import path.
+
+    PORTABILITY (verbatim-dogfood P0): the callsite templates used to HARDCODE
+    `from app.services.moolabs_client import ...`, which only resolves for an
+    `app`-rooted repo — a customer rooted at `src/<pkg>/` got ModuleNotFoundError.
+    The helper is a SIBLING of the service's stub/config module (same dir,
+    basename `moolabs_client`), so deriving its import as a basename swap on the
+    stub anchor's import path (python) makes the callsite import resolve to
+    wherever the helper is emitted. TS keeps the layout-independent `@/` alias;
+    Go has no callsite. Falls back to the legacy convention when no stub anchor
+    exists (all-modify — same documented limitation as `_slugs_import_for_entry`).
+    """
+    if anchor is not None and language == "python":
+        dotted = [p for p in (anchor[1] or "").split(".") if p]
+        if dotted:
+            dotted[-1] = "moolabs_client"
+            return ".".join(dotted)
+    return _HELPER_MODULE_LEGACY.get(language, _HELPER_MODULE_LEGACY["python"])
+
+
 def build_tasks(
     cost_inventory: dict[str, Any],
     usage_inventory: dict[str, Any],
@@ -697,6 +764,7 @@ def build_tasks(
     attribution_overrides: list[dict[str, Any]] | None = None,
     slug_inventory: dict[str, Any] | None = None,
     anchor: tuple[str, str] | None = None,
+    attribution_import_defaults: dict[str, str] | None = None,
 ) -> list[Task]:
     """Group inventory entries by file, emit one task per file.
 
@@ -743,6 +811,26 @@ def build_tasks(
         if f:
             file_buckets[f].append(entry)
 
+    # --service scoping (fixes org-wide over-instrumentation): the cost/usage
+    # inventories are ORG-WIDE, but task_planner is invoked per-service via
+    # --signed-yaml 04-final-<svc>.signed.yaml. Keep only files under THIS
+    # service's declared root(s). Without this, a --service run emits a task for
+    # every service's files AND stamps this service's language/framework + slug
+    # onto all of them (e.g. python-fastapi onto another service's .go files).
+    # Back-compat: if the signed doc declares no integration.services, no filter
+    # applies (single-service / whole-repo runs are unaffected).
+    _service_roots = [
+        s.get("root", "")
+        for s in (signed.get("integration", {}).get("services", []) if signed else [])
+        if s.get("root")
+    ]
+    if _service_roots:
+        file_buckets = {
+            f: e
+            for f, e in file_buckets.items()
+            if any(f == r or f.startswith(r.rstrip("/") + "/") for r in _service_roots)
+        }
+
     tasks: list[Task] = []
     for idx, (file_path, entries) in enumerate(sorted(file_buckets.items()), start=1):
         template = TEMPLATE_MAP.get((primary_lang, primary_fw), TEMPLATE_MAP.get((primary_lang, "fastapi"), ""))
@@ -760,6 +848,22 @@ def build_tasks(
         sources_for_file = _resolve_sources_for_file(
             file_path, attribution_defaults or {}, attribution_overrides or []
         )
+        # Dogfood ruff F821: an attribution binding's `source` may reference a
+        # customer symbol (e.g. get_correlation_id()) whose import the binding
+        # carries under requires_import. The rendered insert calls that symbol, so
+        # the codemod MUST emit its import. Resolve per-file (override
+        # requires_import wins), then keep only the imports for bindings actually
+        # USED at this file (non-None resolved source) — deduped + sorted.
+        imports_for_file = dict(attribution_import_defaults or {})
+        for ov in attribution_overrides or []:
+            if ov.get("file") == file_path:
+                for k, val in (ov.get("bindings") or {}).items():
+                    if isinstance(val, dict) and val.get("requires_import"):
+                        imports_for_file[k] = val["requires_import"]
+        attribution_imports = sorted({
+            imp for k, imp in imports_for_file.items()
+            if sources_for_file.get(k) and imp
+        })
         inserts: list[Insert] = []
         for entry in entries:
             pattern = _pattern_for(entry, output_input_index)
@@ -785,15 +889,78 @@ def build_tasks(
                 event_type=entry.get("event_type"),
                 workflow_id=wf,
             )
+            # Dogfood finding G: the callsite template reads `entry.cost_kind`,
+            # but discovery inventories sometimes name it `cost_dimension`. Map
+            # one to the other so the cost-lane `kind` actually renders.
+            effective_cost_kind = entry.get("cost_kind") or entry.get("cost_dimension")
             slug_consts = resolve_slug_constants(
                 slug_index,
                 product_slug=product_slug,
                 event_type=entry.get("event_type"),
                 workflow_id=wf,
-                cost_kind=entry.get("cost_kind"),
+                cost_kind=effective_cost_kind,
             )
+            # Dogfood finding G: a cost-bearing entry with no cost-value source
+            # renders a cost event carrying NO cost_micros — the cost signal is
+            # silently empty. Flag it LOUDLY (in tasks.yaml + a stderr warning) so
+            # the reviewer / adversarial-review sees it. Capturing the real per-call
+            # cost (e.g. the LLM response usage) is a discovery --refresh + CFO/PM
+            # task — the flag makes the gap visible until that lands.
+            cost_value_missing = (
+                pattern in ("cost-only", "sibling-pair")
+                and not entry.get("cost_micros_source")
+            )
+            if cost_value_missing:
+                sys.stderr.write(
+                    f"WARNING: cost-bearing entry {wf!r} at "
+                    f"{file_path}:{entry.get('line')} has no cost_micros_source — "
+                    f"the rendered cost lane carries no cost_micros (dogfood finding "
+                    f"G). Flagged cost_value_missing: true; capture the per-call "
+                    f"cost via a discovery --refresh.\n"
+                )
             enriched_entry = {
                 **entry,
+                # The callsite templates branch on `entry.pattern`, and Phase 2d
+                # renders by substituting THIS entry block into the template
+                # (SKILL.md). pattern is also emitted at the insert level for the
+                # subagent's routing, but it MUST live in entry too or the
+                # template raises UndefinedError on entry.pattern under
+                # StrictUndefined (advisor catch — the render contract).
+                "pattern": pattern,
+                # The RESOLVED product_slug (not the raw inventory one) — lets main
+                # scope build_slugs_emit_tasks to the products THIS service actually
+                # uses (I2: org-wide slugs leaked slugs_acute/bff/meter into a
+                # moo-arc run that only imports slugs_arc).
+                "product_slug": product_slug,
+                # Imports the rendered insert needs for its attribution-binding
+                # expressions (e.g. get_correlation_id) — emitted with the helper /
+                # slug imports so the insert doesn't NameError (dogfood ruff F821).
+                "attribution_imports": attribution_imports,
+                # Guarantee event_type EXISTS (None when absent) — the cost-events
+                # schema has NO event_type property (cost entries carry workflow_id),
+                # so a schema-conformant cost / sibling-pair entry would otherwise
+                # raise UndefinedError on the template's `entry.event_type` deref
+                # under StrictUndefined (round-3 review — the sibling of E missed by
+                # the first sweep). The templates fall back to workflow_id when None.
+                "event_type": entry.get("event_type"),
+                # D1: the function discovery KNOWS is the billable one (from
+                # derivation_note / the consolidation pointer); passed to
+                # find_insertion_point so placement RE-ANCHORS there when entry.line
+                # points at the wrong function. None until discovery emits it
+                # structured (the discovery-owned capture side).
+                "target_function": entry.get("target_function"),
+                # CFO-signed emission guard (e.g. "result.get('blocked') is not
+                # True"): emit ONLY when this holds, so BLOCKED/kill-switch ops
+                # aren't billed (dogfood O). Guaranteed present (None when absent)
+                # so the template's `{% if entry.emission_guard %}` is StrictUndefined
+                # -safe; the template wraps the emit in `if <guard>:` when set.
+                "emission_guard": entry.get("emission_guard"),
+                "cost_kind": effective_cost_kind,
+                # Guarantee the optional cost-value key EXISTS (None when absent)
+                # so the template's `{% if entry.cost_micros_source %}` guard works
+                # under StrictUndefined — an ABSENT key would raise (sibling of E).
+                "cost_micros_source": entry.get("cost_micros_source"),
+                "cost_value_missing": cost_value_missing,
                 "cost_workflow_ids": cost_workflow_ids,
                 **slug_consts,
                 # Task 12: derive the per-callsite slugs import path from the
@@ -806,7 +973,47 @@ def build_tasks(
                 "slugs_import_path": _slugs_import_for_entry(
                     primary_lang, product_slug, anchor
                 ),
+                # P0 portability: the helper-module import path, derived from the
+                # same stub anchor as the slugs (a sibling basename swap), so the
+                # callsite `from <here> import emit_*` resolves to wherever the
+                # helper is emitted — never a hardcoded `app.services.moolabs_client`.
+                "helper_import_path": _helper_import_for_entry(primary_lang, anchor),
             }
+            # Dogfood finding H: the usage-only / sibling-pair templates render
+            # `value={{ entry.refund_unit.derivation }}` as a Python expression
+            # (UNGUARDED deref), so derivation MUST be a numeric scalar AND
+            # refund_unit MUST be a dict. Coerce prose ("1 apply_remittance
+            # completion") to its leading number, keep the prose under
+            # derivation_note, and — since those two patterns deref it without a
+            # guard — guarantee a dict with derivation:1 when discovery omitted it
+            # (sibling of E under StrictUndefined). cost-only never reads refund_unit.
+            _ru = entry.get("refund_unit")
+            if isinstance(_ru, dict):
+                enriched_entry["refund_unit"] = _coerce_derivation(_ru)
+                # Round-5/6: a prose derivation can't compile to a usage quantity,
+                # so it was coerced to a placeholder. Warn LOUDLY (parity with
+                # cost_value_missing) — a wrong usage quantity is a billing bug.
+                if enriched_entry["refund_unit"].get("derivation_needs_review"):
+                    sys.stderr.write(
+                        f"WARNING: usage entry {wf!r} at {file_path}:{entry.get('line')} "
+                        f"has a non-expression refund_unit.derivation "
+                        f"({_ru.get('derivation')!r}); coerced to a placeholder "
+                        f"quantity. Fix discovery to emit a runtime EXPRESSION (e.g. "
+                        f"response.usage.completion_tokens) so usage is recorded.\n"
+                    )
+            elif pattern in ("usage-only", "sibling-pair"):
+                enriched_entry["refund_unit"] = {"unit": "event", "derivation": 1}
+            # Round-4 CRITICAL: the REVIEW comment derefs idempotency_anchor.confidence,
+            # but the cost-events schema marks `confidence` OPTIONAL on the anchor
+            # object (no required list). The `is defined and entry.idempotency_anchor`
+            # guard only checks the PARENT, so a schema-conformant anchor
+            # {handler, path_param} passes the guard then raises UndefinedError on the
+            # confidence SUB-key under StrictUndefined (sibling of the event_type
+            # CRITICAL — a two-level deref the parent guard doesn't cover). Guarantee
+            # the sub-key on any entry that carries an anchor.
+            _anchor = enriched_entry.get("idempotency_anchor")
+            if isinstance(_anchor, dict) and "confidence" not in _anchor:
+                enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
@@ -851,6 +1058,65 @@ def build_tasks(
     return tasks
 
 
+def _coerce_derivation(refund_unit: dict) -> dict:
+    """The template renders `value={{ entry.refund_unit.derivation }}` as a BARE
+    expression. Per usage-events.schema.yaml `derivation` is a runtime EXPRESSION
+    that computes the quantity at emit time (e.g. "response.usage.completion_tokens",
+    "len(text.split())"), NOT a fixed scalar. So (round-5 review — the original H
+    fix wrongly collapsed every expression to 1, silently under-recording usage):
+
+      - numeric value / numeric string  -> emit the number (`value=N`);
+      - a string that is VALID code      -> emit it VERBATIM (it is the expression);
+      - prose that is NOT valid code (moo-arc's "1 apply_remittance completion")
+        -> can't compile; extract a leading count if present, stash the prose in
+        `derivation_note`, and FLAG `derivation_needs_review` so the placeholder
+        quantity is LOUD, not silently wrong.
+    """
+    deriv = refund_unit.get("derivation")
+    if not isinstance(deriv, str):
+        return refund_unit  # already numeric (or absent) — value=<n>
+    s = deriv.strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return {**refund_unit, "derivation": float(s) if "." in s else int(s)}
+    try:
+        ast.parse(s, mode="eval")
+        return refund_unit  # valid runtime expression — emit verbatim
+    except SyntaxError:
+        pass  # prose / not valid code — coerce to a placeholder + flag
+    m = re.match(r"(\d+(?:\.\d+)?)\b", s)
+    scalar: float | int = (
+        (float(m.group(1)) if "." in m.group(1) else int(m.group(1))) if m else 1
+    )
+    return {**refund_unit, "derivation": scalar, "derivation_note": deriv,
+            "derivation_needs_review": True}
+
+
+def _yaml_scalar(v: Any) -> str:
+    """Serialize a scalar as a YAML token for the hand-rolled emitter (PyYAML is a
+    soft dep, so emission can't use yaml.safe_dump).
+
+    The ONE correct hand-rolled form for an arbitrary string is a YAML
+    DOUBLE-QUOTED scalar with C-style escapes: `:`, `#`, spaces, and single quotes
+    are all literal inside it, and `\\` / `"` / newline / tab / CR get escaped.
+    `repr()` is NOT a YAML serializer — it emits a Python single-quoted literal
+    with `\\'` backslash-escapes that YAML rejects on mixed-quote strings (crash),
+    and leaves `\\n` / `\\` to corrupt silently (round-6 review). EVERY
+    customer-derived string in emit_tasks_yaml must route through this.
+
+    None -> `null` (NOT bareword `None`, which reloads as the truthy string
+    "None" — finding F). bool -> lowercase `true`/`false`. int/float -> str.
+    """
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = (str(v).replace("\\", "\\\\").replace('"', '\\"')
+         .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    return f'"{s}"'
+
+
 def emit_tasks_yaml(
     tasks: list[Task],
     dest: Path,
@@ -870,20 +1136,24 @@ def emit_tasks_yaml(
     lines.append("tasks:")
     for t in tasks:
         lines.append(f"  - task_id: {t.task_id}")
-        lines.append(f"    file: {t.file}")
-        lines.append(f"    service_slug: {t.service_slug}")
+        # file + service_slug are customer-derived (a path with a space/`#`/`:` or
+        # an odd slug breaks/corrupts raw YAML) — route through _yaml_scalar like
+        # every other customer value (round-6: they bypassed escaping in the main
+        # block while env_wire escaped them — Condition Consistency).
+        lines.append(f"    file: {_yaml_scalar(t.file)}")
+        lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
         lines.append(f"    framework: {t.framework}")
         lines.append(f"    language: {t.language}")
         lines.append(f"    template: {t.template}")
-        lines.append(f'    helper_import: "{t.helper_import}"')
+        # _yaml_scalar quotes+escapes via repr. The TypeScript helper_import is
+        # `import { ... } from "@/services/moolabs-client";` — literal double
+        # quotes that, emitted raw inside a double-quoted scalar, made tasks.yaml
+        # unparseable for EVERY TS service (round-5 review). The same applies to
+        # snapshot/attribution string values that may carry quotes.
+        lines.append(f"    helper_import: {_yaml_scalar(t.helper_import)}")
         lines.append("    snapshot_capabilities:")
         for k, v in t.snapshot_capabilities.items():
-            if v is None:
-                lines.append(f"      {k}: null")
-            elif isinstance(v, bool):
-                lines.append(f"      {k}: {str(v).lower()}")
-            else:
-                lines.append(f'      {k}: "{v}"')
+            lines.append(f"      {k}: {_yaml_scalar(v)}")
         lines.append("    inserts:")
         for ins in t.inserts:
             lines.append(f"      - line: {ins.line}")
@@ -891,23 +1161,20 @@ def emit_tasks_yaml(
             lines.append(f"        attribution_keys: [{', '.join(ins.attribution_keys)}]")
             lines.append("        attribution_sources:")
             for k, v in ins.attribution_sources.items():
-                if v is None:
-                    lines.append(f"          {k}: null")
-                else:
-                    lines.append(f'          {k}: "{v}"')
+                # _yaml_scalar escapes binding expressions like req.headers["x"]
+                # (literal quotes) — raw emission broke tasks.yaml parsing.
+                lines.append(f"          {k}: {_yaml_scalar(v)}")
             lines.append("        entry:")
             for k, v in ins.entry.items():
                 if isinstance(v, dict):
                     lines.append(f"          {k}:")
                     for sk, sv in v.items():
-                        lines.append(f"            {sk}: {sv!r}" if isinstance(sv, str) else f"            {sk}: {sv}")
+                        lines.append(f"            {sk}: {_yaml_scalar(sv)}")
                 elif isinstance(v, list):
-                    inline = ", ".join(repr(x) if isinstance(x, str) else str(x) for x in v)
+                    inline = ", ".join(_yaml_scalar(x) for x in v)
                     lines.append(f"          {k}: [{inline}]")
-                elif isinstance(v, str):
-                    lines.append(f"          {k}: {v!r}")
                 else:
-                    lines.append(f"          {k}: {v}")
+                    lines.append(f"          {k}: {_yaml_scalar(v)}")
         lines.append("    audit:")
         for k, v in t.audit.items():
             lines.append(f"      {k}: {v}")
@@ -916,23 +1183,16 @@ def emit_tasks_yaml(
     if env_wire_tasks:
         lines.append("env_wire_tasks:")
         for t in env_wire_tasks:
-            # task_id and service_slug are derived from customer-authored
-            # service slugs from the Phase A inventory; quote them to defend
-            # against YAML metacharacters. mode is a hardcoded enum.
-            safe_tid = t.task_id.replace('\\', '\\\\').replace('"', '\\"')
-            safe_slug = t.service_slug.replace('\\', '\\\\').replace('"', '\\"')
-            lines.append(f'  - task_id: "{safe_tid}"')
-            lines.append(f'    service_slug: "{safe_slug}"')
+            # Every customer-derived string routes through _yaml_scalar — the ONE
+            # correct serializer (round-6 consolidation; the old per-field
+            # `.replace` escape was a second mechanism that missed newlines).
+            # mode / infra_discovery_gap / scope / kind are hardcoded enums/bools.
+            lines.append(f"  - task_id: {_yaml_scalar(t.task_id)}")
+            lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
             lines.append(f"    mode: {t.mode}")
-            safe_import = t.settings_import_path.replace('\\', '\\\\').replace('"', '\\"')
-            safe_accessor = t.api_key_accessor.replace('\\', '\\\\').replace('"', '\\"')
-            lines.append(f'    settings_import_path: "{safe_import}"')
-            lines.append(f'    api_key_accessor: "{safe_accessor}"')
-            if t.stub_emit_path:
-                safe_stub = t.stub_emit_path.replace('\\', '\\\\').replace('"', '\\"')
-                lines.append(f'    stub_emit_path: "{safe_stub}"')
-            else:
-                lines.append(f"    stub_emit_path: null")
+            lines.append(f"    settings_import_path: {_yaml_scalar(t.settings_import_path)}")
+            lines.append(f"    api_key_accessor: {_yaml_scalar(t.api_key_accessor)}")
+            lines.append(f"    stub_emit_path: {_yaml_scalar(t.stub_emit_path)}")
             # PR #531 gap-detection: execution agent reads this and emits
             # a DEVELOPER ACTION REQUIRED block in the PR body when True.
             lines.append(f"    infra_discovery_gap: {str(t.infra_discovery_gap).lower()}")
@@ -940,37 +1200,28 @@ def emit_tasks_yaml(
                 lines.append("    deployment_stubs:")
                 for s in t.deployment_stubs:
                     lines.append(f"      - kind: {s['kind']}")
-                    # source_path was added in PR #531 fix so the execution
-                    # agent knows which existing file to reference in the
-                    # CHECKLIST for repo-scope (centralized infra) entries.
+                    # source_path (PR #531): which existing file the CHECKLIST
+                    # references for repo-scope (centralized infra) entries.
                     if "source_path" in s:
-                        safe_src = str(s['source_path']).replace('\\', '\\\\').replace('"', '\\"')
-                        lines.append(f'        source_path: "{safe_src}"')
+                        lines.append(f"        source_path: {_yaml_scalar(s['source_path'])}")
                     if "emit_path" in s:
-                        safe_emit = str(s['emit_path']).replace('\\', '\\\\').replace('"', '\\"')
-                        lines.append(f'        emit_path: "{safe_emit}"')
+                        lines.append(f"        emit_path: {_yaml_scalar(s['emit_path'])}")
                     lines.append(f"        mode: {s['mode']}")
                     # scope: service (auto-emit safe) | repo (checklist only)
                     lines.append(f"        scope: {s.get('scope', 'service')}")
             else:
                 lines.append("    deployment_stubs: []")
-    # Phase 1.8 slugs-emit tasks (one per product). Same escape pattern.
+    # Phase 1.8 slugs-emit tasks (one per product).
     if slugs_emit_tasks:
         lines.append("slugs_emit_tasks:")
         for st in slugs_emit_tasks:
-            lines.append(f"  - task_id: {st.task_id}")
-            lines.append(f"    product_slug: {st.product_slug}")
-            safe_gen_at = str(st.generated_at).replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'    generated_at: "{safe_gen_at}"')
-            # Task 12: repo-relative emit path of the slugs module, derived
-            # from the service's stub anchor (sibling of the customer's real
-            # config). null when no single stub anchor was available — Task 13
-            # (render_artifacts) then falls back to its legacy convention.
-            if st.slugs_emit_path:
-                safe_emit = str(st.slugs_emit_path).replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'    slugs_emit_path: "{safe_emit}"')
-            else:
-                lines.append("    slugs_emit_path: null")
+            lines.append(f"  - task_id: {_yaml_scalar(st.task_id)}")
+            lines.append(f"    product_slug: {_yaml_scalar(st.product_slug)}")
+            lines.append(f"    generated_at: {_yaml_scalar(str(st.generated_at))}")
+            # Task 12: repo-relative emit path of the slugs module (null when no
+            # single stub anchor was available — render_artifacts then falls back
+            # to its legacy convention). _yaml_scalar(None) -> null.
+            lines.append(f"    slugs_emit_path: {_yaml_scalar(st.slugs_emit_path)}")
             # The constants block is rendered as a nested mapping.
             lines.append("    constants:")
             for category in ("EVENT_TYPE", "METER_SLUG", "FEATURE_KEY",
@@ -981,10 +1232,8 @@ def emit_tasks_yaml(
                     continue
                 lines.append(f"      {category}:")
                 for e in entries:
-                    safe_name = str(e.get("name", "")).replace("\\", "\\\\").replace('"', '\\"')
-                    safe_value = str(e.get("value", "")).replace("\\", "\\\\").replace('"', '\\"')
-                    lines.append(f'        - name: "{safe_name}"')
-                    lines.append(f'          value: "{safe_value}"')
+                    lines.append(f"        - name: {_yaml_scalar(e.get('name', ''))}")
+                    lines.append(f"          value: {_yaml_scalar(e.get('value', ''))}")
     dest.write_text("\n".join(lines) + "\n")
 
 
@@ -1011,7 +1260,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_profile = _read_yaml(Path(args.customer_context_dir) / "repo-info.yaml") or {}
 
     bindings_path = Path(args.customer_context_dir) / "attribution-bindings.yaml"
-    attribution_defaults, attribution_overrides = _load_attribution_bindings(bindings_path)
+    attribution_defaults, attribution_overrides, attribution_import_defaults = (
+        _load_attribution_bindings(bindings_path)
+    )
     if not attribution_defaults:
         sys.stderr.write(
             f"REFUSING TO RUN: attribution bindings not found at {bindings_path}\n"
@@ -1083,6 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
         attribution_overrides=attribution_overrides,
         slug_inventory=slug_inv,
         anchor=anchor,
+        attribution_import_defaults=attribution_import_defaults,
     )
     if not tasks:
         sys.stderr.write("no tasks built — check inventory files exist + non-empty\n")
@@ -1093,7 +1345,17 @@ def main(argv: list[str] | None = None) -> int:
     # constants — reuse the same inventory here. Task 12: pass the language +
     # stub anchor so each task's slugs_emit_path lands beside the customer's
     # real config (None when no single anchor — render_artifacts falls back).
-    slugs_emit_tasks = build_slugs_emit_tasks(slug_inv, primary_lang, anchor)
+    # I2: scope slugs to the products THIS service's (already --service-filtered)
+    # entries actually use, so an org-wide inventory doesn't leak other products'
+    # slugs modules into the service. Empty -> None (no scoping; back-compat).
+    _used_products = {
+        ins.entry.get("product_slug")
+        for t in tasks for ins in t.inserts
+        if ins.entry.get("product_slug")
+    }
+    slugs_emit_tasks = build_slugs_emit_tasks(
+        slug_inv, primary_lang, anchor, used_products=_used_products or None
+    )
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

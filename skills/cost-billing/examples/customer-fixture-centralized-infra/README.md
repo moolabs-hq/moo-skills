@@ -1,6 +1,6 @@
 # customer-fixture-centralized-infra
 
-Regression fixture for PR #531's root cause — the env_loader_scan was
+Regression fixture for a prior fix's root cause — the env_loader_scan was
 scoped to `services/<svc>/` and never saw centralized infra at the repo
 root. moolabs (the canonical example) keeps Terraform in
 `infrastructure/terraform/{modules,environments,regional,global,accounts}/`

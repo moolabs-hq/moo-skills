@@ -22,7 +22,7 @@
  *   emitEventSafe(args)      -> client.events.ingest(args)   // sibling-pair, dual-lane
  *
  * tenantId is intentionally absent from every helper signature — the server
- * derives tenant identity from the API key (FR-3 in the SDK unified-ingest PRD).
+ * derives tenant identity from the API key (never pass it — the server derives it).
  * entityId is the threading key for sibling-pair join downstream.
  *
  * Error handling is env-gated (single decision point in handleEmitErr):

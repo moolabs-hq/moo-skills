@@ -30,7 +30,8 @@ tasks:
           request_id: "request.state.request_id"
           customer_id: "request.state.customer_id"
           consumer_agent: null
-        entry:
+        entry:                          # render with THIS block (carries pattern)
+          pattern: sibling-pair         # mirrored from insert-level for entry.pattern
           workflow_id: "checkout.recommendation.delivered"
           event_type: "checkout.recommendation.delivered"
           cost_kind: "llm-tokens"
@@ -73,9 +74,13 @@ tasks:
           request_id: "request.state.request_id"
           customer_id: null
           consumer_agent: null
-        entry:
-          workflow_id: "shared.email.send"
-          cost_kind: "email-send"
+        entry:                          # abbreviated for the example — the REAL
+          pattern: cost-only            # planner output carries every template-
+          workflow_id: "shared.email.send"   # referenced key (value-or-null):
+          cost_kind: "email-send"       # event_type, *_const, slugs_import_path,
+                                        # cost_micros_source, cost_value_missing,
+                                        # idempotency_anchor — so a StrictUndefined
+                                        # render never hits an absent key.
     audit:
       cost_inventory_sha: "abc12345"
       output_input_map_sha: "def67890"

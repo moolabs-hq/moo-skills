@@ -85,6 +85,19 @@ $defs:
           - vector_search
           - other
 
+      cost_micros_source:
+        type: string
+        description: |
+          The per-call cost-VALUE source: a code expression that yields the
+          micros cost at the call site (e.g. "response.usage.cost_micros",
+          "resp.cost * 1_000_000"). The codemod's cost lane renders
+          `"cost_micros": {{ cost_micros_source }}`; WITHOUT it the cost event
+          carries no value and task_planner flags `cost_value_missing: true`
+          (dogfood finding G). Capture this for every cost-bearing entry — it is
+          the difference between a real cost signal and an empty one. (Note:
+          `cost_dimension` is the cost KIND; this is the cost VALUE — both are
+          needed for a complete cost lane.)
+
       confidence:
         type: number
         minimum: 0.0

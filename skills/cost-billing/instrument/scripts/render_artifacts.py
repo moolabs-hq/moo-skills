@@ -109,7 +109,16 @@ def load_yaml(path: Path) -> dict:
         ) from exc
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    try:
+        return yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        # tasks.yaml is customer-editable; a hand-edit / truncation must fail with
+        # a clean, actionable message + non-zero exit, NOT a raw traceback out of
+        # the render stage (round-7 review).
+        raise RuntimeError(
+            f"render_artifacts: {path} is not valid YAML ({exc}). "
+            f"Re-generate it with task_planner.py or fix the edit."
+        ) from exc
 
 
 def infer_language(tasks: dict) -> str:
@@ -276,13 +285,24 @@ def render_and_write(
             effective_mode = "new_file"
 
         if effective_mode == "append":
-            existing = dest_path.read_text() if dest_path.is_file() else ""
+            # Customer env-config locations are NOT deterministic (service-root,
+            # repo-root, elsewhere). An append surface was DETECTED by discovery,
+            # so its file should exist; if it does NOT at emit time, the detected
+            # path was wrong or drifted — do NOT create a stray file at a guessed
+            # path (the dogfood Q bug: a phantom repo-root ./.env.example). Append
+            # ONLY to a file that exists; otherwise surface a CHECKLIST for the
+            # developer to wire MOOLABS_API_KEY into their actual env config.
+            if not dest_path.is_file():
+                rec["action"] = "would_checklist" if dry_run else "checklist"
+                rec["reason"] = "append target not found; developer must wire MOOLABS_API_KEY"
+                manifest.append(rec)
+                continue
+            existing = dest_path.read_text()
             if _APPEND_SENTINEL in existing:
                 rec["action"] = "append_skipped_present"
                 manifest.append(rec)
                 continue
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            sep = "" if (not existing or existing.endswith("\n")) else "\n"
+            sep = "" if existing.endswith("\n") else "\n"
             dest_path.write_text(existing + sep + rendered)
             rec["action"] = "appended"
             manifest.append(rec)

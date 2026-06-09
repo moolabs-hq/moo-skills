@@ -2,7 +2,7 @@
 
 **Stage 2 of 4. Runs on the CPO's machine. Consumes Stage 1 output.**
 
-Asks the CPO about org-level product context, top features, and product structure (multi-product split if any). Outputs `02-cpo.signed.yaml` which lists products and assigns each to a team PM.
+Asks the CPO about org-level product context, top features, product structure (multi-product split if any), and the sensitive-data categories the product handles (PII/PHI policy — product-domain knowledge, informed by finance's compliance regimes; the engineer later translates these to field paths). Outputs `02-cpo.signed.yaml` which lists products and assigns each to a team PM.
 
 ## Trigger
 

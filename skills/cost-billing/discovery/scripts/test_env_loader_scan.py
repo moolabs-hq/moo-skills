@@ -1309,5 +1309,36 @@ class DerivedPathsInInventory(unittest.TestCase):
             self.assertEqual(ac["import_path"], "app.moolabs_settings")
 
 
+class ServiceSurfacePathRepoRelative(unittest.TestCase):
+    """Q: a scope=service surface (.env.example) must be recorded REPO-relative
+    (services/<svc>/.env.example), not service-relative (.env.example) — else the
+    emit side (which treats paths as repo-relative) writes a stray repo-root
+    ./.env.example instead of appending to the service's existing file."""
+
+    def test_dotenv_surface_is_service_prefixed_with_repo_anchor(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            repo = Path(t)
+            svc = repo / "services" / "moo-arc"
+            svc.mkdir(parents=True)
+            (svc / ".env.example").write_text("EXISTING=1\n")
+            surfaces = els.scan_deployment_surfaces(svc, scope="service", path_anchor=repo)
+            dotenv = [s.path for s in surfaces if s.kind == "dotenv_example"]
+            self.assertEqual(dotenv, ["services/moo-arc/.env.example"])
+
+    def test_without_repo_anchor_path_is_bare_the_bug(self):
+        # Documents WHY the caller must pass path_anchor=repo_root: defaulting the
+        # anchor to the service dir yields the bare root-relative path that caused Q.
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            repo = Path(t)
+            svc = repo / "services" / "moo-arc"
+            svc.mkdir(parents=True)
+            (svc / ".env.example").write_text("EXISTING=1\n")
+            surfaces = els.scan_deployment_surfaces(svc, scope="service")  # no anchor
+            self.assertEqual([s.path for s in surfaces if s.kind == "dotenv_example"],
+                             [".env.example"])
+
+
 if __name__ == "__main__":
     unittest.main()
