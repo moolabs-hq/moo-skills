@@ -28,7 +28,8 @@ Three emission helpers mapping 1:1 to the v0.3.0 SDK methods:
   emit_event_safe(...)        -> client.events.ingest(...)   # sibling-pair, dual-lane
 
 tenant_id is intentionally absent from every helper signature — the server
-derives tenant identity from the API key (FR-3 in the SDK unified-ingest PRD).
+derives tenant identity from the API key (never pass tenant_id — the server
+derives it from the key).
 entity_id is the threading key for sibling-pair join downstream.
 
 Error handling is env-gated (single decision point in _handle_emit_err):
@@ -238,7 +239,7 @@ def emit_event_safe(
     time: datetime | None = None,
     meta: dict | None = None,
 ) -> None:
-    """Wraps client.events.ingest (US-011, dual-lane). Use for sibling-pair
+    """Wraps client.events.ingest (dual-lane). Use for sibling-pair
     emission. Required: event_type, customer_id, entity_id + at least one of
     (meter_slug+value) or non-empty spans — the SDK raises ValueError on empty-
     lane synchronously."""

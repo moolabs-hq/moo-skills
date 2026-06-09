@@ -1,14 +1,14 @@
 {# Python + FastAPI codemod template for /cost-billing-instrument.
 
    Targets SDK v0.3.0-rc1 unified-ingest ergonomic helpers:
-     sibling-pair  -> emit_event_safe(...)          (US-011 dual-lane, one call)
+     sibling-pair  -> emit_event_safe(...)          (dual-lane, one call)
      usage-only    -> emit_usage_event_safe(...)
      cost-only     -> emit_cost_event_safe(...)
 
    Call sites NEVER instantiate Moolabs() inline and NEVER touch SDK namespace
    paths directly. Helper owns the env-gated never-drop rail (SDK_DEVELOPMENT
    non-empty -> raise; unset -> structured-log fallback). tenant_id is absent
-   on the wire (FR-3 — server derives from API key).
+   on the wire (the server derives the tenant from the API key).
 
    Variables expected:
      entry.pattern               — sibling-pair | usage-only | cost-only

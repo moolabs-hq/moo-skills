@@ -9,7 +9,7 @@
 //   sibling-pair  -> client.Events.Ingest(ctx, IngestArgs{...})  (both lanes in one call)
 //
 // TenantID is intentionally absent from every *Args struct — the server derives
-// tenant identity from the API key (FR-3 in the SDK unified-ingest PRD).
+// tenant identity from the API key (never pass it — the server derives it).
 //
 // Error handling is env-gated:
 //   SDK_DEVELOPMENT non-empty -> panic on any SDK error (validation or transport)
@@ -113,7 +113,7 @@ func logEvent(msg string, fields map[string]any) {
 
 // EmitUsageEventSafe wraps client.Usage.IngestEvent. Caller passes the SDK's
 // IngestEventArgs directly; helper applies the service-slug source default and
-// the env-gated never-drop rail. Required args (per envelope FR-6): EventType,
+// the env-gated never-drop rail. Required args: EventType,
 // CustomerID, EntityID, MeterSlug, Value (finite).
 func EmitUsageEventSafe(ctx context.Context, args moolabs.IngestEventArgs) {
 	if args.Source == "" {
@@ -146,7 +146,7 @@ func EmitCostEventSafe(ctx context.Context, args moolabs.IngestCostEventArgs) {
 	}
 }
 
-// EmitEventSafe wraps client.Events.Ingest (US-011, dual-lane). Use for
+// EmitEventSafe wraps client.Events.Ingest (dual-lane). Use for
 // sibling-pair emission (usage + cost from one call site, both lanes
 // populated). EntityID is the cross-lane join key. Required: EventType,
 // CustomerID, EntityID, AND at least one of (MeterSlug+Value) or non-empty

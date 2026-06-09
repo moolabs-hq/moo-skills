@@ -1,7 +1,7 @@
 ---
 name: cost-billing-discovery
 description: >-
-  Scan a customer's unknown Python/TypeScript/Go repository to identify where cost ingest events (OpenAI tokens, GPU seconds, S3 PUT) and usage ingest events (completion.delivered, image.rendered) should be emitted via the Moolabs SDK. Produces three reviewable YAML artifacts — cost-events-inventory.yaml (engineer's doc), usage-events-inventory.yaml (CFO's doc), output-input-map.yaml (PM's doc, the chargeability graph). Drives the sequential three-role review (CFO → PM ⇄ PM → Engineer with two PM-centered loops). Handles degraded modes for missing docs/telemetry, catalog misses surfaced as cell ④ findings, brownfield vs greenfield detection. First skill in the Cost+Billing Discovery suite. Use when starting Moolabs SDK integration in a new customer repo or re-running after refactors. Triggers on "discover ingest events", "find where to emit cost/usage events", "scan repo for Moolabs instrumentation", "build chargeability map", "Skill A".
+  Scan a customer's unknown Python/TypeScript/Go repository to identify where cost ingest events (OpenAI tokens, GPU seconds, S3 PUT) and usage ingest events (completion.delivered, image.rendered) should be emitted via the Moolabs SDK. Produces three reviewable YAML artifacts — cost-events-inventory.yaml (engineer's doc), usage-events-inventory.yaml (CFO's doc), output-input-map.yaml (PM's doc, the chargeability graph). Drives the sequential three-role review (CFO → PM ⇄ PM → Engineer with two PM-centered loops). Handles degraded modes for missing docs/telemetry, catalog misses surfaced as cell ④ findings, brownfield vs greenfield detection. First skill in the Cost+Billing Discovery suite. Use when starting Moolabs SDK integration in a new customer repo or re-running after refactors. Triggers on "discover ingest events", "find where to emit cost/usage events", "scan repo for Moolabs instrumentation", "build chargeability map".
 license: MIT
 metadata:
   author: Moolabs
@@ -22,7 +22,7 @@ metadata:
       type: sdk
 ---
 
-# /cost-billing-discovery — Skill A: Cost + usage ingest-event discovery
+# /cost-billing-discovery — Cost + usage ingest-event discovery
 
 You are an expert in scanning unknown customer codebases to identify where Moolabs cost and usage ingest events should be emitted. You produce three reviewable YAML inventories (cost-events, usage-events, output-input map) for a three-role review (CFO / PM / engineer). The downstream codemod (`/cost-billing-instrument`) reads these inventories to wire actual SDK calls into customer code.
 
@@ -41,7 +41,7 @@ Or naturally:
 
 ```
 Discover cost and usage events in /path/to/customer/repo
-Run Skill A on this repo
+Discover instrumentation points in this repo
 Build the chargeability map for our pilot customer
 ```
 
@@ -334,14 +334,14 @@ template's import-instead-of-literal updates.
 | Catalog miss | Surface as cell ④ finding (`reviews/cell-4-unclassifiable.yaml`). Engineer/PM decides: add-to-catalog / non-billable / future. |
 | AST parse failure on a file | Log + skip; continue with rest of repo (per requirements §5.4). |
 | Customer's repo language not Python/TS/Go | Fall back to doc-driven discovery only; codemod skipped; flag clearly to the user. |
-| Existing OpenLLMetry / Helicone / Langfuse | Detected in Phase 1; recorded; Skill 2 codemod will extend their spans rather than wrap (brownfield branch per §6.4b #19g). |
+| Existing OpenLLMetry / Helicone / Langfuse | Detected in Phase 1; recorded; the codemod (cost-billing-instrument) will extend their spans rather than wrap (brownfield branch per §6.4b #19g). |
 
 ## Outputs (consumed by downstream skills)
 
 | File | Consumed by |
 |---|---|
 | `.moolabs/inventory/cost-events-inventory.yaml` | `/cost-billing-instrument` (codemod), `/cost-billing-drift-lint` (CI) |
-| `.moolabs/inventory/usage-events-inventory.yaml` | `/cost-billing-instrument`, `/cost-billing-drift-lint`, `moo-meter` rule synthesis |
+| `.moolabs/inventory/usage-events-inventory.yaml` | `/cost-billing-instrument`, `/cost-billing-drift-lint`, the metering backend |
 | `.moolabs/inventory/output-input-map.yaml` | All downstream — the chargeability graph |
 | `.moolabs/discovery/repo-profile.yaml` | All downstream (informs codemod template selection) |
 | `.moolabs/discovery/cell-4-unclassifiable.yaml` | PM review surface |
@@ -352,7 +352,7 @@ See `cost-billing-shared/three-role-review.md` for the full Y-shaped workflow + 
 
 **Org-wide (1 file each):**
 1. `cfo-stage1-signoff.yaml` — `status: approved` (CFO generated cfo-spec.md + filled cfo_metadata).
-2. `holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks` (Skill R final gate).
+2. `holistic-r-review.md` — `verdict: clean` or `verdict: clean-with-accepted-risks` (the adversarial-review final gate).
 
 **Per-product (one set per product declared in `02-cpo.signed.yaml > products[]` whose `services[]` contains the target `--service <S>`):**
 3. `pm-stage2-signoff-<product-slug>.yaml` — `status: approved` (per product's team-PM signed off the per-product spec).

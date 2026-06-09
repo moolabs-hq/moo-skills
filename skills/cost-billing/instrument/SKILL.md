@@ -1,7 +1,7 @@
 ---
 name: cost-billing-instrument
 description: >-
-  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires usage and cost ingest events into customer code via the Moolabs SDK v0.3.0-rc1 unified-ingest ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`), based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency anchors derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js; Go P0 — adapter in progress), and PII guards. Implements three patterns — sibling-pair (default, single `emit_event_safe` call), usage-only, cost-only. Error handling is env-gated via `SDK_DEVELOPMENT`: strict throw in dev, never-drop structured-log recovery rail in prod. Default insert mode is BLOCKING (Option B per §10 #4) with PR documenting ~35ms latency. Only runs after all three role signoffs + holistic Skill R verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls", "Skill 2".
+  The Cost+Billing suite's CORE DELIVERABLE — a codemod that wires usage and cost ingest events into customer code via the Moolabs SDK v0.3.0-rc1 unified-ingest ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`), based on the three confirmed inventories from cost-billing-discovery. Generates reviewable per-service PRs (max 30 files each) with correct trace/span context, idempotency anchors derived from domain identity, lifecycle handling for success/error/partial-stream paths, framework adapters per stack (Python+FastAPI/Django/Flask, TypeScript+Express/NestJS/Next.js; Go P0 — adapter in progress), and PII guards. Implements three patterns — sibling-pair (default, single `emit_event_safe` call), usage-only, cost-only. Error handling is env-gated via `SDK_DEVELOPMENT`: strict throw in dev, never-drop structured-log recovery rail in prod. Default insert mode is BLOCKING (the PR documents ~35ms latency). Only runs after all three role signoffs + the holistic adversarial-review verdict. Triggers on "run the codemod", "instrument this repo", "wire SDK calls".
 license: MIT
 metadata:
   author: Moolabs
@@ -15,7 +15,7 @@ metadata:
     - cost-billing-adversarial-review   # holistic gate required
 ---
 
-# /cost-billing-instrument — Skill 2: Codemod (the framework's core deliverable)
+# /cost-billing-instrument — Codemod (the framework's core deliverable)
 
 You are an expert codemod author who wires Moolabs SDK calls into customer code based on confirmed inventories. **You are the entire framework's point.** Every upstream skill exists to produce a correct input to you. Discovery is a means; this codemod is the end.
 
@@ -62,7 +62,7 @@ See `cost-billing-shared/operating-principles.md`. Codemod-specific manifestatio
 ## Read first (shared/)
 
 - `sdk-surface-reference.md` — **load this every time.** It carries the verified v0.3.0-rc1 call shapes (`client.usage.ingest_event` singular for usage, `client.cost.ingest_event` for cost, `client.events.ingest` for sibling-pair, what NOT to call).
-- `v1-decisions-log.md` — your defaults come from here (Option B blocking insert, Python+TS v1, coverage-first).
+- `v1-decisions-log.md` — your defaults come from here (blocking insert, Python+TS v1, coverage-first).
 - `anchor-taxonomy.md` — the three patterns (sibling-pair / usage-only / cost-only).
 
 ## Refuse-to-run preconditions
@@ -177,7 +177,7 @@ warnings:
 1. **The SDK evolves between curation and customer runs.** Method names, namespace structure, even the import name can change. A static reference rots silently.
 2. **New capabilities should not require a new codemod release.** When the unified SDK adds a new lane (e.g. a future `client.span_ingest.*` for OTLP-format spans), customers re-running the codemod against the new snapshot will surface the addition automatically. Existing lanes (`usage`, `cost`, `events`) keep working without a skill update.
 3. **The snapshot is auditable customer-context.** Lives at `.moolabs/customer-context/sdk-surface-snapshot.yaml` alongside the other signed Phase 4 artifacts; travels with the PR; future codemod re-runs can diff against it.
-4. **Refuse-to-emit on contract break.** If any of the three v0.3 ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`) is missing from the snapshot, the codemod stops before writing — `unified_ingest_present=false` surfaces as a CRITICAL finding for Skill R, rather than producing a PR that fails at customer runtime.
+4. **Refuse-to-emit on contract break.** If any of the three v0.3 ergonomic methods (`client.usage.ingest_event`, `client.cost.ingest_event`, `client.events.ingest`) is missing from the snapshot, the codemod stops before writing — `unified_ingest_present=false` surfaces as a CRITICAL finding for the adversarial review, rather than producing a PR that fails at customer runtime.
 
 **Steps:**
 
@@ -196,7 +196,7 @@ warnings:
    ```yaml
    # Real output, verified against moolabs-py@v0.3.0-rc1 (re-verified 2026-06-05).
    # The actual SDK exposes 11 FLAT capability namespaces (CAPABILITY_MAP-routed)
-   # PLUS one special `client.events` accessor (US-008 — @property on Moolabs,
+   # PLUS one special `client.events` accessor (a @property on the Moolabs client,
    # not in CAPABILITY_MAP). The snapshot is ground truth.
    generated_at: 2026-06-05T12:30:00Z
    sdk_versions:
@@ -208,7 +208,7 @@ warnings:
        - path: "client.cost"
          methods: [ingest_event, ingest_events_batch, ingest_sdk_spans, submit_adjustment]
        - path: "client.events"
-         methods: [ingest]                                       # US-008 — sibling-pair lane
+         methods: [ingest]                                       # sibling-pair lane
        - path: "client.wallets"
          methods: [allocate_credits, create_wallet, ...]
        # ... remaining flat capabilities (customers, catalog, subscriptions, ...)
@@ -221,14 +221,14 @@ warnings:
      cost_method_path:          "client.cost.ingest_event"
      events_method_path:        "client.events.ingest"
    contract_drift:
-     # populated when expected methods are MISSING — codemod aborts; surfaced to Skill R
+     # populated when expected methods are MISSING — codemod aborts; surfaced to the adversarial review
      missing_expected_methods: []
      renamed_methods: []
    ```
 
 5. **Contract check (gates Phase 2):**
    - `capabilities.unified_ingest_present` MUST be true. If any of the three ergonomic methods is missing the v0.3 helpers cannot render — there is no fallback transport. Abort with a clear error naming the missing lane(s); user can pin to a v0.3+ SDK tag and re-run.
-   - `contract_drift.missing_expected_methods` MUST be empty. Any entry → abort + surface to Skill R.
+   - `contract_drift.missing_expected_methods` MUST be empty. Any entry → abort + surface to the adversarial review.
    - `contract_drift.renamed_methods` MAY have entries → warn but proceed; emit notes into the PR description so the customer reviews them.
 
 The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-site inserts). Neither phase reads `sdk-surface-reference.md` directly anymore; that doc is now a fallback hint for human reviewers, not a runtime input.
@@ -494,7 +494,7 @@ only resolved for an `app`-rooted repo; a `src/<pkg>/` customer got ModuleNotFou
 | `get_client()` | Singleton `Moolabs(...)` instance; `lru_cache(maxsize=1)` | First-call lazy; never raises |
 | `emit_usage_event_safe(args)` | Wraps `client.usage.ingest_event(args)`. Per-call-site templates call this — they NEVER instantiate `Moolabs()` inline or touch the SDK namespaces directly. | Env-gated by `SDK_DEVELOPMENT`: dev mode re-raises so the developer sees the failure at the call site; prod mode logs a structured `moolabs.usage.event` line via the recovery rail. |
 | `emit_cost_event_safe(args)` | Wraps `client.cost.ingest_event(args)`. Cost-only sibling of `emit_usage_event_safe`. | Same env-gated rail. Per-span cost breakdowns travel inside `args.spans`. |
-| `emit_event_safe(args)` | Wraps `client.events.ingest(args)` — the sibling-pair lane that emits BOTH usage and cost in one envelope (US-008). Called from the sibling-pair callsite template. | Same env-gated rail. |
+| `emit_event_safe(args)` | Wraps `client.events.ingest(args)` — the sibling-pair lane that emits BOTH usage and cost in one envelope. Called from the sibling-pair callsite template. | Same env-gated rail. |
 
 **Why a single env-gated rail** — v0.2 helpers branched at customer-render time between a direct SDK call and an OTel-span fallback, gated by a `cost_event_direct_emit` capability flag. That design silently dropped cost data whenever the tracer wasn't sampling the path (head-sampling at 10% drops 90%; background workers without trace context drop all of theirs; dev/CI without OTel drops everything). v0.3.0-rc1 moves the never-drop guarantee inside the SDK: the in-process buffer + F2 fallback chain + structured-log rail handle transport failure without involving the customer's tracer at all. The helper's only job is to call `client.X.ingest_event(args)` (or `client.events.ingest(args)` for sibling-pair) and log via the recovery rail when the SDK call raises. Phase 1.5's `unified_ingest_present` check already refused-to-run if any lane's ergonomic method is missing — there is no template-time branching path to take.
 
@@ -723,7 +723,7 @@ For each insert, pick the right adapter and pattern. Every emission MUST go thro
 
 | Condition | Pattern | Helper call emitted (v0.3.0-rc1) |
 |---|---|---|
-| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_event_safe(...)` — single call carrying BOTH lanes in one envelope (US-008 / `client.events.ingest`); `entity_id` threads the lanes for downstream join |
+| Usage event has inputs AND inputs are within the same handler call subtree | sibling-pair | `emit_event_safe(...)` — single call carrying BOTH lanes in one envelope (`client.events.ingest`); `entity_id` threads the lanes for downstream join |
 | Usage event has no inputs in this handler (terminal-only) | usage-only | `emit_usage_event_safe(...)` only |
 | Inputs exist but no usage event in this handler (subscription customer; infra hot path) | cost-only | `emit_cost_event_safe(...)` only — unconditionally routes to `client.cost.ingest_event(args)`; SDK's in-process buffer + structured-log rail handle never-drop. No transport-picking branch (Phase 1.5's `unified_ingest_present` already refused-to-run if the method is missing). |
 
@@ -754,7 +754,7 @@ The codemod inserts OTel attribute writes onto the *current span*. The current s
 
 **Error/failure path coverage:**
 
-- Don't emit usage events on errors by default (per requirements §4.3). Wrap in `try/except` or `try/catch`.
+- Don't emit usage events on errors by default. Wrap in `try/except` or `try/catch`.
 - Cost events still fire on errors (they reflect spend that already happened).
 - Partial-stream collapse → emit a single usage event at stream-complete; cost events fire as tokens flow.
 
@@ -776,7 +776,7 @@ Run `scripts/pr_writer.py` **(aspirational — not yet on disk; see the Scripts 
     - **Pipeline prerequisites (accepted v1 risk):** The default install pipeline assumes `git`, `awk`, `grep`, `sort` are on the customer's PATH. Minimal containers (Alpine without `apk add git`, distroless) will fail — customer-context's Q16 lets the customer override with `strategy: custom` + a verbatim command for their environment. PR pre-merge note documents this dependency.
     - Run `pytest` (or equivalent) — codemod does NOT run this.
     - Verify three-role signoff files still present + unchanged since codemod ran.
-  - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod chose Option B (blocking + documented) per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."
+  - **Latency note:** "The Moolabs SDK is blocking by design (~35ms typical round-trip). Hot-path callers may want to background-wrap; this codemod uses blocking + documented insert per the v1 default. See `cost-billing-shared/sdk-surface-reference.md`."
   - **TODOs:** the list of cost-only-blocked annotations.
   - **Idempotency review:** the list of `REVIEW: idempotency key derivation` comments.
 
@@ -784,7 +784,7 @@ If `--dry-run`, write everything to `.moolabs/codemod/dry-run/` instead of openi
 
 ### Phase 4: Hand off to /cost-billing-adversarial-review (invocation 6 of 6)
 
-The codemod itself is not the final gate. After the PR(s) are emitted, invoke `/cost-billing-adversarial-review` with `--phase post-codemod --pr <pr-url>`. Per requirements §9, this is the 6th and final Skill R invocation per pipeline run.
+The codemod itself is not the final gate. After the PR(s) are emitted, invoke `/cost-billing-adversarial-review` with `--phase post-codemod --pr <pr-url>`. Per requirements §9, this is the 6th and final the adversarial review invocation per pipeline run.
 
 If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 of `/cost-billing-adversarial-review`) and re-emit.
 
@@ -793,7 +793,7 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 | Condition | Behavior |
 |---|---|
 | Framework adapter missing (e.g., Litestar) | Insert `// TODO: framework=<x> has no v1 adapter; manual instrumentation required` with the suggested call shape. Do not break compilation. Flag CRITICAL for adversarial review. |
-| Confirmed entry's `file:line` is stale (code moved since Skill A ran) | Flag, do not edit. Surface in PR as "REGENERATE: file:line drift detected". Hand off to drift-lint. |
+| Confirmed entry's `file:line` is stale (code moved since cost-billing-discovery ran) | Flag, do not edit. Surface in PR as "REGENERATE: file:line drift detected". Hand off to drift-lint. |
 | Cost-only pattern (subscription customer) | Insert `emit_cost_event_safe()` call. v0.3.0-rc1 unconditionally routes to `client.cost.ingest_event(...)`; the SDK's in-process buffer + structured-log recovery rail provide the never-drop guarantee. There is no v0.2-style "fall back to OTel-span" branch — Phase 1.5's `unified_ingest_present` check already refused-to-run if the cost method is absent. |
 | Existing OpenLLMetry / Helicone / Langfuse span | Extend existing span with `moolabs.*` attributes; do not wrap or duplicate (brownfield branch). |
 | Idempotency key heuristic fails (no path param, no domain identity) | Insert key fallback `{handler}.{epoch_millis}` + comment `// REVIEW: idempotency key derivation — domain identity not detected`. Flag MEDIUM for adversarial review. |
@@ -812,8 +812,8 @@ If the post-codemod review finds CRITICAL or HIGH issues, apply fixes (Phase 3 o
 
 - `references/codemod-patterns.md` — sibling-pair / usage-only / cost-only deep-dive.
 - `references/trace-context-providers.md` — per-framework adapter details (OTel / Datadog / Sentry / custom).
-- `references/idempotency-derivation.md` — heuristic + edge cases + the §6.4 #23 open question.
-- `references/sdk-blocking-rationale.md` — why Option B for v1.
+- `references/idempotency-derivation.md` — heuristic + edge cases + the documented open question.
+- `references/sdk-blocking-rationale.md` — why blocking insert for v1.
 - `references/pr-chunking.md` — service-grouped chunking strategy.
 - `references/pii-guard.md` — the patterns + the test fixtures.
 
