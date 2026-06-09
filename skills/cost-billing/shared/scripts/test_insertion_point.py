@@ -221,6 +221,15 @@ class Python(unittest.TestCase):
         self.assertEqual(p.function, "handler")
         self.assertIsNone(p.review_reason)               # line + named agree -> quiet
 
+    def test_validate_target_function(self):
+        src = "def a():\n    return 1\n\ndef b():\n    return 2\n"
+        self.assertIsNone(ip.validate_target_function(src, "b", "python"))   # exists -> ok
+        # NEGATIVE: a name that is NOT a function in the file is flagged, not accepted
+        reason = ip.validate_target_function(src, "nonexistent", "python")
+        self.assertIsNotNone(reason)
+        self.assertIn("nonexistent", reason)
+        self.assertIsNone(ip.validate_target_function(src, "", "python"))    # empty -> no-op
+
     def test_syntax_error_returns_none(self):
         self.assertIsNone(ip.find_insertion_point("def (:\n", 1, "python"))
 

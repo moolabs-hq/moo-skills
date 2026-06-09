@@ -266,5 +266,36 @@ class CallSiteResolution(unittest.TestCase):
         self.assertEqual(c.context, "http_request")
 
 
+class EntityIdProposer(unittest.TestCase):
+    """P/entity_id capture: WEAK candidates (id-like params/locals), candidates only.
+    Negative cases lead — a false candidate is worse than none."""
+
+    def test_proposes_id_like_params_and_locals(self):
+        src = _src("""
+            def compose(email_id, db):
+                record_id = lookup(email_id)
+                draft = render(record_id)
+                return draft
+        """)
+        cands = cc.propose_entity_id_candidates(src, 3)
+        self.assertIn("email_id", cands)
+        self.assertIn("record_id", cands)
+        self.assertNotIn("db", cands)
+        self.assertNotIn("draft", cands)
+
+    def test_no_id_like_proposes_nothing(self):
+        # NEGATIVE (the one that matters): nothing id-like -> [] -> codemod REFUSES.
+        # Must NOT guess (e.g. 'payload', 'result', 'valid' are not entities).
+        src = _src("""
+            def compose(payload, valid):
+                result = work(payload)
+                return result
+        """)
+        self.assertEqual(cc.propose_entity_id_candidates(src, 3), [])
+
+    def test_syntax_error_proposes_nothing(self):
+        self.assertEqual(cc.propose_entity_id_candidates("def (:\n", 1), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -251,3 +251,47 @@ def classify_file(source: str) -> list[tuple[str, int, ContextClassification]]:
             out.append((node.name, node.lineno,
                         classify_function(node, imports=imports, has_main_guard=has_main)))
     return out
+
+
+def _is_id_like(name: str) -> bool:
+    """Conservative: exactly id/pk/uuid/guid, or a `_id`/`_uuid`/`_pk`/`_guid` suffix.
+    Deliberately NOT a bare 'id' suffix (that matches 'valid', 'grid', 'android') —
+    a false candidate is worse than none (the codemod refuses on no candidate; a
+    wrong one a human rubber-stamps silently mis-bills)."""
+    n = name.lower()
+    return n in ("id", "pk", "uuid", "guid") or n.endswith(("_id", "_uuid", "_pk", "_guid"))
+
+
+def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
+    """D-side capture (P/entity_id): WEAK, deterministic candidates for the metered
+    entity in the function enclosing `lineno` — id-like parameters + id-like assigned
+    locals. CANDIDATES ONLY: discovery writes them to `entity_id_candidate`; a human
+    must confirm one into `entity_id` before the codemod will emit (an unconfirmed
+    candidate still REFUSES). Returns [] when nothing id-like is found — the honest
+    'we don't know the entity' state, NOT a guess. Order: params first, then locals."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    func = _innermost_function_containing(tree, lineno)
+    if func is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name not in seen and _is_id_like(name):
+            seen.add(name)
+            out.append(name)
+
+    a = func.args
+    for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
+        _add(arg.arg)
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    _add(tgt.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            _add(node.target.id)
+    return out

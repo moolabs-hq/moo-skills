@@ -425,6 +425,43 @@ class EndToEndPipeline(unittest.TestCase):
         self.assertIn("from mypkg.services.moolabs_client import", out)
         self.assertNotIn("from app.services.moolabs_client import", out)  # leak gone
 
+    def _build_one(self, entry):
+        import io
+        import contextlib
+        import task_planner as tp
+        signed = {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            tasks = tp.build_tasks(
+                {"entries": []}, {"entries": [entry]}, {"edges": []}, {"capabilities": {}}, signed,
+                {"language": "python", "framework": "fastapi"},
+                attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+                attribution_overrides=[], slug_inventory=None)
+        return tasks[0].inserts[0]
+
+    def test_entity_id_capture_proposed_candidate_still_refuses(self):
+        # THE blocking assertion: a discovery-PROPOSED entity_id candidate is NOT a
+        # confirmed binding. The planner reads only the confirmed `entity_id`; a
+        # candidate-only entry must still flow entity_id=None -> the template REFUSES.
+        # (If a candidate ever satisfied the gate, the refuse-don't-fallback invariant
+        # would be defeated through the back door.)
+        base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
+                "event_type": "svc.x", "product_slug": "svc"}
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
+        # proposed-but-unconfirmed -> refuse
+        ins = self._build_one({**base, "entity_id_candidate": ["email_id"]})
+        self.assertIsNone(ins.attribution_sources.get("entity_id"))
+        out = env.get_template("python-fastapi.j2").render(
+            entry=ins.entry, attribution_sources=ins.attribution_sources)
+        self.assertNotIn("emit_usage_event_safe(", out)
+        self.assertIn("NOT EMITTED", out)
+        # CONFIRMED -> the per-entry entity flows + emits
+        ins2 = self._build_one({**base, "entity_id": "self.email_id"})
+        self.assertEqual(ins2.attribution_sources.get("entity_id"), "self.email_id")
+        out2 = env.get_template("python-fastapi.j2").render(
+            entry=ins2.entry, attribution_sources=ins2.attribution_sources)
+        self.assertIn("entity_id=str(self.email_id)", out2)
+
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
         # the `is defined and entry.idempotency_anchor` guard checks the PARENT, so a

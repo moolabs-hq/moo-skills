@@ -1014,13 +1014,22 @@ def build_tasks(
             _anchor = enriched_entry.get("idempotency_anchor")
             if isinstance(_anchor, dict) and "confidence" not in _anchor:
                 enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
+            # entity_id is PER-ENTRY (per-workflow), unlike the framework-level
+            # attribution keys: flow the CONFIRMED `entry.entity_id` into this
+            # insert's sources (the one place the template reads it). A proposed-
+            # but-unconfirmed candidate (`entity_id_candidate`) is deliberately NOT
+            # read here, so an unconfirmed entity still hits the template's refuse.
+            _entity = entry.get("entity_id") or sources_for_file.get("entity_id")
+            insert_sources = ({**sources_for_file, "entity_id": _entity}
+                              if _entity != sources_for_file.get("entity_id")
+                              else sources_for_file)
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
                     pattern=pattern,
                     entry=enriched_entry,
                     attribution_keys=_attribution_keys_for(primary_fw),
-                    attribution_sources=sources_for_file,
+                    attribution_sources=insert_sources,
                 )
             )
         # stable task id
