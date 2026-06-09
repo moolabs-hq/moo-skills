@@ -145,6 +145,10 @@ class EnvWireTask:
     api_key_accessor: str
     stub_emit_path: str | None
     deployment_stubs: list[dict]
+    # the symbol the helper imports — "settings" (singleton idiom) | "get_settings"
+    # (factory). MUST reach the template (it renders `import {{ settings_import_name }}`)
+    # or the singleton path renders `from app.config import ` -> SyntaxError.
+    settings_import_name: str = "get_settings"
     infra_discovery_gap: bool = False
 
 
@@ -173,6 +177,7 @@ def build_env_wire_tasks(config_wiring_path: Path) -> list[EnvWireTask]:
             api_key_accessor=svc.get("api_key_accessor", ""),
             stub_emit_path=svc.get("stub_emit_path"),
             deployment_stubs=svc.get("deployment_stubs") or [],
+            settings_import_name=svc.get("settings_import_name") or "get_settings",
             infra_discovery_gap=bool(svc.get("infra_discovery_gap", False)),
         ))
     return out
@@ -1200,6 +1205,7 @@ def emit_tasks_yaml(
             lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
             lines.append(f"    mode: {t.mode}")
             lines.append(f"    settings_import_path: {_yaml_scalar(t.settings_import_path)}")
+            lines.append(f"    settings_import_name: {_yaml_scalar(t.settings_import_name)}")
             lines.append(f"    api_key_accessor: {_yaml_scalar(t.api_key_accessor)}")
             lines.append(f"    stub_emit_path: {_yaml_scalar(t.stub_emit_path)}")
             # PR #531 gap-detection: execution agent reads this and emits

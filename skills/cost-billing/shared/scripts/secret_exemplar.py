@@ -77,22 +77,37 @@ def _secret_reason(name: str, annotation: str | None) -> str | None:
     return None
 
 
+def _is_settings_class(node: ast.ClassDef) -> bool:
+    """A config Settings class by the RELIABLE signals only — named `*Settings` or
+    subclassing `*Settings`/`*BaseSettings`. Deliberately NOT 'has a secret field'
+    (that would re-include a `LoginForm` with a `password` field — a DTO, not config)."""
+    if node.name.lower().endswith("settings"):
+        return True
+    return any((_last_name(b) or "").lower().endswith("settings") for b in node.bases)
+
+
 def find_secret_fields(source: str) -> list[SecretField]:
-    """All secret-typed annotated fields (`x: SecretStr` / `stripe_api_key: str`) in
-    `source`, in definition order. Pure AST — no git, no I/O. [] on a syntax error or
-    when nothing looks like a secret (the honest 'no exemplar here' state)."""
+    """Secret-typed annotated fields (`x: SecretStr` / `stripe_api_key: str`) in the
+    customer's CONFIG Settings class(es), in definition order. Scoped to *Settings
+    classes (NOT every class) so a DTO's `password` / a function-local `token` is not
+    proposed as the secret exemplar. Pure AST — no git, no I/O. [] on a syntax error
+    or when nothing looks like a secret (the honest 'no exemplar here' state)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
     out: list[SecretField] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            ann = _unparse(node.annotation)
-            reason = _secret_reason(node.target.id, ann)
-            if reason is not None:
-                out.append(SecretField(name=node.target.id, lineno=node.lineno,
-                                       annotation=ann, reason=reason))
+        if not (isinstance(node, ast.ClassDef) and _is_settings_class(node)):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                ann = _unparse(stmt.annotation)
+                reason = _secret_reason(stmt.target.id, ann)
+                if reason is not None:
+                    out.append(SecretField(name=stmt.target.id, lineno=stmt.lineno,
+                                           annotation=ann, reason=reason))
+    out.sort(key=lambda f: f.lineno)
     return out
 
 
@@ -167,6 +182,9 @@ def _class_is_settings(node: ast.ClassDef) -> bool:
                and _secret_reason(s.target.id, _unparse(s.annotation)) for s in node.body)
 
 
+_FACTORY_VERBS = ("get_", "load_", "make_", "build_", "provide_", "create_", "fetch_", "resolve_")
+
+
 def detect_access_idiom(source: str) -> AccessIdiom:
     """SEARCH (not blame) for HOW the config is read — the dimension blame can't see.
     Mirroring the secret FIELD is not enough; the helper must read it the way the
@@ -184,11 +202,16 @@ def detect_access_idiom(source: str) -> AccessIdiom:
         return AccessIdiom("unknown", None)
     settings_classes = {n.name for n in ast.walk(tree)
                         if isinstance(n, ast.ClassDef) and _class_is_settings(n)}
-    # factory first: an explicit accessor function is the intended public API.
+    # factory first: an explicit accessor function is the intended public API. A
+    # `*settings` name is only a factory when it PROVIDES the config (get/load/build…)
+    # — NOT a mutator (`reset_settings` / `update_settings` / `save_settings` return
+    # None; importing one as the accessor -> None.moolabs_api_key AttributeError).
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nm = node.name.lower()
-            if node.name == "get_settings" or (nm.endswith("settings") and nm != "settings"):
+            if node.name == "get_settings" or (
+                    nm.endswith("settings")
+                    and any(nm.startswith(v) for v in _FACTORY_VERBS)):
                 return AccessIdiom("factory", node.name)
     # singleton: a module-level `name = <SettingsClass>()`.
     for node in tree.body:
@@ -207,32 +230,18 @@ def env_var_for_field(field_name: str) -> str:
     (`arcGlobalApiKey` -> `ARC_GLOBAL_API_KEY`). NOTE: a customer using an `env_prefix`
     / Field(alias=...) maps differently — the trace also greps the FIELD name to catch
     the config site, and the agent widens tokens from the first hit."""
-    snaked = re.sub(r"(?<!^)(?=[A-Z])", "_", field_name)
-    return re.sub(r"_+", "_", snaked).upper()
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", field_name)   # camel boundary: apiKey -> api_Key
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)          # acronym boundary: URLKey -> URL_Key
+    return re.sub(r"_+", "_", s).upper()
 
 
 _GREP_SKIP_DIRS = (".git", ".terraform", "node_modules", "dist", "build", "vendor",
                    ".venv", "venv", "__pycache__", ".mypy_cache", ".next")
 
 
-def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 30) -> list[tuple[str, int, str]]:
-    """FORMAT-AGNOSTIC wide search: every file:line under `repo_root` mentioning any
-    token, minus vendor/build dirs. No parsing — the AGENT classifies the hits + follows
-    references (config vs terraform vs k8s vs secrets-manager is unbounded; do NOT encode
-    a format zoo here). Best-effort: returns [] if grep is absent/fails. Returns
-    [(relpath, lineno, snippet)] — the breadcrumbs of a real secret's complete path."""
-    toks = [t for t in tokens if t]
-    if not toks:
-        return []
-    pattern = "|".join(re.escape(t) for t in toks)
-    excludes = [f"--exclude-dir={d}" for d in _GREP_SKIP_DIRS]
-    try:
-        out = subprocess.run(
-            ["grep", "-rnIE", pattern, *excludes, str(repo_root)],
-            capture_output=True, text=True, timeout=timeout,
-        ).stdout  # grep exits 1 on no-match -> empty stdout, not an error
-    except (OSError, subprocess.SubprocessError):
-        return []
+def _parse_grep_lines(out: str, repo_root: str | None) -> list[tuple[str, int, str]]:
+    """`path:lineno:content` -> [(relpath, lineno, snippet)]. `repo_root=None` means the
+    paths are already repo-relative (git grep); otherwise relpath them from repo_root."""
     hits: list[tuple[str, int, str]] = []
     for line in out.splitlines():
         parts = line.split(":", 2)
@@ -242,8 +251,46 @@ def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 30) -> list[tu
             ln = int(parts[1])
         except ValueError:
             continue
-        hits.append((os.path.relpath(parts[0], repo_root), ln, parts[2].strip()[:200]))
+        path = parts[0] if repo_root is None else os.path.relpath(parts[0], repo_root)
+        hits.append((path, ln, parts[2].strip()[:200]))
     return hits
+
+
+def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 120) -> list[tuple[str, int, str]]:
+    """FORMAT-AGNOSTIC wide search: every file:line under `repo_root` mentioning any
+    token. No parsing — the AGENT classifies the hits + follows references (config vs
+    terraform vs k8s vs secrets-manager is unbounded; do NOT encode a format zoo here).
+    Returns [(relpath, lineno, snippet)] — the breadcrumbs of a real secret's path.
+
+    PRIMARY is `git grep`: TRACKED files only, so it auto-skips .venv/node_modules/
+    .terraform and is ~0.2s where a whole-repo `grep -rn` is ~90s on a real monorepo.
+    That speed gap is the bug class: `grep -rn` blows the timeout, and a swallowed
+    timeout returns [] — INDISTINGUISHABLE from 'no wiring exists', which ships an empty
+    secret path. So a TimeoutExpired is RAISED, never returned as []: a timeout must
+    never look like 'nothing found'. Falls back to `grep -rn` (vendor-excluded) only when
+    the repo is not a git checkout; returns [] only when no search tool is available."""
+    toks = [t for t in tokens if t]
+    if not toks:
+        return []
+    pattern = "|".join(re.escape(t) for t in toks)
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "grep", "-nIE", pattern],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode in (0, 1):  # 0 = matches, 1 = no matches — both are valid results
+            return _parse_grep_lines(r.stdout, repo_root=None)  # paths already repo-relative
+    except subprocess.TimeoutExpired:
+        raise  # NEVER swallow a timeout into [] — that masks the #550 empty-path gap
+    except (OSError, subprocess.SubprocessError):
+        pass  # git absent / not a git checkout -> fall back
+    excludes = [f"--exclude-dir={d}" for d in _GREP_SKIP_DIRS]
+    try:
+        r = subprocess.run(["grep", "-rnIE", pattern, *excludes, str(repo_root)],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return _parse_grep_lines(r.stdout, repo_root=str(repo_root))
 
 
 def blame_line_dates(file_path: str, linenos: list[int]) -> dict[int, float]:

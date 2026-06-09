@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 {# Phase 1.7 env-wire (NEW v0.3 env-routing migration):
    env_config.mode               — "modify" | "stub"
    env_config.settings_import_path — e.g. "app.config" or "app.services.moolabs_settings"
+   env_config.settings_import_name — the imported symbol: "settings" (singleton idiom) | "get_settings" (factory)
    env_config.api_key_accessor   — e.g. "get_settings().moolabs_api_key.get_secret_value()"
 
    The v0.2-era strategy-branched _resolve_api_key (boto3/hvac/google.cloud)

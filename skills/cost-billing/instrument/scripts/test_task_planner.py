@@ -389,6 +389,31 @@ class EnvWireTaskGapDetection(unittest.TestCase):
             )
             tasks = tp.build_env_wire_tasks(plan_path)
             self.assertFalse(tasks[0].infra_discovery_gap)
+            # back-compat: a plan with no settings_import_name defaults to the factory.
+            self.assertEqual(tasks[0].settings_import_name, "get_settings")
+
+    def test_settings_import_name_propagates_plan_to_task_to_yaml(self):
+        # IMPORTANT (review): the singleton idiom's import name must reach the template,
+        # or the helper renders `from app.config import ` -> SyntaxError. Pin the path:
+        # config-wiring-plan.yaml -> EnvWireTask -> tasks.yaml.
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan_path = Path(t) / "config-wiring-plan.yaml"
+            plan_path.write_text(
+                'services:\n'
+                '  - service_slug: "svc"\n'
+                '    mode: modify\n'
+                '    settings_import_path: "app.config"\n'
+                '    settings_import_name: "settings"\n'          # singleton idiom
+                '    api_key_accessor: "settings.moolabs_api_key.get_secret_value()"\n'
+                '    stub_emit_path: null\n'
+                '    deployment_stubs: []\n'
+            )
+            tasks = tp.build_env_wire_tasks(plan_path)
+            self.assertEqual(tasks[0].settings_import_name, "settings")   # read from plan
+            out = Path(t) / "tasks.yaml"
+            tp.emit_tasks_yaml([], out, env_wire_tasks=tasks)
+            self.assertIn('settings_import_name: "settings"', out.read_text())   # reaches tasks.yaml
 
     def test_emit_tasks_yaml_includes_gap_flag_and_per_stub_scope(self):
         """The tasks.yaml output must include infra_discovery_gap AND each

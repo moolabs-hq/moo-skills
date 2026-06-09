@@ -268,7 +268,8 @@ for helper in ["python-moolabs-client.py.j2", "typescript-moolabs-client.ts.j2"]
                        and "log_kwargs[" not in r)
         # Phase 1.7 env-wire: helper imports from get_settings() instead of
         # direct os.environ / strategy-branched fetches.
-        has_get_settings = "from app.config import get_settings" in r
+        _import_name = render_ctx["env_config"].get("settings_import_name", "get_settings")
+        has_get_settings = f"from app.config import {_import_name}" in r
         # Phase 1.7 negative-leakage: NO strategy-branched fetches.
         no_strategy_branches = (
             "import boto3" not in r and

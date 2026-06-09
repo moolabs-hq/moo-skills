@@ -49,8 +49,18 @@ class FindSecretFields(unittest.TestCase):
         self.assertIn("name suffix", by["legacy_token"].reason)
 
     def test_no_secrets_returns_empty(self):
-        src = "class S:\n    a: int = 1\n    name: str = ''\n"
+        src = "class Settings:\n    a: int = 1\n    name: str = ''\n"
         self.assertEqual(se.find_secret_fields(src), [])
+
+    def test_scoped_to_settings_classes_not_dtos(self):
+        # a DTO with a secret-named field must NOT be proposed as the config exemplar.
+        src = ("from pydantic_settings import BaseSettings\n"
+               "from pydantic import SecretStr\n"
+               "class LoginForm:\n    password: str = ''\n"
+               "class Settings(BaseSettings):\n    stripe_api_key: SecretStr\n")
+        names = [f.name for f in se.find_secret_fields(src)]
+        self.assertIn("stripe_api_key", names)   # Settings field
+        self.assertNotIn("password", names)      # DTO field excluded (not a *Settings class)
 
     def test_syntax_error_returns_empty(self):
         self.assertEqual(se.find_secret_fields("class (:\n"), [])
@@ -81,7 +91,7 @@ class ProposeExemplar(unittest.TestCase):
 
     def test_unanimous_when_recent_three_agree(self):
         src = ("from pydantic import SecretStr\n"
-               "class S:\n"
+               "class Settings:\n"
                "    a_token: SecretStr\n    b_secret: SecretStr\n    c_api_key: SecretStr\n")
         ex = se.propose_exemplar(src)
         self.assertEqual(ex.secret_type, "SecretStr")
@@ -89,7 +99,7 @@ class ProposeExemplar(unittest.TestCase):
         self.assertEqual(len(ex.considered), 3)
 
     def test_single_secret_agreement(self):
-        src = "class S:\n    only_api_key: str = ''\n"
+        src = "class Settings:\n    only_api_key: str = ''\n"
         ex = se.propose_exemplar(src)
         self.assertEqual(ex.agreement, "single")
         self.assertEqual(len(ex.considered), 1)
@@ -97,7 +107,7 @@ class ProposeExemplar(unittest.TestCase):
     def test_split_when_two_disagree(self):
         # exactly two recent secrets, one each type -> no majority -> split/mixed.
         src = ("from pydantic import SecretStr\n"
-               "class S:\n    a_token: SecretStr\n    b_password: str = ''\n")
+               "class Settings:\n    a_token: SecretStr\n    b_password: str = ''\n")
         ex = se.propose_exemplar(src, n=2)
         self.assertEqual(ex.agreement, "split")
         self.assertEqual(ex.secret_type, "mixed")
@@ -149,6 +159,21 @@ class AccessIdiomSearch(unittest.TestCase):
                "logger = Logger()\n")
         self.assertEqual(se.detect_access_idiom(src).kind, "unknown")
 
+    def test_mutator_not_misclassified_as_factory(self):
+        # `reset_settings` / `update_settings` end in 'settings' but RETURN None — they
+        # are NOT the accessor. A real singleton must win, not the mutator.
+        for mutator in ("reset_settings", "update_settings", "save_settings"):
+            src = ("class Settings:\n    api_key: str = ''\n"
+                   "settings = Settings()\n"
+                   f"def {mutator}():\n    global settings\n    settings = Settings()\n")
+            idiom = se.detect_access_idiom(src)
+            self.assertEqual(idiom.kind, "singleton", mutator)
+            self.assertEqual(idiom.import_name, "settings", mutator)
+        # but a genuine provider (load_settings) IS a factory
+        src2 = ("class Settings:\n    api_key: str = ''\n"
+                "def load_settings():\n    return Settings()\n")
+        self.assertEqual(se.detect_access_idiom(src2).kind, "factory")
+
 
 class BlamePorcelain(unittest.TestCase):
     def test_parses_author_time_per_sha_incl_repeated_commit(self):
@@ -177,30 +202,64 @@ class TokenDerivation(unittest.TestCase):
         self.assertEqual(se.env_var_for_field("arcGlobalApiKey"), "ARC_GLOBAL_API_KEY")
         self.assertEqual(se.env_var_for_field("MoolabsApiKey"), "MOOLABS_API_KEY")
 
+    def test_acronyms_not_shattered(self):
+        self.assertEqual(se.env_var_for_field("apiKeyURL"), "API_KEY_URL")
+        self.assertEqual(se.env_var_for_field("someHTTPKey"), "SOME_HTTP_KEY")
+
 
 @unittest.skipUnless(shutil.which("grep"), "grep not available")
 class GrepTokens(unittest.TestCase):
-    """Format-AGNOSTIC wide search — the same grep finds the exemplar in terraform, k8s
-    yaml, AND python, and skips vendor. No format zoo: the agent classifies the hits."""
+    """Format-AGNOSTIC wide search — the same search finds the exemplar in terraform,
+    k8s yaml, AND python, and skips vendor. No format zoo: the agent classifies hits."""
 
-    def test_wide_search_finds_all_formats_skips_vendor(self):
+    @staticmethod
+    def _make_repo(d, git):
+        os.makedirs(os.path.join(d, "infra"))
+        os.makedirs(os.path.join(d, "node_modules", "x"))
+        with open(os.path.join(d, "infra", "main.tf"), "w") as f:
+            f.write('secrets = [{ name = "ARC_GLOBAL_API_KEY", valueFrom = x["shared/api-key"] }]\n')
+        with open(os.path.join(d, "deploy.yaml"), "w") as f:
+            f.write("        - name: ARC_GLOBAL_API_KEY\n          valueFrom:\n")
+        with open(os.path.join(d, "config.py"), "w") as f:
+            f.write("arc_global_api_key: SecretStr\n")
+        with open(os.path.join(d, "node_modules", "x", "main.tf"), "w") as f:
+            f.write("ARC_GLOBAL_API_KEY\n")   # vendor copy -> must be skipped
+        if git:
+            import subprocess
+            with open(os.path.join(d, ".gitignore"), "w") as f:
+                f.write("node_modules/\n")
+            subprocess.run(["git", "init", "-q", d], check=True)
+            subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+
+    def test_fallback_grep_rn_non_git_excludes_vendor(self):
         with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, "infra"))
-            os.makedirs(os.path.join(d, "node_modules", "x"))
-            with open(os.path.join(d, "infra", "main.tf"), "w") as f:
-                f.write('secrets = [{ name = "ARC_GLOBAL_API_KEY", valueFrom = x["shared/api-key"] }]\n')
-            with open(os.path.join(d, "deploy.yaml"), "w") as f:
-                f.write("        - name: ARC_GLOBAL_API_KEY\n          valueFrom:\n")
-            with open(os.path.join(d, "config.py"), "w") as f:
-                f.write("arc_global_api_key: SecretStr\n")
-            with open(os.path.join(d, "node_modules", "x", "main.tf"), "w") as f:
-                f.write("ARC_GLOBAL_API_KEY\n")   # vendor copy -> must be skipped
-            hits = se.grep_tokens(d, ["ARC_GLOBAL_API_KEY", "arc_global_api_key"])
-            files = {h[0] for h in hits}
+            self._make_repo(d, git=False)   # not a git checkout -> grep -rn fallback
+            files = {h[0] for h in se.grep_tokens(d, ["ARC_GLOBAL_API_KEY", "arc_global_api_key"])}
+            self.assertIn("infra/main.tf", files)
+            self.assertIn("config.py", files)
+            self.assertNotIn("node_modules/x/main.tf", files)
+
+    @unittest.skipUnless(shutil.which("git"), "git not available")
+    def test_git_grep_primary_skips_gitignored_vendor(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._make_repo(d, git=True)   # git checkout -> git grep (tracked-only)
+            files = {h[0] for h in se.grep_tokens(d, ["ARC_GLOBAL_API_KEY", "arc_global_api_key"])}
             self.assertIn("infra/main.tf", files)
             self.assertIn("deploy.yaml", files)
             self.assertIn("config.py", files)
-            self.assertNotIn("node_modules/x/main.tf", files)
+            self.assertNotIn("node_modules/x/main.tf", files)   # gitignored -> untracked -> unseen
+
+    def test_timeout_RAISES_never_masks_as_empty(self):
+        # THE #550 fix: a timeout must never look like 'no hits' (which ships an empty
+        # secret path). It propagates, it does not return [].
+        import subprocess as sp
+        orig = sp.run
+        sp.run = lambda *a, **k: (_ for _ in ()).throw(sp.TimeoutExpired(cmd="grep", timeout=1))
+        try:
+            with self.assertRaises(sp.TimeoutExpired):
+                se.grep_tokens("/whatever", ["TOKEN"])
+        finally:
+            sp.run = orig
 
     def test_empty_tokens_returns_empty(self):
         self.assertEqual(se.grep_tokens("/tmp", []), [])
