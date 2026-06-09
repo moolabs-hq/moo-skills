@@ -328,6 +328,20 @@ of cost-billing-discovery) and produces
 `.moolabs/customer-context/config-wiring-plan.yaml` describing the per-service
 env-wiring decisions.
 
+**Preferred path — mirror the customer's MOST-RECENTLY-ADDED secret (don't make them hunt).** The strongest "how do we wire a secret here" signal is the last secret the team actually wired — it is the path they currently consider correct, and it is blame-detectable, so the skill PROPOSES it and the engineer just confirms (same ergonomics as the entity_id prompt, near-zero effort):
+
+1. **Auto-propose the exemplar.** Run `shared/scripts/secret_exemplar`:
+   - Config: `propose_exemplar(settings_source, line_dates=blame_line_dates(settings_path, [f.lineno for f in find_secret_fields(settings_source)]))` → the most-recently-added secret-typed field in the customer's Settings class (`SecretStr` / `*_api_key` / `*_token` / `*_secret`), ranked by `git blame` author date. `confidence="blame"` when dated; `"position"` (last-defined) when blame is unavailable — eyeball that case.
+   - Deployment (if in-repo): the newest secret variable in `modules/secrets/variables.tf` / the k8s Secret (the agent blames it the same way; HCL/yaml is read, not AST-parsed).
+2. **Ask ONE confirm-or-correct question**, e.g.: *"Your most-recently-wired secret looks like `STRIPE_API_KEY` — read at `@app/config.py:42`, provisioned at `@…/modules/secrets/variables.tf:88`, threaded into `@…/ecs-service/main.tf` `secrets:`. I'll wire `MOOLABS_API_KEY` the same way. Confirm, or @-link a different secret."* If the detector returns None (no secret field) or infra is in a separate repo, fall back to: *"Paste / @-link one secret you wire like you'd wire a new one."*
+3. **Trace-and-mirror** (structurally copy the exemplar, do NOT hand-author a generic shape):
+   - Config → `mode = "modify"`: add `moolabs_api_key` to the SAME Settings class with the SAME accessor shape as the exemplar field (the helper reads `get_settings().moolabs_api_key…`). Mirroring a real field beats the bare stub.
+   - Deployment, in-repo → copy the exemplar's blocks (the `variable {}`, the SSM/Secret resource, the task-def `secrets:` entry) into the mirrored `moolabs_api_key` block — or a diff-CHECKLIST for repo-scope/shared infra (cross-service blast radius; see below).
+   - Deployment, separate-repo/invisible → mirror from the @-linked/pasted exemplar block, still producing the EXACT targeted edit, not a generic note.
+4. **Validate by structural diff:** assert the emitted block matches the exemplar's shape (same var schema, same `secrets:` entry shape). If it doesn't, FLAG — don't ship a guessed block.
+
+When NO exemplar exists at all (greenfield repo with zero secrets wired), fall back to the generic stub below. The bootstrap engineer-stage secret question (Q14) defers to this auto-detection: it no longer asks the engineer to specify the secret source up front — Phase 1.7 detects + confirms it against the real repo.
+
 For each service:
 
 - **mode = "modify"** (scanner recognized the customer's pattern at
