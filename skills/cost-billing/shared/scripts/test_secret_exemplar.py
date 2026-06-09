@@ -54,7 +54,7 @@ class FindSecretFields(unittest.TestCase):
 
 
 class ProposeExemplar(unittest.TestCase):
-    def test_newest_by_blame_wins_even_if_not_last_defined(self):
+    def test_newest_by_blame_wins_and_opinion_from_last_three(self):
         fields = se.find_secret_fields(_SETTINGS)
         by_name = {f.name: f for f in fields}
         # stripe_api_key (NOT last-defined) is the most-recently-ADDED by blame date
@@ -62,13 +62,42 @@ class ProposeExemplar(unittest.TestCase):
                  by_name["legacy_token"].lineno: 1000.0,
                  by_name["openai_secret"].lineno: 1500.0}
         ex = se.propose_exemplar(_SETTINGS, line_dates=dates)
-        self.assertEqual(ex.field.name, "stripe_api_key")
+        self.assertEqual(ex.field.name, "stripe_api_key")    # primary = newest
         self.assertEqual(ex.confidence, "blame")
+        # OPINION from the last 3 (not just one): stripe(SecretStr), openai(SecretStr),
+        # legacy(plain) -> 2/3 SecretStr -> majority, not a single instance.
+        self.assertEqual({f.name for f in ex.considered},
+                         {"stripe_api_key", "legacy_token", "openai_secret"})
+        self.assertEqual(ex.secret_type, "SecretStr")
+        self.assertEqual(ex.agreement, "majority")
 
     def test_falls_back_to_last_defined_without_dates(self):
         ex = se.propose_exemplar(_SETTINGS, line_dates=None)
         self.assertEqual(ex.field.name, "openai_secret")   # last-defined secret
         self.assertEqual(ex.confidence, "position")        # weaker signal -> flagged
+
+    def test_unanimous_when_recent_three_agree(self):
+        src = ("from pydantic import SecretStr\n"
+               "class S:\n"
+               "    a_token: SecretStr\n    b_secret: SecretStr\n    c_api_key: SecretStr\n")
+        ex = se.propose_exemplar(src)
+        self.assertEqual(ex.secret_type, "SecretStr")
+        self.assertEqual(ex.agreement, "unanimous")
+        self.assertEqual(len(ex.considered), 3)
+
+    def test_single_secret_agreement(self):
+        src = "class S:\n    only_api_key: str = ''\n"
+        ex = se.propose_exemplar(src)
+        self.assertEqual(ex.agreement, "single")
+        self.assertEqual(len(ex.considered), 1)
+
+    def test_split_when_two_disagree(self):
+        # exactly two recent secrets, one each type -> no majority -> split/mixed.
+        src = ("from pydantic import SecretStr\n"
+               "class S:\n    a_token: SecretStr\n    b_password: str = ''\n")
+        ex = se.propose_exemplar(src, n=2)
+        self.assertEqual(ex.agreement, "split")
+        self.assertEqual(ex.secret_type, "mixed")
 
     def test_none_when_no_secret(self):
         self.assertIsNone(se.propose_exemplar("class S:\n    a: int = 1\n"))

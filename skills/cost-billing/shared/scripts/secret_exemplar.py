@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 
 # SecretStr/SecretBytes (pydantic) is the strongest signal — a field the customer
@@ -42,8 +43,11 @@ class SecretField:
 
 @dataclass(frozen=True)
 class Exemplar:
-    field: SecretField
-    confidence: str         # "blame" (dated, most-recently-added) | "position" (last-defined fallback)
+    field: SecretField                   # the secret to MIRROR (primary = most-recently-added)
+    confidence: str                      # "blame" (dated) | "position" (last-defined fallback)
+    considered: tuple[SecretField, ...]  # the last N (<=3) the OPINION is formed from, newest first
+    secret_type: str                     # consensus type across `considered`: "SecretStr" | "plain" | "mixed"
+    agreement: str                       # "single" | "unanimous" | "majority" | "split" — how settled the recent convention is
 
 
 @dataclass(frozen=True)
@@ -97,24 +101,52 @@ def _unparse(node) -> str | None:
         return None
 
 
-def propose_exemplar(source: str, line_dates: dict[int, float] | None = None) -> "Exemplar | None":
-    """The most-recently-added secret field to mirror, or None when there are none.
+def _field_type(f: SecretField) -> str:
+    return ("SecretStr" if f.annotation and any(t in f.annotation for t in _SECRET_ANNOTATIONS)
+            else "plain")
 
-    `line_dates` maps a field's line -> a recency key (e.g. git author epoch); the
-    field with the newest date wins (confidence="blame"). Without it (blame
-    unavailable / not a git repo), falls back to the LAST-DEFINED field
-    (confidence="position") — a weaker proxy the engineer should eyeball. CANDIDATE
-    ONLY: the engineer confirms or @-links a different secret at Phase 1.7."""
+
+def _ranked(fields: list[SecretField], line_dates: dict[int, float] | None):
+    """Secret fields most-recently-added FIRST, + the confidence of that ordering."""
+    if line_dates:
+        dated = sorted((f for f in fields if f.lineno in line_dates),
+                       key=lambda f: (line_dates[f.lineno], f.lineno), reverse=True)
+        undated = sorted((f for f in fields if f.lineno not in line_dates),
+                         key=lambda f: f.lineno, reverse=True)
+        if dated:
+            return dated + undated, "blame"
+    return sorted(fields, key=lambda f: f.lineno, reverse=True), "position"
+
+
+def propose_exemplar(source: str, line_dates: dict[int, float] | None = None,
+                     n: int = 3) -> "Exemplar | None":
+    """Form an OPINION from the customer's last `n` (default 3) secrets — not one.
+
+    One secret can be an anomaly (a deprecated path, a one-off); the last few are the
+    convention the team currently considers correct. Ranks secret fields newest-first
+    (`line_dates` = git author epochs -> confidence="blame"; absent -> last-defined,
+    confidence="position"), takes the top `n` as `considered`, mirrors the PRIMARY
+    (newest) field, and reads a CONSENSUS `secret_type` (majority SecretStr vs plain)
+    + an `agreement` level so the caller knows how settled the recent pattern is
+    (split -> the engineer should look harder before confirming). None when there are
+    no secrets. CANDIDATE ONLY — confirmed by a human at Phase 1.7."""
     fields = find_secret_fields(source)
     if not fields:
         return None
-    if line_dates:
-        dated = [(line_dates.get(f.lineno), f) for f in fields if f.lineno in line_dates]
-        if dated:
-            # newest date wins; ties broken by later line (later in the file = later add)
-            best = max(dated, key=lambda dl: (dl[0], dl[1].lineno))
-            return Exemplar(field=best[1], confidence="blame")
-    return Exemplar(field=fields[-1], confidence="position")
+    ranked, confidence = _ranked(fields, line_dates)
+    considered = tuple(ranked[:n])
+    types = [_field_type(f) for f in considered]
+    top, n_top = Counter(types).most_common(1)[0]
+    if len(considered) == 1:
+        agreement, secret_type = "single", top
+    elif n_top == len(considered):
+        agreement, secret_type = "unanimous", top
+    elif n_top > len(considered) / 2:
+        agreement, secret_type = "majority", top
+    else:
+        agreement, secret_type = "split", "mixed"
+    return Exemplar(field=ranked[0], confidence=confidence, considered=considered,
+                    secret_type=secret_type, agreement=agreement)
 
 
 def _last_name(node) -> str | None:
