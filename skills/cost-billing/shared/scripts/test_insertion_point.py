@@ -31,23 +31,103 @@ def _return_idx(lines):
 
 
 class Python(unittest.TestCase):
-    def test_after_work_before_return(self):
+    """Placement targets the enclosing function's SUCCESS-RETURN path, tested against
+    the anchor shapes discovery ACTUALLY emits (def-line, return-line,
+    call-before-guard, multi-return) — NOT a clean work statement. The old
+    'innermost statement containing entry.line' rule crashed (def-line -> emit after
+    the whole function -> F821) or dead-coded (return-line -> emit after the return);
+    both pass py_compile, so the fixtures must encode the REAL anchors."""
+
+    def test_clean_work_line_single_return_is_quiet(self):
+        # the happy path: work statement + one return -> place before the return,
+        # no REVIEW PLACEMENT noise.
         src = "def h(req):\n    x = work(req)\n    return x\n"
         p = ip.find_insertion_point(src, 2, "python")
-        self.assertEqual((p.function, p.after_line, p.indent), ("h", 2, "    "))
+        self.assertEqual(p.function, "h")
+        self.assertEqual(p.indent, "    ")
         lines = ip.apply_insert(src, p.after_line, "EMIT()", p.indent).splitlines()
-        self.assertLess(_emit_idx(lines), _return_idx(lines))      # not dead code
-        self.assertEqual(lines[_emit_idx(lines)], "    EMIT()")    # indent matches
+        self.assertLess(_emit_idx(lines), _return_idx(lines))   # before the return
+        self.assertIsNone(p.review_reason)                      # quiet on the happy path
 
-    def test_multiline_after_full_span(self):
+    def test_def_line_anchor_descends_never_post_function(self):
+        # communications.py:705 shape — entry.line is the def signature. MUST place
+        # INSIDE the function (no F821 from class-body `self`), and be LOUD.
+        src = ("class Agent:\n"
+               "    def build(self, x):\n"   # line 2 — the def (anchor)
+               "        y = work(x)\n"
+               "        return y\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        self.assertEqual(p.function, "build")
+        self.assertEqual(p.indent, "        ")            # 8 — function body, not 4
+        lines = ip.apply_insert(src, p.after_line, "EMIT()", p.indent).splitlines()
+        self.assertLess(_emit_idx(lines), _return_idx(lines))
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("def signature", p.review_reason)
+
+    def test_return_line_anchor_places_before_return_not_dead_code(self):
+        # cash_application.py:134 shape — entry.line is `return result`.
+        src = "def handler(s):\n    result = work()\n    return result\n"
+        p = ip.find_insertion_point(src, 3, "python")
+        lines = ip.apply_insert(src, p.after_line, "EMIT()", p.indent).splitlines()
+        self.assertLess(_emit_idx(lines), _return_idx(lines))   # NOT after the return
+
+    def test_call_before_failure_guard_places_after_guard(self):
+        # inbound_classifier.py shape — work + `if x is None: return None` guard.
+        # Placing before the SUCCESS return lands AFTER the early guard -> no phantom
+        # bill on the failure path.
+        src = ("def handler(s):\n"
+               "    result = call_llm()\n"   # line 2 — the call (anchor)
+               "    if result is None:\n"
+               "        return None\n"
+               "    return result\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        lines = ip.apply_insert(src, p.after_line, "EMIT()", p.indent).splitlines()
+        guard_i = next(i for i, l in enumerate(lines) if "return None" in l)
+        self.assertGreater(_emit_idx(lines), guard_i)   # AFTER the failure guard
+        # the guard is a NESTED return; only ONE top-level return -> the success-path
+        # placement is deterministic here, so it's correctly placed AND quiet.
+        self.assertIsNone(p.review_reason)
+
+    def test_multiple_top_level_returns_is_loud(self):
+        # two TOP-LEVEL returns -> which is the success path is ambiguous -> the
+        # placement is a best guess and MUST carry a REVIEW PLACEMENT marker.
+        src = ("def handler(r):\n"
+               "    if not r.ok:\n"
+               "        return None\n"   # nested guard (doesn't count)
+               "    x = work(r)\n"
+               "    if x:\n"
+               "        return x\n"      # NOT top-level (nested in `if x:`)
+               "    return None\n")      # top-level
+        src2 = ("def handler(r):\n"
+                "    x = work(r)\n"
+                "    return early(x)\n"   # top-level return #1
+                "    return x\n")         # top-level return #2 (unreachable, but shows the shape)
+        p = ip.find_insertion_point(src2, 2, "python")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("multiple top-level returns", p.review_reason)
+
+    def test_conditional_work_is_loud(self):
+        # the anchored work is inside an `if` but the success-return rule hoists the
+        # emit to function level -> it would fire even when the branch didn't run
+        # (over-bill). Single top-level return + not a def-line, so ONLY the
+        # conditional-work trigger can make this loud.
+        src = ("def handler(req):\n"
+               "    if req.needs_email:\n"
+               "        email = compose_email(req)\n"   # line 3 — conditional work
+               "    return req.id\n")
+        p = ip.find_insertion_point(src, 3, "python")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("conditional", p.review_reason)
+
+    def test_multiline_work_after_full_span(self):
         src = "def h():\n    x = work(\n        a,\n    )\n    return x\n"
-        p = ip.find_insertion_point(src, 3, "python")  # entry.line mid-statement
+        p = ip.find_insertion_point(src, 3, "python")
         self.assertEqual(p.after_line, 4)              # after the WHOLE call
 
-    def test_nested_branch_indent(self):
-        src = "def h(r):\n    if r.ok:\n        x = work(r)\n        return x\n    return None\n"
-        p = ip.find_insertion_point(src, 3, "python")
-        self.assertEqual(p.indent, "        ")          # 8-space branch body
+    def test_placement_marker_helper(self):
+        marked = ip.with_placement_marker("EMIT()", "multiple returns", "# ")
+        self.assertTrue(marked.startswith("# REVIEW PLACEMENT: multiple returns\n"))
+        self.assertEqual(ip.with_placement_marker("EMIT()", None, "# "), "EMIT()")
 
     def test_syntax_error_returns_none(self):
         self.assertIsNone(ip.find_insertion_point("def (:\n", 1, "python"))
@@ -69,8 +149,33 @@ class TypeScript(unittest.TestCase):
         p = ip.find_insertion_point(src, 3, "typescript")
         self.assertEqual(p.after_line, 4)              # after the multi-line const
         self.assertEqual(p.indent, "  ")
+        self.assertIsNone(p.review_reason)             # clean work line -> quiet
         lines = ip.apply_insert(src, p.after_line, "EMIT();", p.indent).splitlines()
         self.assertLess(_emit_idx(lines), _return_idx(lines))
+
+    def test_def_line_anchor_descends_and_is_loud(self):
+        # method signature anchor -> place INSIDE the method (never post-function),
+        # and be LOUD.
+        src = ("class A {\n"
+               "  build(x) {\n"          # line 2 — the signature (anchor)
+               "    const y = work(x);\n"
+               "    return y;\n"
+               "  }\n}\n")
+        p = ip.find_insertion_point(src, 2, "typescript")
+        self.assertEqual(p.function, "build")
+        self.assertEqual(p.indent, "    ")             # inside the method body
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("function signature", p.review_reason)
+
+    def test_conditional_work_is_loud(self):
+        src = ("function h(req) {\n"
+               "  if (req.x) {\n"
+               "    const e = work(req);\n"   # line 3 — conditional work
+               "  }\n"
+               "  return req.id;\n}\n")
+        p = ip.find_insertion_point(src, 3, "typescript")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("conditional", p.review_reason)
 
 
 @unittest.skipUnless(_HAS_GO, "tree-sitter (go) not installed")

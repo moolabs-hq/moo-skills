@@ -593,14 +593,24 @@ You are instrumenting ONE file. Your job:
    it handles ALL THREE supported languages:
      a. Compute the target:
         `shared/scripts/insertion_point.find_insertion_point(source, entry.line,
-        language)` → `(function, after_line, indent)`. It returns the innermost
-        statement containing `entry.line` (the "work"), the line after its FULL
-        span, and that statement's leading-whitespace string — so the emit lands
-        right after the work, in the SAME block, before the function's return,
-        never dead code, never mid-expression, and tab/space-correct (Go tabs are
-        preserved). Python uses the stdlib `ast`; TypeScript/Go use tree-sitter.
-     b. Apply it: `shared/scripts/insertion_point.apply_insert(source, after_line,
-        rendered_insert, indent)` — language-agnostic text splice.
+        language)` → `(function, after_line, indent, review_reason)`. `entry.line`
+        only SELECTS the enclosing function; placement then targets that function's
+        SUCCESS-RETURN path — before the final return, after the last work statement
+        AND after any early-failure guards — so the emit fires on success. This is
+        robust to the anchor being a def line, a `return`, or the work call, and it
+        NEVER places after the whole function (an F821/scope crash) or after a
+        return (dead code). tab/space-correct (Go tabs preserved). Python uses the
+        stdlib `ast`; TypeScript/Go use tree-sitter.
+     b. **Make low-confidence placement LOUD.** When `review_reason` is set —
+        the anchor was a def signature, or the function has multiple top-level
+        returns (success-vs-guard is then a guess) — wrap the rendered insert with
+        `insertion_point.with_placement_marker(rendered_insert, review_reason,
+        comment_prefix)` (`"# "` python, `"// "` ts/go). This prepends a
+        `# REVIEW PLACEMENT: …` line so an un-verifiable placement is reviewer-
+        catchable, NOT a silent mis-bill. Do not skip this — a wrongly-placed emit
+        that py_compiles + lints clean is the worst failure (wrong money, no error).
+     c. Apply it: `shared/scripts/insertion_point.apply_insert(source, after_line,
+        marked_insert, indent)` — language-agnostic text splice.
    Handling `None`:
      - **Python** None = a real syntax error / no enclosing statement → STOP and
        surface it; do not guess.

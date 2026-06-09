@@ -46,6 +46,22 @@ class InsertionPoint:
     function: str | None   # enclosing function name (None = module/top level)
     after_line: int        # 1-based line AFTER which the insert is placed
     indent: str            # leading-whitespace string the inserted block must use
+    # Set when placement is a BEST GUESS, not certain (def-line anchor, multiple
+    # top-level returns). The caller MUST prepend a `# REVIEW PLACEMENT:` marker so
+    # an un-verifiable placement is LOUD (reviewer-catchable) instead of a silent
+    # mis-bill. None = high-confidence placement (happy path) — stay quiet.
+    review_reason: str | None = None
+
+
+def with_placement_marker(insert_text: str, review_reason: str | None,
+                          comment_prefix: str) -> str:
+    """Prepend a `<comment_prefix>REVIEW PLACEMENT: <reason>` line to `insert_text`
+    when `review_reason` is set; return it unchanged otherwise. Deterministic +
+    language-agnostic (comment_prefix is "# " for python, "// " for ts/go) so the
+    loudness is itself test-gateable even though placement correctness is not."""
+    if not review_reason:
+        return insert_text
+    return f"{comment_prefix}REVIEW PLACEMENT: {review_reason}\n{insert_text}"
 
 
 def _leading_ws(source: str, line_1based: int) -> str:
@@ -61,10 +77,14 @@ def find_insertion_point(source: str, lineno: int,
     """Return the deterministic placement target for an emit insert for the call at
     `lineno` in `source`, or None.
 
-    The target is the INNERMOST statement that contains `lineno` (the "work"), the
-    line after its FULL span, and that statement's indentation — so the emit lands
-    right after the work, in the SAME block, before the enclosing function's return,
-    never as dead code and never inside a multi-line expression.
+    `lineno` only SELECTS the enclosing function; placement then targets that
+    function's SUCCESS-RETURN path — before the final return, after the last work
+    statement (and therefore after any early-failure guards). This is robust to the
+    anchor being a def line, a `return`, or the work call, and it never places after
+    the whole function (a scope/F821 crash) or after a return (dead code). When
+    placement is a best guess — def-line anchor, or multiple top-level returns
+    (success-vs-guard ambiguity) — `review_reason` is set so the caller can prepend a
+    loud `# REVIEW PLACEMENT:` marker (see `with_placement_marker`).
 
     None means "no deterministic capture": for python a real syntax error / no
     enclosing statement (caller STOPs); for typescript/go ALSO when tree-sitter is
@@ -94,7 +114,7 @@ def apply_insert(source: str, after_line: int, insert_text: str, indent: str) ->
 
 # ── python (stdlib ast) ───────────────────────────────────────────────────────
 
-def _innermost_function_name(tree: ast.Module, lineno: int) -> str | None:
+def _innermost_function(tree: ast.Module, lineno: int):
     best, best_span = None, None
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -104,15 +124,12 @@ def _innermost_function_name(tree: ast.Module, lineno: int) -> str | None:
                 span = end - start
                 if best_span is None or span < best_span:
                     best, best_span = node, span
-    return best.name if best else None
+    return best
 
 
-def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return None
-    func = _innermost_function_name(tree, lineno)
+def _module_level_point(source: str, tree: ast.Module, lineno: int) -> "InsertionPoint | None":
+    # No enclosing function: fall back to the innermost statement containing the
+    # line (module-level emit — rare).
     target = None  # (span, end_line, start_line)
     for node in ast.walk(tree):
         if isinstance(node, ast.stmt):
@@ -125,8 +142,63 @@ def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None"
     if target is None:
         return None
     _span, after_line, start_line = target
-    return InsertionPoint(function=func, after_line=after_line,
+    return InsertionPoint(function=None, after_line=after_line,
                           indent=_leading_ws(source, start_line))
+
+
+def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    func = _innermost_function(tree, lineno)
+    if func is None:
+        return _module_level_point(source, tree, lineno)
+
+    # Placement targets the enclosing function's SUCCESS-RETURN path — NOT the
+    # statement at `entry.line`. entry.line only SELECTS the function; the emit then
+    # lands before the function's final return (after the last work statement + after
+    # any early-failure guards) so it fires on success. This is robust to the anchor
+    # being a def line / a return / the work call, and never places after the whole
+    # function (the F821 crash) or after a return (dead code).
+    body = func.body
+    if not body:
+        return None
+    body_indent = _leading_ws(source, body[0].lineno)
+    last = body[-1]
+    if isinstance(last, ast.Return):
+        if len(body) >= 2:
+            prev = body[-2]
+            after_line = getattr(prev, "end_lineno", None) or prev.lineno
+        else:
+            after_line = last.lineno - 1   # body is just `return ...`
+    else:
+        after_line = getattr(last, "end_lineno", None) or last.lineno
+
+    # make-it-loud: placement is a best guess (not certain) in two shapes.
+    reasons: list[str] = []
+    if lineno < body[0].lineno:
+        reasons.append("anchor was the def signature, not a work statement — confirm "
+                       "this is the right function and the emit is on the success path")
+    if sum(1 for s in body if isinstance(s, ast.Return)) >= 2:
+        reasons.append("function has multiple top-level returns — confirm the emit "
+                       "fires on the SUCCESS path, not after an early-return guard")
+    # conditional/looped work: entry.line is INSIDE a top-level compound block, but
+    # the success-return rule hoists the emit to the function level — so it would
+    # fire even when that block did not run (over-bill). Make it loud.
+    for s in body:
+        if isinstance(s, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                          ast.With, ast.AsyncWith, ast.Try)):
+            end = getattr(s, "end_lineno", None) or s.lineno
+            if s.lineno < lineno <= end:
+                reasons.append("the anchored work is inside a conditional/loop block "
+                               "but the emit is hoisted to the function level — confirm "
+                               "it should fire even when that block did not execute")
+                break
+    review_reason = "; ".join(reasons) or None
+
+    return InsertionPoint(function=func.name, after_line=after_line,
+                          indent=body_indent, review_reason=review_reason)
 
 
 # ── typescript / go (tree-sitter soft dep) ────────────────────────────────────
@@ -170,22 +242,81 @@ def _treesitter_insertion_point(source: str, lineno: int,
     node = _deepest(tree.root_node)
     if node is None:
         return None
-    stmt = node
-    found_stmt = False
-    func_name: str | None = None
+    # Walk up to the enclosing function (mirrors the python rule: entry.line SELECTS
+    # the function; placement then targets the function's success-return path).
+    func = None
     cur = node
     while cur is not None:
-        if cur.type in _TS_FUNC_TYPES and func_name is None:
-            nm = cur.child_by_field_name("name")
-            func_name = nm.text.decode() if nm is not None else cur.type
-        # The INNERMOST statement is the first node (walking up) whose parent is a
-        # block container — take it once, don't let an outer block overwrite it
-        # (go's statement_list is itself a child of `block`).
-        if (not found_stmt and cur.parent is not None
-                and cur.parent.type in _TS_BLOCK_TYPES):
-            stmt = cur
-            found_stmt = True
+        if cur.type in _TS_FUNC_TYPES:
+            func = cur
+            break
         cur = cur.parent
-    return InsertionPoint(function=func_name,
-                          after_line=stmt.end_point[0] + 1,
-                          indent=_leading_ws(source, stmt.start_point[0] + 1))
+    if func is None:
+        # module/top-level: fall back to the innermost block-child statement.
+        stmt = node
+        c = node
+        while c is not None:
+            if c.parent is not None and c.parent.type in _TS_BLOCK_TYPES:
+                stmt = c
+                break
+            c = c.parent
+        return InsertionPoint(function=None, after_line=stmt.end_point[0] + 1,
+                              indent=_leading_ws(source, stmt.start_point[0] + 1))
+
+    nm = func.child_by_field_name("name")
+    func_name = nm.text.decode() if nm is not None else func.type
+    container = _ts_statements_container(func)
+    if container is None:
+        return None
+    stmts = [c for c in container.children if c.is_named and c.type != "comment"]
+    if not stmts:
+        return None
+    body_indent = _leading_ws(source, stmts[0].start_point[0] + 1)
+    last = stmts[-1]
+    if last.type == "return_statement":
+        if len(stmts) >= 2:
+            after_line = stmts[-2].end_point[0] + 1
+        else:
+            after_line = last.start_point[0]   # body is just `return ...` (line-1)
+    else:
+        after_line = last.end_point[0] + 1
+
+    reasons: list[str] = []
+    # def-line anchor: entry.line is at/above the FIRST body statement (the
+    # signature/brace line) — not container.start (the `{` shares the signature line).
+    if lineno < stmts[0].start_point[0] + 1:
+        reasons.append("anchor was the function signature, not a work statement — "
+                       "confirm this is the right function and the emit is on the success path")
+    if sum(1 for s in stmts if s.type == "return_statement") >= 2:
+        reasons.append("function has multiple top-level returns — confirm the emit "
+                       "fires on the SUCCESS path, not after an early-return guard")
+    # conditional/looped work: the anchored node's nearest enclosing block is a
+    # NESTED block (not the function's own body container), so hoisting the emit to
+    # the function level would fire it even when that block did not run.
+    blk = node
+    while blk is not None and blk.type not in _TS_BLOCK_TYPES:
+        blk = blk.parent
+    if blk is not None and blk.start_byte != container.start_byte:
+        reasons.append("the anchored work is inside a conditional/loop block but the "
+                       "emit is hoisted to the function level — confirm it should fire "
+                       "even when that block did not execute")
+    review_reason = "; ".join(reasons) or None
+
+    return InsertionPoint(function=func_name, after_line=after_line,
+                          indent=body_indent, review_reason=review_reason)
+
+
+def _ts_statements_container(func):
+    """The node whose direct children are the function body's statements: ts uses
+    `statement_block`; go nests a `statement_list` inside a `block`."""
+    block = None
+    for ch in func.children:
+        if ch.type in ("statement_block", "block"):
+            block = ch
+            break
+    if block is None:
+        return None
+    for ch in block.children:
+        if ch.type == "statement_list":   # go
+            return ch
+    return block                           # ts
