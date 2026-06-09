@@ -262,20 +262,26 @@ def _is_id_like(name: str) -> bool:
     return n in ("id", "pk", "uuid", "guid") or n.endswith(("_id", "_uuid", "_pk", "_guid"))
 
 
-# Per-request / tracing / dedup-mechanism ids — id-like, but NOT the metered business
-# entity. Surfacing them as entity candidates invites the exact correlation-id-as-
-# entity mis-bill this whole capture fights (a per-request id double-counts on retry).
-_REQUEST_ID_NAMES = frozenset({
-    "request_id", "req_id", "requestid", "correlation_id", "corr_id", "correlationid",
-    "trace_id", "traceid", "span_id", "spanid", "txn_id", "transaction_id",
-    "idempotency_key", "idempotency_id", "session_id", "sessionid",
-})
+# Per-request / tracing / dedup-mechanism id families — id-like, but NOT the metered
+# business entity. Matched exact (`request_id`) OR as a `_`-suffix (`client_request_id`,
+# `parent_trace_id`) so prefixed variants are caught too. Surfacing any of these as an
+# entity candidate invites the correlation-id-as-entity mis-bill this capture fights
+# (a per-request id double-counts on retry).
+_REQUEST_ID_FAMILIES = (
+    "request_id", "req_id", "correlation_id", "corr_id", "trace_id", "span_id",
+    "txn_id", "transaction_id", "session_id", "idempotency_key", "idempotency_id",
+)
+
+
+def _is_request_or_trace_id(lowered: str) -> bool:
+    return any(lowered == fam or lowered.endswith("_" + fam) for fam in _REQUEST_ID_FAMILIES)
 
 
 def _is_entity_name(token: str) -> bool:
-    """id-like AND not a known per-request/tracing/dedup id. The exclusion is the
+    """id-like AND not a known per-request/tracing/dedup id (exact or prefixed —
+    `request_id`, `client_request_id`, `parent_trace_id` …). The exclusion is the
     candidate-level guard against proposing the correlation id as the metered entity."""
-    return _is_id_like(token) and token.lower() not in _REQUEST_ID_NAMES
+    return _is_id_like(token) and not _is_request_or_trace_id(token.lower())
 
 
 def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:

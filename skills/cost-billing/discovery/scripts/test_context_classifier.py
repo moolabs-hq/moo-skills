@@ -359,6 +359,16 @@ class EntityIdProposer(unittest.TestCase):
         self.assertNotIn("trace_id", cands)                 # bare param
         self.assertNotIn("request.correlation_id", cands)   # input-object attr
         self.assertNotIn("self.span_id", cands)             # self attr
+        # compound/prefixed variants caught by the _-suffix match; real id families pass
+        src2 = _src("""
+            def g(self, client_request_id, parent_trace_id, record_id, customer_id):
+                return work()
+        """)
+        c2 = cc.propose_entity_id_candidates(src2, 2)
+        self.assertNotIn("client_request_id", c2)   # prefixed request id
+        self.assertNotIn("parent_trace_id", c2)     # prefixed trace id
+        self.assertIn("record_id", c2)              # NOT a tracing family -> kept
+        self.assertIn("customer_id", c2)            # billing grain -> kept
 
     def test_syntax_error_proposes_nothing(self):
         self.assertEqual(cc.propose_entity_id_candidates("def (:\n", 1), [])
