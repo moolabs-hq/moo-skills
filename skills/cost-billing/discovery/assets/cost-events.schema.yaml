@@ -53,9 +53,10 @@ $defs:
         type: array
         items: { type: string }
         description: |
-          PROPOSED metered-entity expressions (id-like params/locals), candidates
-          only — a human confirms one into `entity_id`. The codemod does NOT read
-          this; an unconfirmed candidate still REFUSES.
+          PROPOSED metered-entity expressions (id-like params/locals PLUS `self.<id>`
+          and input-object-param attributes like `comm.id`), candidates only — a
+          human confirms one into `entity_id`. The codemod does NOT read this; an
+          unconfirmed candidate still REFUSES.
       entity_id:
         type: string
         description: |

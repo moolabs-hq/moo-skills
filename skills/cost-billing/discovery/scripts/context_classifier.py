@@ -291,12 +291,19 @@ def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
             out.append(expr)
 
     a = func.args
-    params = {arg.arg for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
-    # 1. id-like bare params + locals
-    for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
+    args_all = (*a.posonlyargs, *a.args, *a.kwonlyargs)
+    params = {arg.arg for arg in args_all}
+    # 1. id-like bare params (incl *args / **kwargs) + locals. Use _own_scope_nodes,
+    # NOT ast.walk: ast.walk descends into NESTED defs/lambdas/classes, so a nested
+    # helper's `record_id` / `self.foo_id` would be proposed for THIS function — a
+    # plausible-but-wrong candidate a human could rubber-stamp (silent mis-bill).
+    for arg in args_all:
         if _is_id_like(arg.arg):
             _add(arg.arg)
-    for node in ast.walk(func):
+    for extra in (a.vararg, a.kwarg):
+        if extra is not None and _is_id_like(extra.arg):
+            _add(extra.arg)
+    for node in _own_scope_nodes(func):
         if isinstance(node, ast.Assign):
             for tgt in node.targets:
                 if isinstance(tgt, ast.Name) and _is_id_like(tgt.id):
@@ -306,8 +313,8 @@ def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
             _add(node.target.id)
     # 2 + 3. id-like attribute access on `self` or on an INPUT PARAMETER object —
     # `self.case_id`, `comm.id`, `case.customer_id`. `_is_id_like` accepts a bare `id`
-    # attr (so `comm.id` qualifies) while still rejecting `comm.valid`.
-    for node in ast.walk(func):
+    # attr (so `comm.id` qualifies) while still rejecting `comm.valid`. Own-scope only.
+    for node in _own_scope_nodes(func):
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and _is_id_like(node.attr)):
             base = node.value.id

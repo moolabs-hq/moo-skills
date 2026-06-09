@@ -310,6 +310,41 @@ class EntityIdProposer(unittest.TestCase):
         """)
         self.assertEqual(cc.propose_entity_id_candidates(src, 3), [])
 
+    def test_nested_function_scope_not_leaked(self):
+        # _own_scope_nodes, NOT ast.walk: a NESTED helper's id-like local / self-attr
+        # must NOT be proposed for the OUTER function — it'd be a wrong candidate a
+        # human could confirm -> NameError / mis-bill at the outer scope.
+        src = _src("""
+            def outer(self, comm):
+                def _helper():
+                    record_id = compute()
+                    return record_id
+                result = process(comm.id)
+                return result
+        """)
+        cands = cc.propose_entity_id_candidates(src, 5)   # the call-site line in outer
+        self.assertIn("comm.id", cands)
+        self.assertNotIn("record_id", cands)              # nested helper's local
+        src2 = _src("""
+            def outer(self, comm):
+                def _helper():
+                    return self.nested_id
+                return process(comm.id)
+        """)
+        cands2 = cc.propose_entity_id_candidates(src2, 4)
+        self.assertIn("comm.id", cands2)
+        self.assertNotIn("self.nested_id", cands2)        # nested helper's self-attr
+
+    def test_vararg_and_kwarg_id_like_params(self):
+        # *args / **kwargs were silently omitted before the fix.
+        src = _src("""
+            def dispatch(self, *record_id, **customer_id):
+                return work()
+        """)
+        cands = cc.propose_entity_id_candidates(src, 2)
+        self.assertIn("record_id", cands)    # *args id-like
+        self.assertIn("customer_id", cands)  # **kwargs id-like
+
     def test_syntax_error_proposes_nothing(self):
         self.assertEqual(cc.propose_entity_id_candidates("def (:\n", 1), [])
 

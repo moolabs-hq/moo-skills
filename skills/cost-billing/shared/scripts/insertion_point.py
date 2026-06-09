@@ -124,6 +124,9 @@ def validate_target_function(source: str, target_function: str,
             tree = ast.parse(source)
         except SyntaxError:
             return None
+        # Name-only existence check (same contract as _select_function's lookup): a
+        # method and a module-level function with the same name are indistinguishable
+        # here — accepted, since placement also resolves by name.
         names = {n.name for n in ast.walk(tree)
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
         if target_function not in names:

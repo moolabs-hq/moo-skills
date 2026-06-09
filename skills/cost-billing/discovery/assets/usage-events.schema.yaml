@@ -48,8 +48,9 @@ $defs:
         type: array
         items: { type: string }
         description: |
-          PROPOSED metered-entity expressions (id-like params/locals in the emission
-          function, from context_classifier.propose_entity_id_candidates). CANDIDATES
+          PROPOSED metered-entity expressions from
+          context_classifier.propose_entity_id_candidates: id-like params/locals PLUS
+          `self.<id>` and input-object-param attributes (e.g. `comm.id`). CANDIDATES
           ONLY — a human must confirm one into `entity_id`. The codemod does NOT read
           this; an unconfirmed candidate still REFUSES.
       entity_id:

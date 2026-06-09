@@ -1015,14 +1015,14 @@ def build_tasks(
             if isinstance(_anchor, dict) and "confidence" not in _anchor:
                 enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
             # entity_id is PER-ENTRY (per-workflow), unlike the framework-level
-            # attribution keys: flow the CONFIRMED `entry.entity_id` into this
-            # insert's sources (the one place the template reads it). A proposed-
-            # but-unconfirmed candidate (`entity_id_candidate`) is deliberately NOT
-            # read here, so an unconfirmed entity still hits the template's refuse.
-            _entity = entry.get("entity_id") or sources_for_file.get("entity_id")
-            insert_sources = ({**sources_for_file, "entity_id": _entity}
-                              if _entity != sources_for_file.get("entity_id")
-                              else sources_for_file)
+            # attribution keys: flow ONLY the CONFIRMED `entry.entity_id` into this
+            # insert's sources (the one place the template reads it). It is NEVER
+            # inherited from a per-file/service binding — that would let a single
+            # service-level `entity_id` binding silently bypass the per-entry refuse
+            # gate for every site in the file. A proposed-but-unconfirmed candidate
+            # (`entity_id_candidate`) is deliberately NOT read, and an empty string is
+            # falsy -> None, so an unconfirmed/blank entity still hits the refuse.
+            insert_sources = {**sources_for_file, "entity_id": entry.get("entity_id") or None}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),

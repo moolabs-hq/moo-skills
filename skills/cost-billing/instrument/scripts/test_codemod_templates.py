@@ -425,16 +425,17 @@ class EndToEndPipeline(unittest.TestCase):
         self.assertIn("from mypkg.services.moolabs_client import", out)
         self.assertNotIn("from app.services.moolabs_client import", out)  # leak gone
 
-    def _build_one(self, entry):
+    def _build_one(self, entry, attribution_defaults=None):
         import io
         import contextlib
         import task_planner as tp
         signed = {"service_slug": "svc", "repo": {"languages": ["python"], "frameworks": ["fastapi"]}}
+        defaults = attribution_defaults or {"customer_id": "self.tenant_id", "request_id": "r"}
         with contextlib.redirect_stderr(io.StringIO()):
             tasks = tp.build_tasks(
                 {"entries": []}, {"entries": [entry]}, {"edges": []}, {"capabilities": {}}, signed,
                 {"language": "python", "framework": "fastapi"},
-                attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+                attribution_defaults=defaults,
                 attribution_overrides=[], slug_inventory=None)
         return tasks[0].inserts[0]
 
@@ -461,6 +462,25 @@ class EndToEndPipeline(unittest.TestCase):
         out2 = env.get_template("python-fastapi.j2").render(
             entry=ins2.entry, attribution_sources=ins2.attribution_sources)
         self.assertIn("entity_id=str(self.email_id)", out2)
+
+    def test_entity_id_empty_string_refuses(self):
+        # "" is falsy -> None -> refuse (not entity_id=str()).
+        base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
+                "event_type": "svc.x", "product_slug": "svc"}
+        ins = self._build_one({**base, "entity_id": ""})
+        self.assertIsNone(ins.attribution_sources.get("entity_id"))
+
+    def test_entity_id_service_level_binding_does_not_bypass_per_entry_refuse(self):
+        # IMPORTANT (review): a service-level entity_id binding must NOT be inherited
+        # by an entry with no CONFIRMED per-entry entity_id — that would silently
+        # bypass the refuse gate for every site. The per-entry value (None here) wins.
+        base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
+                "event_type": "svc.x", "product_slug": "svc"}
+        ins = self._build_one(
+            {**base, "entity_id_candidate": ["email_id"]},   # no confirmed entity_id
+            attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r",
+                                  "entity_id": "self.service_wide_id"})  # service binding
+        self.assertIsNone(ins.attribution_sources.get("entity_id"))  # NOT inherited -> refuse
 
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
