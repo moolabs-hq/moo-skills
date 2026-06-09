@@ -7,7 +7,10 @@ precision (not over-matching `cache_key` / `public_key`) is the property under t
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -162,6 +165,45 @@ class BlamePorcelain(unittest.TestCase):
 
     def test_blame_empty_linenos_returns_empty(self):
         self.assertEqual(se.blame_line_dates("whatever.py", []), {})
+
+
+class TokenDerivation(unittest.TestCase):
+    """The env var is the identifier that bridges config <-> deployment in every
+    pattern. Deriving it from the field is the BOUNDED, testable part of the trace."""
+
+    def test_snake_and_camel_to_env_var(self):
+        self.assertEqual(se.env_var_for_field("moolabs_api_key"), "MOOLABS_API_KEY")
+        self.assertEqual(se.env_var_for_field("arc_global_api_key"), "ARC_GLOBAL_API_KEY")
+        self.assertEqual(se.env_var_for_field("arcGlobalApiKey"), "ARC_GLOBAL_API_KEY")
+        self.assertEqual(se.env_var_for_field("MoolabsApiKey"), "MOOLABS_API_KEY")
+
+
+@unittest.skipUnless(shutil.which("grep"), "grep not available")
+class GrepTokens(unittest.TestCase):
+    """Format-AGNOSTIC wide search — the same grep finds the exemplar in terraform, k8s
+    yaml, AND python, and skips vendor. No format zoo: the agent classifies the hits."""
+
+    def test_wide_search_finds_all_formats_skips_vendor(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "infra"))
+            os.makedirs(os.path.join(d, "node_modules", "x"))
+            with open(os.path.join(d, "infra", "main.tf"), "w") as f:
+                f.write('secrets = [{ name = "ARC_GLOBAL_API_KEY", valueFrom = x["shared/api-key"] }]\n')
+            with open(os.path.join(d, "deploy.yaml"), "w") as f:
+                f.write("        - name: ARC_GLOBAL_API_KEY\n          valueFrom:\n")
+            with open(os.path.join(d, "config.py"), "w") as f:
+                f.write("arc_global_api_key: SecretStr\n")
+            with open(os.path.join(d, "node_modules", "x", "main.tf"), "w") as f:
+                f.write("ARC_GLOBAL_API_KEY\n")   # vendor copy -> must be skipped
+            hits = se.grep_tokens(d, ["ARC_GLOBAL_API_KEY", "arc_global_api_key"])
+            files = {h[0] for h in hits}
+            self.assertIn("infra/main.tf", files)
+            self.assertIn("deploy.yaml", files)
+            self.assertIn("config.py", files)
+            self.assertNotIn("node_modules/x/main.tf", files)
+
+    def test_empty_tokens_returns_empty(self):
+        self.assertEqual(se.grep_tokens("/tmp", []), [])
 
 
 if __name__ == "__main__":

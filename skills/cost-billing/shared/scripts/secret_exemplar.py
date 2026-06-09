@@ -17,6 +17,8 @@ blame-found exemplar block; this module covers the config layer + the ranking.""
 from __future__ import annotations
 
 import ast
+import os
+import re
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
@@ -195,6 +197,53 @@ def detect_access_idiom(source: str) -> AccessIdiom:
                 and _last_name(node.value.func) in settings_classes):
             return AccessIdiom("singleton", node.targets[0].id)
     return AccessIdiom("unknown", None)
+
+
+def env_var_for_field(field_name: str) -> str:
+    """Config field -> the env var it maps to (UPPER_SNAKE). The env var name is the
+    STABLE IDENTIFIER that bridges config and deployment across EVERY pattern (terraform
+    `name = "X"`, k8s `name: X` / secretKeyRef, `os.environ["X"]`, `.env` `X=`). Handles
+    snake_case (`moolabs_api_key` -> `MOOLABS_API_KEY`) and camel/Pascal
+    (`arcGlobalApiKey` -> `ARC_GLOBAL_API_KEY`). NOTE: a customer using an `env_prefix`
+    / Field(alias=...) maps differently — the trace also greps the FIELD name to catch
+    the config site, and the agent widens tokens from the first hit."""
+    snaked = re.sub(r"(?<!^)(?=[A-Z])", "_", field_name)
+    return re.sub(r"_+", "_", snaked).upper()
+
+
+_GREP_SKIP_DIRS = (".git", ".terraform", "node_modules", "dist", "build", "vendor",
+                   ".venv", "venv", "__pycache__", ".mypy_cache", ".next")
+
+
+def grep_tokens(repo_root: str, tokens: list[str], timeout: int = 30) -> list[tuple[str, int, str]]:
+    """FORMAT-AGNOSTIC wide search: every file:line under `repo_root` mentioning any
+    token, minus vendor/build dirs. No parsing — the AGENT classifies the hits + follows
+    references (config vs terraform vs k8s vs secrets-manager is unbounded; do NOT encode
+    a format zoo here). Best-effort: returns [] if grep is absent/fails. Returns
+    [(relpath, lineno, snippet)] — the breadcrumbs of a real secret's complete path."""
+    toks = [t for t in tokens if t]
+    if not toks:
+        return []
+    pattern = "|".join(re.escape(t) for t in toks)
+    excludes = [f"--exclude-dir={d}" for d in _GREP_SKIP_DIRS]
+    try:
+        out = subprocess.run(
+            ["grep", "-rnIE", pattern, *excludes, str(repo_root)],
+            capture_output=True, text=True, timeout=timeout,
+        ).stdout  # grep exits 1 on no-match -> empty stdout, not an error
+    except (OSError, subprocess.SubprocessError):
+        return []
+    hits: list[tuple[str, int, str]] = []
+    for line in out.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        try:
+            ln = int(parts[1])
+        except ValueError:
+            continue
+        hits.append((os.path.relpath(parts[0], repo_root), ln, parts[2].strip()[:200]))
+    return hits
 
 
 def blame_line_dates(file_path: str, linenos: list[int]) -> dict[int, float]:
