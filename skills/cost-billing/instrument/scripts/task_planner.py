@@ -772,6 +772,26 @@ def build_tasks(
         if f:
             file_buckets[f].append(entry)
 
+    # --service scoping (fixes org-wide over-instrumentation): the cost/usage
+    # inventories are ORG-WIDE, but task_planner is invoked per-service via
+    # --signed-yaml 04-final-<svc>.signed.yaml. Keep only files under THIS
+    # service's declared root(s). Without this, a --service run emits a task for
+    # every service's files AND stamps this service's language/framework + slug
+    # onto all of them (e.g. python-fastapi onto another service's .go files).
+    # Back-compat: if the signed doc declares no integration.services, no filter
+    # applies (single-service / whole-repo runs are unaffected).
+    _service_roots = [
+        s.get("root", "")
+        for s in (signed.get("integration", {}).get("services", []) if signed else [])
+        if s.get("root")
+    ]
+    if _service_roots:
+        file_buckets = {
+            f: e
+            for f, e in file_buckets.items()
+            if any(f == r or f.startswith(r.rstrip("/") + "/") for r in _service_roots)
+        }
+
     tasks: list[Task] = []
     for idx, (file_path, entries) in enumerate(sorted(file_buckets.items()), start=1):
         template = TEMPLATE_MAP.get((primary_lang, primary_fw), TEMPLATE_MAP.get((primary_lang, "fastapi"), ""))

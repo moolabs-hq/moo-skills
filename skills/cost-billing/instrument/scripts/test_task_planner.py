@@ -1072,5 +1072,53 @@ class EmitTasksYamlEscaping(unittest.TestCase):
         self.assertEqual(tp._yaml_scalar(3), "3")
 
 
+class ServiceScoping(unittest.TestCase):
+    """Verbatim-dogfood finding: the cost/usage inventories are ORG-WIDE, but
+    task_planner runs per-service. Without scoping, a --service run emits a task
+    for every service's files AND stamps this service's language/framework + slugs
+    onto them. build_tasks filters file_buckets to the roots the signed doc
+    declares under integration.services[].root."""
+
+    def _inv(self):
+        cost = {"entries": []}
+        usage = {"entries": [
+            {"file": "services/moo-arc/app/a.py", "line": 1, "workflow_id": "arc.x",
+             "event_type": "arc.x", "product_slug": "arc"},
+            {"file": "services/other-svc/app/b.py", "line": 1, "workflow_id": "other.y",
+             "event_type": "other.y", "product_slug": "other"},
+        ]}
+        return cost, usage
+
+    def _build(self, signed):
+        cost, usage = self._inv()
+        return tp.build_tasks(
+            cost, usage, {"edges": []}, {"capabilities": {}}, signed,
+            {"language": "python", "framework": "fastapi"},
+            attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r"},
+            attribution_overrides=[], slug_inventory=None)
+
+    def test_filters_to_declared_service_root(self):
+        tasks = self._build({"service_slug": "moo-arc",
+                             "integration": {"services": [{"root": "services/moo-arc"}]},
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        files = {t.file for t in tasks}
+        self.assertEqual(files, {"services/moo-arc/app/a.py"})
+        self.assertNotIn("services/other-svc/app/b.py", files)
+
+    def test_no_declared_services_keeps_all_files_backcompat(self):
+        # Single-service / whole-repo runs (no integration.services) are unaffected.
+        tasks = self._build({"service_slug": "moo-arc",
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        files = {t.file for t in tasks}
+        self.assertEqual(files, {"services/moo-arc/app/a.py", "services/other-svc/app/b.py"})
+
+    def test_root_prefix_does_not_match_sibling(self):
+        # "services/moo" must NOT match "services/moo-arc/..." — boundary-correct.
+        tasks = self._build({"service_slug": "moo",
+                             "integration": {"services": [{"root": "services/moo"}]},
+                             "repo": {"languages": ["python"], "frameworks": ["fastapi"]}})
+        self.assertEqual(tasks, [])
+
+
 if __name__ == "__main__":
     unittest.main()
