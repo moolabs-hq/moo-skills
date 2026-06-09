@@ -349,7 +349,7 @@ def _load_attribution_bindings(
 
 # Attribution keys the callsite templates reference directly — must always be
 # present in attribution_sources (value or None) for the StrictUndefined render.
-_TEMPLATE_ATTRIBUTION_KEYS = ("customer_id", "request_id", "consumer_agent")
+_TEMPLATE_ATTRIBUTION_KEYS = ("customer_id", "request_id", "consumer_agent", "entity_id")
 
 
 def _resolve_sources_for_file(

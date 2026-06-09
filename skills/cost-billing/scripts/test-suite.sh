@@ -192,7 +192,7 @@ entry_base = {
     "provider_const": None,
 }
 sources = {"tenant_id":"req.state.tid","request_id":"req.state.rid","customer_id":"req.state.cid",
-           "consumer_agent":None,"feature_key":None}
+           "consumer_agent":None,"feature_key":None,"entity_id":"req.state.entity_id"}
 templates = ["python-fastapi.j2","python-django.j2","python-flask.j2",
              "typescript-express.j2","typescript-nestjs.j2","typescript-nextjs.j2"]
 patterns = ["sibling-pair","usage-only","cost-only"]

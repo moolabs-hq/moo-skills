@@ -34,7 +34,8 @@ def _sources(request_id="get_correlation_id()"):
     # request_id source matches the attribution_imports fixture (get_correlation_id)
     # so the rendered insert imports AND uses it — the real F821 scenario.
     return {"request_id": request_id, "customer_id": "req.state.cid",
-            "consumer_agent": None, "feature_key": None}
+            "consumer_agent": None, "feature_key": None,
+            "entity_id": "req.state.email_id"}
 
 
 def _usage_entry():
@@ -161,6 +162,27 @@ class CallsiteRenderSmoke(unittest.TestCase):
             with self.subTest(tpl=tpl):
                 out = self._render(tpl, _sibling_entry())
                 self._assert_py_compiles(out, f"{tpl} sibling-pair")
+
+    def test_entity_id_is_metered_entity_and_refuses_when_unbound(self):
+        # P/entity_id: entity_id must be the METERED ENTITY (the dedup grain), NOT the
+        # per-request correlation id (which double-counts on retry). Bound -> emit
+        # uses the entity + keeps correlation in meta. UNBOUND -> the codemod REFUSES
+        # to emit (loud comment, no billable call), never silently bills on the
+        # correlation id.
+        for tpl in _PY_TEMPLATES:
+            with self.subTest(tpl=tpl):
+                out = self._render(tpl, _usage_entry())          # entity_id bound in _sources
+                self.assertIn("entity_id=str(req.state.email_id)", out)   # the metered entity
+                self.assertIn('"correlation_id":', out)                   # correlation kept in meta
+                entity_line = next(l for l in out.splitlines() if "entity_id=str(" in l)
+                self.assertNotIn("get_correlation_id", entity_line)       # NOT the correlation id
+                # unbound -> refuse, no billable emit
+                unbound = _sources()
+                unbound["entity_id"] = None
+                out2 = self.env.get_template(tpl).render(entry=_usage_entry(),
+                                                         attribution_sources=unbound)
+                self.assertNotIn("emit_usage_event_safe(", out2)
+                self.assertIn("NOT EMITTED", out2)
 
     def test_emission_guard_gates_the_emit(self):
         # O: a CFO emission_guard must GATE the emit (bill only when not blocked).

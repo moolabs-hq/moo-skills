@@ -279,6 +279,15 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
        source: null                  # explicit null → codemod skips this attribute everywhere
        confidence: n_a
        confirmed_by: kritivas.shukla@moolabs.com
+     entity_id:
+       # THE METERED ENTITY — the id of the thing the event bills FOR (the document,
+       # email, account, render job…), NOT the per-request correlation id. It is the
+       # dedup grain + the sibling-pair join key: a retry of the SAME logical event
+       # must produce the SAME entity_id, or it double-counts. Bind it PER WORKFLOW
+       # (it differs per event); usually an override, rarely a service-wide default.
+       source: "result.email_id"
+       confidence: confirmed
+       confirmed_by: kritivas.shukla@moolabs.com
    overrides:
      - file: services/billing-api/app/api/v1/webhooks/router.py
        reason: "webhook handler — bypasses TenantMiddleware; signature-verified path"
@@ -290,6 +299,21 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    ```
 
 5. **Refuse to proceed if confirmations are missing.** Phase 2c reads `attribution-bindings.yaml` and aborts if any key the templates need is neither confirmed nor explicitly marked `source: null`. Fail loud — never silently substitute.
+
+   **`entity_id` is REQUIRED for billable events — unbound = refuse, never fall back.**
+   `entity_id` is the metered entity (above). When it is UNBOUND for a billable
+   callsite, the codemod does NOT emit a billing call — the template renders a loud
+   `MOOLABS BILLING NOT EMITTED … entity_id is UNBOUND` comment instead. It must
+   NOT fall back to the correlation id (per-request → retries double-count) or a
+   fresh UUID (no dedup). Bind the metered entity per workflow, then re-run. This is
+   the fix for the retry-double-count: dedup is per-entity, not per-request. (The
+   per-request correlation id is preserved separately in `meta.correlation_id` for
+   tracing.) **OPEN — owner: you/SDK, not the codemod:** the SDK wire mapping (FR-4
+   maps `entity_id → data.request_id`, read by moo-meter's request_id column, acute
+   threading, BFF lookups) must be revisited so the metered-entity value isn't
+   misinterpreted by those three consumers; and the usage↔cost sibling-pair join
+   requires both lanes to carry the SAME entity (the LLM-cost consolidation at
+   `call_llm_json` may carry a different entity than the per-action usage event).
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
