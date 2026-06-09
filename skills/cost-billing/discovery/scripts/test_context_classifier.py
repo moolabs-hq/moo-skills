@@ -266,5 +266,51 @@ class CallSiteResolution(unittest.TestCase):
         self.assertEqual(c.context, "http_request")
 
 
+class FindInsertionPoint(unittest.TestCase):
+    """N: the deterministic placement target. `py_compile` can't catch
+    misplacement, so the capture must be exact + testable."""
+
+    def test_targets_work_statement_not_the_return(self):
+        ip = cc.find_insertion_point(_src("""
+            def handler(req):
+                email = compose_email(req)   # line 3 (after dedent: 2)
+                return email
+        """), lineno=2)
+        self.assertEqual(ip.function, "handler")
+        self.assertEqual(ip.after_line, 2)   # the work line, NOT the return (3)
+        self.assertEqual(ip.indent, 4)
+
+    def test_innermost_statement_inside_a_branch(self):
+        ip = cc.find_insertion_point(_src("""
+            def handler(req):
+                if req.ok:
+                    x = work(req)            # line 3
+                    return x
+                return None
+        """), lineno=3)
+        self.assertEqual(ip.indent, 8)       # the branch body's indent
+        self.assertEqual(ip.after_line, 3)
+
+    def test_multiline_statement_uses_full_span(self):
+        ip = cc.find_insertion_point(_src("""
+            def handler(req):
+                x = work(
+                    req,
+                )
+                return x
+        """), lineno=3)                       # entry.line points mid-statement
+        self.assertEqual(ip.after_line, 4)   # after the WHOLE call, not mid-call
+
+    def test_syntax_error_returns_none(self):
+        self.assertIsNone(cc.find_insertion_point("def (:\n", lineno=1))
+
+    def test_module_level_has_no_function(self):
+        ip = cc.find_insertion_point(_src("""
+            x = work()
+        """), lineno=1)
+        self.assertIsNone(ip.function)
+        self.assertEqual(ip.after_line, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

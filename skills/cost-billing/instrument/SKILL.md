@@ -580,9 +580,23 @@ You are instrumenting ONE file. Your job:
    Render under a STRICT-undefined jinja env (an absent key is a DEFECT to report,
    not a silently-blank field). Do NOT inject `entry.pattern` or any other key by
    hand — the planner already put everything the template needs in the entry block.
-3. Apply each insert immediately AFTER the source line specified in the
-   inventory entry's idempotency_anchor.handler return path. Preserve all
-   existing imports + business logic.
+3. Place each insert DETERMINISTICALLY — do NOT eyeball the line. Placement is a
+   SEMANTIC problem `py_compile` cannot catch (dead-after-`return` code compiles
+   fine), so eyeballing it from `entry.line` is exactly what mis-placed every
+   usage-only insert in the dogfood (mid-multiline-statement, after the function's
+   `return`, wrong indent). Instead:
+     a. Compute the target: `discovery/scripts/context_classifier.find_insertion_point(
+        source, entry.line)` → `(function, after_line, indent)`. It returns the
+        innermost statement containing `entry.line` (the "work") and the line after
+        its FULL span + that statement's indentation — so the emit lands right after
+        the work, in the SAME block, before the function's return, never as dead code.
+     b. Apply it: `instrument/scripts/splice.apply_insert(source, after_line,
+        rendered_insert, indent)`. This re-indents the rendered block to `indent`
+        and splices it after `after_line`. Both helpers are deterministic + covered
+        by `test_splice.py` (the gate that FAILS on misplacement — the gate
+        py_compile could never be).
+   Preserve all existing imports + business logic. If `find_insertion_point` returns
+   None (syntax error / no enclosing statement), STOP and surface it — do not guess.
 4. Do NOT add a separate top-level helper import. The template renders ALL the
    imports its insert needs (the `emit_*_safe` helper, the per-product slug
    constants, and the attribution-binding imports from `entry.attribution_imports`)

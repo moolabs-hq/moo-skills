@@ -234,6 +234,50 @@ def classify_call_site(source: str, lineno: int) -> ContextClassification:
     return classify_function(enclosing, imports=imports, has_main_guard=has_main)
 
 
+@dataclass(frozen=True)
+class InsertionPoint:
+    """Deterministic placement target for an emit insert (verbatim-dogfood N)."""
+    function: str | None   # enclosing function name (None = module level)
+    after_line: int        # 1-based line AFTER which the insert is placed
+    indent: int            # column offset (spaces) the inserted block must use
+
+
+def find_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
+    """Where a usage/cost emit insert for the call at `lineno` should be placed.
+
+    Placement bug (N): without a structured target the codemod placed inserts
+    line-driven — landing mid-multiline-statement, after a `return` (dead code),
+    or at the wrong indent. `py_compile` cannot catch any of these (dead code
+    compiles fine), so the only way N is verifiable is to make the target
+    DETERMINISTIC + testable.
+
+    Returns the INNERMOST statement that contains `lineno` (the "work" statement)
+    and reports the line AFTER its full span plus that statement's indentation, so
+    the emit fires right after the work, in the SAME block, correctly indented —
+    never inside a multi-line expression and never after the function's return.
+    Returns None on a syntax error or if no statement contains the line.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    func = _innermost_function_containing(tree, lineno)
+    target: tuple[int, int, int] | None = None  # (span, end_line, col_offset)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt):
+            start = node.lineno
+            end = getattr(node, "end_lineno", None) or start
+            if start <= lineno <= end:
+                span = end - start
+                if target is None or span < target[0]:
+                    target = (span, end, node.col_offset)
+    if target is None:
+        return None
+    _span, after_line, indent = target
+    return InsertionPoint(function=func.name if func else None,
+                          after_line=after_line, indent=indent)
+
+
 def classify_file(source: str) -> list[tuple[str, int, ContextClassification]]:
     """Classify every function in a file. Returns (name, lineno, classification)."""
     tree = ast.parse(source)
