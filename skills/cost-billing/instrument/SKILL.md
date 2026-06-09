@@ -602,8 +602,10 @@ You are instrumenting ONE file. Your job:
         return (dead code). tab/space-correct (Go tabs preserved). Python uses the
         stdlib `ast`; TypeScript/Go use tree-sitter.
      b. **Make low-confidence placement LOUD.** When `review_reason` is set —
-        the anchor was a def signature, or the function has multiple top-level
-        returns (success-vs-guard is then a guess) — wrap the rendered insert with
+        the anchor was a def signature, the function has multiple top-level returns
+        (success-vs-guard is then a guess), the work is inside a conditional/loop
+        block but the emit is hoisted to function level, or the after-position may be
+        UNREACHABLE (terminal all-return if/try/else) — wrap the rendered insert with
         `insertion_point.with_placement_marker(rendered_insert, review_reason,
         comment_prefix)` (`"# "` python, `"// "` ts/go). This prepends a
         `# REVIEW PLACEMENT: …` line so an un-verifiable placement is reviewer-

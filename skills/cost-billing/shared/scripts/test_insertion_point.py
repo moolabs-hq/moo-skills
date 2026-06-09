@@ -119,6 +119,69 @@ class Python(unittest.TestCase):
         self.assertIsNotNone(p.review_reason)
         self.assertIn("conditional", p.review_reason)
 
+    def test_terminal_try_all_return_recurses_into_success_path_quiet(self):
+        # llm_helpers shape: function ends in a try whose body returns on success and
+        # whose handlers all return -> placing AFTER the try is DEAD. Recurse into the
+        # try body, before its success return. Work anchor (not def line) so a def-sig
+        # marker can't mask a miss.
+        src = ("def call_llm_json(prompt):\n"
+               "    payload = build(prompt)\n"   # line 2 — work anchor
+               "    try:\n"
+               "        result = call(payload)\n"
+               "        return result\n"          # success return INSIDE try
+               "    except TimeoutError:\n"
+               "        return None\n"
+               "    except ValueError:\n"
+               "        return None\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        lines = ip.apply_insert(src, p.after_line, "EMIT()", p.indent).splitlines()
+        ei = _emit_idx(lines)
+        # emit lands INSIDE the try, before `return result` — not after the try (dead)
+        self.assertTrue(lines[ei].startswith("        EMIT()"))   # try-body indent (8)
+        self.assertLess(ei, next(i for i, l in enumerate(lines) if "return result" in l))
+        self.assertIsNone(p.review_reason)                        # clean shape -> quiet
+
+    def test_terminal_try_fall_through_places_after_quiet(self):
+        # the try is last but FALLS THROUGH (no success return) -> after-try is
+        # REACHABLE -> place after it, do NOT recurse, quiet.
+        src = ("def f():\n"
+               "    work()\n"            # line 2 — work anchor
+               "    try:\n"
+               "        log()\n"
+               "    except Exception:\n"
+               "        pass\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        self.assertIsNone(p.review_reason)
+        self.assertEqual(p.after_line, 6)      # after the whole try (reachable)
+
+    def test_terminal_if_all_return_is_loud(self):
+        # if/else where BOTH branches return -> after-if unreachable, success branch
+        # ambiguous -> MARK, do not silently pick one.
+        src = ("def f(c):\n"
+               "    x = work()\n"        # line 2 — work anchor
+               "    if c:\n"
+               "        return a(x)\n"
+               "    else:\n"
+               "        return b(x)\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("UNREACHABLE", p.review_reason)
+
+    def test_try_else_is_loud(self):
+        # success path is the ELSE (runs on no-exception); after-try unreachable and
+        # NOT the clean body-success shape -> MARK.
+        src = ("def f():\n"
+               "    x = work()\n"        # line 2 — work anchor
+               "    try:\n"
+               "        risky()\n"
+               "    except Exception:\n"
+               "        return None\n"
+               "    else:\n"
+               "        return x\n")
+        p = ip.find_insertion_point(src, 2, "python")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("UNREACHABLE", p.review_reason)
+
     def test_multiline_work_after_full_span(self):
         src = "def h():\n    x = work(\n        a,\n    )\n    return x\n"
         p = ip.find_insertion_point(src, 3, "python")
@@ -176,6 +239,20 @@ class TypeScript(unittest.TestCase):
         p = ip.find_insertion_point(src, 3, "typescript")
         self.assertIsNotNone(p.review_reason)
         self.assertIn("conditional", p.review_reason)
+
+    def test_terminal_try_catch_is_loud(self):
+        # ts analog of the python dead-after-try case: function ends in try/catch.
+        # Full reachability is python-only; ts marks the terminal-try shape.
+        src = ("async function h(req) {\n"
+               "  const p = build(req);\n"   # line 2 — work anchor
+               "  try {\n"
+               "    return await call(p);\n"
+               "  } catch (e) {\n"
+               "    return null;\n"
+               "  }\n}\n")
+        p = ip.find_insertion_point(src, 2, "typescript")
+        self.assertIsNotNone(p.review_reason)
+        self.assertIn("UNREACHABLE", p.review_reason)
 
 
 @unittest.skipUnless(_HAS_GO, "tree-sitter (go) not installed")

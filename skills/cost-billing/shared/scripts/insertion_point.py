@@ -81,10 +81,13 @@ def find_insertion_point(source: str, lineno: int,
     function's SUCCESS-RETURN path — before the final return, after the last work
     statement (and therefore after any early-failure guards). This is robust to the
     anchor being a def line, a `return`, or the work call, and it never places after
-    the whole function (a scope/F821 crash) or after a return (dead code). When
-    placement is a best guess — def-line anchor, or multiple top-level returns
-    (success-vs-guard ambiguity) — `review_reason` is set so the caller can prepend a
-    loud `# REVIEW PLACEMENT:` marker (see `with_placement_marker`).
+    the whole function (a scope/F821 crash) or after a return (dead code). A clean
+    terminal try (body-success + handler-failures) is RECURSED into so the emit lands
+    inside it, not dead after it. When placement is a best guess — def-line anchor,
+    multiple top-level returns (success-vs-guard ambiguity), conditional/looped work
+    hoisted to function level, or an after-position that may be UNREACHABLE (terminal
+    all-return if/try/else) — `review_reason` is set so the caller can prepend a loud
+    `# REVIEW PLACEMENT:` marker (see `with_placement_marker`).
 
     None means "no deterministic capture": for python a real syntax error / no
     enclosing statement (caller STOPs); for typescript/go ALSO when tree-sitter is
@@ -146,6 +149,68 @@ def _module_level_point(source: str, tree: ast.Module, lineno: int) -> "Insertio
                           indent=_leading_ws(source, start_line))
 
 
+def _is_true_literal(node) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _has_break(body) -> bool:
+    return any(isinstance(sub, ast.Break)
+               for stmt in body for sub in ast.walk(stmt))
+
+
+def _block_exits(body) -> bool:
+    return bool(body) and _always_exits(body[-1])
+
+
+def _always_exits(stmt) -> bool:
+    """True iff control NEVER passes to the statement AFTER `stmt` — every path
+    returns or raises. Used to detect when placing after `stmt` is unreachable. Must
+    only return True when CERTAIN (a false True makes us recurse into the wrong
+    branch and under-bill the fall-through path)."""
+    if isinstance(stmt, (ast.Return, ast.Raise)):
+        return True
+    if isinstance(stmt, ast.If):
+        return bool(stmt.orelse) and _block_exits(stmt.body) and _block_exits(stmt.orelse)
+    if isinstance(stmt, ast.Try):
+        if stmt.finalbody and _block_exits(stmt.finalbody):
+            return True
+        success = stmt.orelse if stmt.orelse else stmt.body
+        return _block_exits(success) and all(_block_exits(h.body) for h in stmt.handlers)
+    if isinstance(stmt, ast.While):
+        return _is_true_literal(stmt.test) and not _has_break(stmt.body)
+    if isinstance(stmt, ast.With):
+        return _block_exits(stmt.body)
+    return False
+
+
+def _is_clean_terminal_try(stmt) -> bool:
+    """The ONE unreachable shape we can resolve deterministically: a try whose body
+    returns on success and whose handlers all exit — and NO else/finally (those move
+    the success path off the try body). Success path is unambiguously the try body."""
+    return (isinstance(stmt, ast.Try) and not stmt.orelse and not stmt.finalbody
+            and bool(stmt.body) and isinstance(stmt.body[-1], ast.Return)
+            and all(_block_exits(h.body) for h in stmt.handlers))
+
+
+def _success_target(body, source: str):
+    """(after_line, indent_str, unreachable_uncertain) for a block's success-return
+    path. Recurses into a clean terminal try (quiet); flags uncertain-unreachable for
+    every other all-exit terminal shape (if/else, try/else, try/finally, while-True)."""
+    last = body[-1]
+    indent = _leading_ws(source, body[0].lineno)
+    if isinstance(last, ast.Return):
+        if len(body) >= 2:
+            prev = body[-2]
+            return (getattr(prev, "end_lineno", None) or prev.lineno), indent, False
+        return last.lineno - 1, indent, False
+    after = getattr(last, "end_lineno", None) or last.lineno
+    if _always_exits(last):
+        if _is_clean_terminal_try(last):
+            return _success_target(last.body, source)   # recurse into the success path
+        return after, indent, True                       # unreachable + can't resolve -> mark
+    return after, indent, False
+
+
 def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None":
     try:
         tree = ast.parse(source)
@@ -164,18 +229,12 @@ def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None"
     body = func.body
     if not body:
         return None
-    body_indent = _leading_ws(source, body[0].lineno)
-    last = body[-1]
-    if isinstance(last, ast.Return):
-        if len(body) >= 2:
-            prev = body[-2]
-            after_line = getattr(prev, "end_lineno", None) or prev.lineno
-        else:
-            after_line = last.lineno - 1   # body is just `return ...`
-    else:
-        after_line = getattr(last, "end_lineno", None) or last.lineno
+    # Placement = the function's success-return path (recurses into a clean terminal
+    # try). `unreachable` is True when the after-position provably can't run and we
+    # could NOT resolve it deterministically.
+    after_line, body_indent, unreachable = _success_target(body, source)
 
-    # make-it-loud: placement is a best guess (not certain) in two shapes.
+    # make-it-loud: placement is a best guess (not certain) in these shapes.
     reasons: list[str] = []
     if lineno < body[0].lineno:
         reasons.append("anchor was the def signature, not a work statement — confirm "
@@ -183,18 +242,21 @@ def _python_insertion_point(source: str, lineno: int) -> "InsertionPoint | None"
     if sum(1 for s in body if isinstance(s, ast.Return)) >= 2:
         reasons.append("function has multiple top-level returns — confirm the emit "
                        "fires on the SUCCESS path, not after an early-return guard")
-    # conditional/looped work: entry.line is INSIDE a top-level compound block, but
-    # the success-return rule hoists the emit to the function level — so it would
-    # fire even when that block did not run (over-bill). Make it loud.
+    # conditional/looped work: entry.line is INSIDE a top-level CONDITIONAL/LOOP block
+    # (NOT try/with, which run unconditionally), but the emit is hoisted to the
+    # function level — so it would fire even when that block did not run (over-bill).
     for s in body:
-        if isinstance(s, (ast.If, ast.For, ast.AsyncFor, ast.While,
-                          ast.With, ast.AsyncWith, ast.Try)):
+        if isinstance(s, (ast.If, ast.For, ast.AsyncFor, ast.While)):
             end = getattr(s, "end_lineno", None) or s.lineno
             if s.lineno < lineno <= end:
                 reasons.append("the anchored work is inside a conditional/loop block "
                                "but the emit is hoisted to the function level — confirm "
                                "it should fire even when that block did not execute")
                 break
+    if unreachable:
+        reasons.append("the emit is placed after a block that always returns or raises "
+                       "on every path — it may be UNREACHABLE; confirm it lands on the "
+                       "executed success path")
     review_reason = "; ".join(reasons) or None
 
     return InsertionPoint(function=func.name, after_line=after_line,
@@ -300,6 +362,16 @@ def _treesitter_insertion_point(source: str, lineno: int,
         reasons.append("the anchored work is inside a conditional/loop block but the "
                        "emit is hoisted to the function level — confirm it should fire "
                        "even when that block did not execute")
+    # Conservative unreachability mark (ts/go): full reachability analysis is
+    # Python-only (stdlib ast); here we flag the direct analog of the proven dead-
+    # placement shape — a function ending in a try/catch (or a switch), where placing
+    # after it is dead if every branch returns. Narrow on purpose (low false-positive)
+    # vs a full ts/go control-flow analysis, which the tree-sitter path does not do.
+    if last.type != "return_statement" and last.type in (
+            "try_statement", "switch_statement", "select_statement"):
+        reasons.append("the emit is placed after a terminal " + last.type.split("_")[0]
+                       + " — it may be UNREACHABLE if every branch returns; confirm it "
+                       "lands on the executed success path")
     review_reason = "; ".join(reasons) or None
 
     return InsertionPoint(function=func_name, after_line=after_line,
