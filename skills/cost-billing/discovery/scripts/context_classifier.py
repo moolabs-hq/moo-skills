@@ -264,11 +264,17 @@ def _is_id_like(name: str) -> bool:
 
 def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
     """D-side capture (P/entity_id): WEAK, deterministic candidates for the metered
-    entity in the function enclosing `lineno` — id-like parameters + id-like assigned
-    locals. CANDIDATES ONLY: discovery writes them to `entity_id_candidate`; a human
-    must confirm one into `entity_id` before the codemod will emit (an unconfirmed
-    candidate still REFUSES). Returns [] when nothing id-like is found — the honest
-    'we don't know the entity' state, NOT a guess. Order: params first, then locals."""
+    entity in the function enclosing `lineno`. CANDIDATES ONLY: discovery writes them
+    to `entity_id_candidate`; a human must confirm one into `entity_id` before the
+    codemod will emit (an unconfirmed candidate still REFUSES). Returns [] when
+    nothing id-like is found — the honest 'we don't know the entity' state, NOT a
+    guess. Three sources, in order:
+      1. id-like parameters + id-like assigned locals (bare names) ;
+      2. `self.<id-attr>` — the entity carried on the instance ;
+      3. `<param>.<id-attr>` — the entity on an INPUT OBJECT (e.g. `comm.id`,
+         `case.customer_id`). This is the common shape when the local scan is EMPTY
+         (the entity lives on self / the input arg, not a local) — exactly the case
+         Phase 1.6 must still surface a question for."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -279,19 +285,32 @@ def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
 
-    def _add(name: str) -> None:
-        if name not in seen and _is_id_like(name):
-            seen.add(name)
-            out.append(name)
+    def _add(expr: str) -> None:
+        if expr not in seen:
+            seen.add(expr)
+            out.append(expr)
 
     a = func.args
+    params = {arg.arg for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+    # 1. id-like bare params + locals
     for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
-        _add(arg.arg)
+        if _is_id_like(arg.arg):
+            _add(arg.arg)
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
             for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
+                if isinstance(tgt, ast.Name) and _is_id_like(tgt.id):
                     _add(tgt.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+              and _is_id_like(node.target.id)):
             _add(node.target.id)
+    # 2 + 3. id-like attribute access on `self` or on an INPUT PARAMETER object —
+    # `self.case_id`, `comm.id`, `case.customer_id`. `_is_id_like` accepts a bare `id`
+    # attr (so `comm.id` qualifies) while still rejecting `comm.valid`.
+    for node in ast.walk(func):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and _is_id_like(node.attr)):
+            base = node.value.id
+            if base == "self" or base in params:
+                _add(f"{base}.{node.attr}")
     return out

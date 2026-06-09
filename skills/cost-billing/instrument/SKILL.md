@@ -256,6 +256,10 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    - Provide a custom expression (e.g., `request.headers.get('x-org-id')`)
    - Mark "not available" → the codemod will skip that attribution key for the whole service
 3. Detect per-file overrides: routes flagged in `repo-profile.yaml > middleware_bypass[]` (webhooks, healthchecks) get their own override prompt.
+3b. **Confirm `entity_id` PER EVENT SITE — this is a separate, per-entry question, not a per-service one.** The framework keys above have one source for the whole service; the metered **entity** differs per event (the email's id, the cash-application record, the account). So loop over EVERY usage/cost inventory entry and ask one question per site:
+   - Candidates: `discovery/scripts/context_classifier.propose_entity_id_candidates(source, entry.line)` — id-like locals/params PLUS `self.<id>` and **input-object-param** attributes (`comm.id`, `case.customer_id`).
+   - **When that list is empty, you MUST still ask** — that's the common shape (the entity lives on `self` or the input object, not a local; ~4 of moo-arc's 7 sites). Present the `self.*` / input-object candidates; if there are genuinely none, ask the engineer to TYPE the metered-entity expression for that site. **Never skip the question and never auto-fill** — an unconfirmed `entity_id` is `null`, and the codemod REFUSES to emit that billable event (it will not silently fall back to the per-request correlation id, which double-counts on retry).
+   - The engineer confirms exactly ONE expression as the metered entity (the dedup grain + sibling-pair join key — NOT the correlation id). Write it to that **inventory entry's `entity_id`** (the confirmed field). The proposer's list stays in `entity_id_candidate` as the proposal record. The codemod reads only the confirmed per-entry `entity_id`; `entity_id_candidate` alone does not satisfy the gate.
 4. Persist confirmations to `.moolabs/customer-context/attribution-bindings.yaml`:
 
    ```yaml

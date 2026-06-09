@@ -283,12 +283,29 @@ class EntityIdProposer(unittest.TestCase):
         self.assertNotIn("db", cands)
         self.assertNotIn("draft", cands)
 
-    def test_no_id_like_proposes_nothing(self):
-        # NEGATIVE (the one that matters): nothing id-like -> [] -> codemod REFUSES.
-        # Must NOT guess (e.g. 'payload', 'result', 'valid' are not entities).
+    def test_entity_on_self_and_input_object_when_locals_empty(self):
+        # The 4-of-7 moo-arc case: NO id-like local/param — the entity lives on `self`
+        # or the input-object param (comm.id, case.customer_id). The proposer must
+        # surface those so Phase 1.6 has something to ask about.
         src = _src("""
-            def compose(payload, valid):
-                result = work(payload)
+            def handle(self, comm, case):
+                draft = render(comm.id)
+                log(self.case_id)
+                return build(case.customer_id)
+        """)
+        cands = cc.propose_entity_id_candidates(src, 3)
+        self.assertIn("comm.id", cands)            # input-object attr (bare .id)
+        self.assertIn("self.case_id", cands)       # self attr
+        self.assertIn("case.customer_id", cands)   # input-object attr (_id)
+
+    def test_no_id_like_proposes_nothing(self):
+        # NEGATIVE (the one that matters): nothing id-like anywhere -> [] -> REFUSE.
+        # Not a bare local/param, not a self/input id-attr (comm.valid / x.status are
+        # NOT entities).
+        src = _src("""
+            def compose(self, payload, valid):
+                result = work(payload.status)
+                ok = valid.check()
                 return result
         """)
         self.assertEqual(cc.propose_entity_id_candidates(src, 3), [])
