@@ -427,7 +427,7 @@ class EndToEndPipeline(unittest.TestCase):
         self.assertIn("from mypkg.services.moolabs_client import", out)
         self.assertNotIn("from app.services.moolabs_client import", out)  # leak gone
 
-    def _build_one(self, entry, attribution_defaults=None):
+    def _build_one(self, entry, attribution_defaults=None, attribution_overrides=None):
         import io
         import contextlib
         import task_planner as tp
@@ -438,7 +438,7 @@ class EndToEndPipeline(unittest.TestCase):
                 {"entries": []}, {"entries": [entry]}, {"edges": []}, {"capabilities": {}}, signed,
                 {"language": "python", "framework": "fastapi"},
                 attribution_defaults=defaults,
-                attribution_overrides=[], slug_inventory=None)
+                attribution_overrides=attribution_overrides or [], slug_inventory=None)
         return tasks[0].inserts[0]
 
     def test_entity_id_capture_proposed_candidate_still_refuses(self):
@@ -483,6 +483,25 @@ class EndToEndPipeline(unittest.TestCase):
             attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r",
                                   "entity_id": "self.service_wide_id"})  # service binding
         self.assertIsNone(ins.attribution_sources.get("entity_id"))  # NOT inherited -> refuse
+
+    def test_per_file_override_entity_id_emits(self):
+        # Blocker 1 (raw dogfood): Phase 1.6 persists the confirmed metered entity in
+        # attribution-bindings overrides[file].bindings.entity_id — the per-CALLSITE
+        # grain the human confirmed. The planner must USE that per-file override (read
+        # override-only, not the collapsed sources) -> emit. Before the fix the planner
+        # read only entry.entity_id (never written) -> every callsite refused.
+        base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
+                "event_type": "svc.x", "product_slug": "svc"}
+        ins = self._build_one(base, attribution_overrides=[
+            {"file": "svc/api.py",
+             "bindings": {"entity_id": {"source": "remittance_id"}}}])
+        self.assertEqual(ins.attribution_sources.get("entity_id"), "remittance_id")
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
+        out = env.get_template("python-fastapi.j2").render(
+            entry=ins.entry, attribution_sources=ins.attribution_sources)
+        self.assertIn("entity_id=str(remittance_id)", out)
+        self.assertNotIn("NOT EMITTED", out)
 
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;

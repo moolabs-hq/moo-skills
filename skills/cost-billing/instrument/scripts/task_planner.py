@@ -382,6 +382,25 @@ def _resolve_sources_for_file(
     return resolved
 
 
+def _file_override_entity_id(file_path: str, overrides: list[dict[str, Any]]) -> str | None:
+    """The CONFIRMED entity_id from the per-FILE attribution-binding override ONLY — the
+    grain Phase 1.6 persists the confirmed metered entity at (per callsite-file).
+
+    Read DIRECTLY from the overrides list keyed by file, NEVER from the collapsed
+    `sources_for_file` (which merges service-DEFAULT + per-file override into one value).
+    A service-default entity_id must NOT flow — it would silently bypass per-callsite
+    confirmation for files nobody looked at (round-1 adversarial finding). A per-file
+    override is categorically different: the human confirmed THAT file's entity."""
+    for ov in overrides or []:
+        if ov.get("file") != file_path:
+            continue
+        b = (ov.get("bindings") or {}).get("entity_id")
+        if isinstance(b, dict):
+            return b.get("source")
+        return b if isinstance(b, str) else None
+    return None
+
+
 def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]) -> str:
     """Match the inventory entry's classification against pattern rules."""
     classification = entry.get("classification") or entry.get("pattern")
@@ -1019,15 +1038,18 @@ def build_tasks(
             _anchor = enriched_entry.get("idempotency_anchor")
             if isinstance(_anchor, dict) and "confidence" not in _anchor:
                 enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
-            # entity_id is PER-ENTRY (per-workflow), unlike the framework-level
-            # attribution keys: flow ONLY the CONFIRMED `entry.entity_id` into this
-            # insert's sources (the one place the template reads it). It is NEVER
-            # inherited from a per-file/service binding — that would let a single
-            # service-level `entity_id` binding silently bypass the per-entry refuse
-            # gate for every site in the file. A proposed-but-unconfirmed candidate
-            # (`entity_id_candidate`) is deliberately NOT read, and an empty string is
-            # falsy -> None, so an unconfirmed/blank entity still hits the refuse.
-            insert_sources = {**sources_for_file, "entity_id": entry.get("entity_id") or None}
+            # entity_id is PER-CALLSITE-CONFIRMED. Source it from (in order): the
+            # inventory entry (if discovery wrote it there), then the per-FILE
+            # attribution-binding override (where Phase 1.6 actually persists the
+            # confirmed metered entity). NEVER the service DEFAULT — read override-only
+            # via _file_override_entity_id, NOT sources_for_file["entity_id"] (which
+            # collapses default+override and would re-admit the bypass the round-1 review
+            # closed). A proposed-but-unconfirmed candidate is deliberately NOT read, and
+            # "" is falsy -> None, so an unconfirmed/blank entity still hits the refuse.
+            _entity = (entry.get("entity_id")
+                       or _file_override_entity_id(file_path, attribution_overrides or [])
+                       or None)
+            insert_sources = {**sources_for_file, "entity_id": _entity}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
