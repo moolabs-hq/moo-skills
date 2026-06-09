@@ -168,7 +168,11 @@ class CallsiteRenderSmoke(unittest.TestCase):
             for entry in (_usage_entry(), _sibling_entry()):
                 with self.subTest(tpl=tpl, pattern=entry["pattern"]):
                     out = self._render(tpl, entry)
-                    self.assertIn("REVIEW: idempotency", out)
+                    # P (sharpened): the no-anchor prompt now asks the real dedup
+                    # question — is entity_id retry-stable (a per-request id
+                    # double-counts) — not just "ensure unique".
+                    self.assertIn("REVIEW idempotency", out)
+                    self.assertIn("STABLE across a retry", out)
 
     def test_typescript_all_patterns_render(self):
         # Can't compile TS here; assert StrictUndefined render succeeds + the

@@ -45,7 +45,8 @@ from {{ entry.helper_import_path }} import emit_event_safe
 _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% if not attribution_sources.request_id %}_moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
-{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW: idempotency — no derived anchor; ensure entity_id is unique per event{% endif %}
+{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW idempotency: confirm entity_id is STABLE across a retry of this
+# event — a per-request / correlation id double-counts on retry.{% endif %}
 emit_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
@@ -84,7 +85,8 @@ from {{ entry.helper_import_path }} import emit_usage_event_safe
 
 _moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
-{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW: idempotency — no derived anchor; ensure entity_id is unique per event{% endif %}
+{% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW idempotency: confirm entity_id is STABLE across a retry of this
+# event — a per-request / correlation id double-counts on retry.{% endif %}
 emit_usage_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
