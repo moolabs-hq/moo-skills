@@ -262,19 +262,47 @@ def _is_id_like(name: str) -> bool:
     return n in ("id", "pk", "uuid", "guid") or n.endswith(("_id", "_uuid", "_pk", "_guid"))
 
 
+# Per-request / tracing / dedup-mechanism ids — id-like, but NOT the metered business
+# entity. Surfacing them as entity candidates invites the exact correlation-id-as-
+# entity mis-bill this whole capture fights (a per-request id double-counts on retry).
+_REQUEST_ID_NAMES = frozenset({
+    "request_id", "req_id", "requestid", "correlation_id", "corr_id", "correlationid",
+    "trace_id", "traceid", "span_id", "spanid", "txn_id", "transaction_id",
+    "idempotency_key", "idempotency_id", "session_id", "sessionid",
+})
+
+
+def _is_entity_name(token: str) -> bool:
+    """id-like AND not a known per-request/tracing/dedup id. The exclusion is the
+    candidate-level guard against proposing the correlation id as the metered entity."""
+    return _is_id_like(token) and token.lower() not in _REQUEST_ID_NAMES
+
+
 def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
     """D-side capture (P/entity_id): WEAK, deterministic candidates for the metered
-    entity in the function enclosing `lineno`. CANDIDATES ONLY: discovery writes them
-    to `entity_id_candidate`; a human must confirm one into `entity_id` before the
-    codemod will emit (an unconfirmed candidate still REFUSES). Returns [] when
-    nothing id-like is found — the honest 'we don't know the entity' state, NOT a
-    guess. Three sources, in order:
-      1. id-like parameters + id-like assigned locals (bare names) ;
+    entity in the function enclosing `lineno`. Invoked by the AGENT per the instrument
+    SKILL Phase 1.6 (per-site entity confirmation) + discovery SKILL Phase 4 — the
+    inventory build is agent-driven, so this is a library function the prose calls, not
+    a deterministic script caller.
+
+    CANDIDATES ONLY: discovery writes them to `entity_id_candidate`; a human must
+    confirm one into `entity_id` before the codemod will emit (an unconfirmed candidate
+    still REFUSES — the refuse gate is independent of this proposer). Returns [] when
+    nothing id-like is found — the honest 'we don't know the entity' state, NOT a guess.
+    Three sources, in order:
+      1. id-like parameters (incl *args/**kwargs) + id-like assigned locals (bare names);
       2. `self.<id-attr>` — the entity carried on the instance ;
       3. `<param>.<id-attr>` — the entity on an INPUT OBJECT (e.g. `comm.id`,
          `case.customer_id`). This is the common shape when the local scan is EMPTY
          (the entity lives on self / the input arg, not a local) — exactly the case
-         Phase 1.6 must still surface a question for."""
+         Phase 1.6 must still surface a question for.
+
+    Known per-request/tracing ids (request_id, correlation_id, trace_id …) are EXCLUDED
+    — they are not the metered entity (see `_REQUEST_ID_NAMES`). Known gaps (all fail
+    toward [] = refuse, the safe direction): walrus `(x := …)`, `AugAssign`, and
+    `for`-loop targets are not scanned as locals; a loop-variable entity is a red flag
+    anyway (per-iteration work billed once). The human types the expression in those
+    cases."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -298,25 +326,26 @@ def propose_entity_id_candidates(source: str, lineno: int) -> list[str]:
     # helper's `record_id` / `self.foo_id` would be proposed for THIS function — a
     # plausible-but-wrong candidate a human could rubber-stamp (silent mis-bill).
     for arg in args_all:
-        if _is_id_like(arg.arg):
+        if _is_entity_name(arg.arg):
             _add(arg.arg)
     for extra in (a.vararg, a.kwarg):
-        if extra is not None and _is_id_like(extra.arg):
+        if extra is not None and _is_entity_name(extra.arg):
             _add(extra.arg)
     for node in _own_scope_nodes(func):
         if isinstance(node, ast.Assign):
             for tgt in node.targets:
-                if isinstance(tgt, ast.Name) and _is_id_like(tgt.id):
+                if isinstance(tgt, ast.Name) and _is_entity_name(tgt.id):
                     _add(tgt.id)
         elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-              and _is_id_like(node.target.id)):
+              and _is_entity_name(node.target.id)):
             _add(node.target.id)
     # 2 + 3. id-like attribute access on `self` or on an INPUT PARAMETER object —
-    # `self.case_id`, `comm.id`, `case.customer_id`. `_is_id_like` accepts a bare `id`
-    # attr (so `comm.id` qualifies) while still rejecting `comm.valid`. Own-scope only.
+    # `self.case_id`, `comm.id`, `case.customer_id`. `_is_entity_name` accepts a bare
+    # `id` attr (so `comm.id` qualifies), rejects `comm.valid`, and drops request/trace
+    # ids (`req.request_id` is not the entity). Own-scope only (no nested defs).
     for node in _own_scope_nodes(func):
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and _is_id_like(node.attr)):
+                and _is_entity_name(node.attr)):
             base = node.value.id
             if base == "self" or base in params:
                 _add(f"{base}.{node.attr}")

@@ -345,6 +345,21 @@ class EntityIdProposer(unittest.TestCase):
         self.assertIn("record_id", cands)    # *args id-like
         self.assertIn("customer_id", cands)  # **kwargs id-like
 
+    def test_request_and_tracing_ids_excluded(self):
+        # request_id / trace_id / correlation_id / span_id are id-like but are per-
+        # request/tracing ids, NOT the metered entity — surfacing them invites the
+        # correlation-id-as-entity mis-bill. Excluded (bare + attr forms).
+        src = _src("""
+            def h(self, request, request_id, trace_id, email_id):
+                return work(request.correlation_id, self.span_id)
+        """)
+        cands = cc.propose_entity_id_candidates(src, 2)
+        self.assertIn("email_id", cands)                    # a real entity id stays
+        self.assertNotIn("request_id", cands)               # bare param
+        self.assertNotIn("trace_id", cands)                 # bare param
+        self.assertNotIn("request.correlation_id", cands)   # input-object attr
+        self.assertNotIn("self.span_id", cands)             # self attr
+
     def test_syntax_error_proposes_nothing(self):
         self.assertEqual(cc.propose_entity_id_candidates("def (:\n", 1), [])
 
