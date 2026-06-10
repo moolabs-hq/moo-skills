@@ -311,19 +311,18 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    of MANY callers. Attribute that cost in THIS order; only descend when the level above
    is genuinely impossible:
 
-   1. **THREAD it (preferred) — sibling-pair at the caller.** The cost belongs to the
-      usage event that TRIGGERED it. Emit usage and cost TOGETHER as a sibling-pair at
-      the CALLER's site, carrying the CALLER's `entity_id` — then attribution is
-      automatic (one entity, by construction; no propagation needed). This requires the
-      cost to reach the caller, so THREAD it back: expose the shared helper's cost to its
-      caller. The exact mechanism is CUSTOMER CODE and varies (an optional param so the
-      helper emits the cost itself with a passed entity; an added return/out value the
-      caller forwards; a small result object) — the ENGINEER makes that cross-cutting
-      change. The codemod emits the sibling-pair scaffolding + a precise, reviewable
-      REFACTOR INSTRUCTION naming the helper, its callers, and the cost source; it does
-      NOT rewrite the helper's signature (a tuple-arity / return-shape change is a
-      RUNTIME break that `py_compile` cannot catch — engineer-owned, like `terraform
-      apply`). Prefer a NON-BREAKING shape (optional param / additive return).
+   1. **THREAD it (preferred) — sibling-pair, RESOLVED IN DISCOVERY.** Discovery traces
+      the call-graph edges and resolves the cost↔usage pairing
+      (`slug_inventory.resolve_pairing`), writing the PATH into the inventory: a cost
+      consumed by EXACTLY ONE usage event is its sibling → `pattern: sibling-pair`,
+      `paired_usage_workflow_id: <the usage workflow>`. The codemod then emits ONE
+      sibling-pair (usage + cost together) carrying that usage's `entity_id` — attribution
+      automatic, one entity by construction. This is STATIC analysis, NOT a customer
+      refactor: the codemod does not change any helper signature. A cost with ZERO or MANY
+      usage callers has no clean pair (a shared or orphan helper) → discovery resolves it
+      to `cost-only`, and it emits as an INDIVIDUAL event (levels 2–3 below). That is NOT
+      a failure: forcing sibling-pair on a shared cost double-counts (once per caller AND
+      at the cost site).
    2. **TRACK it down — bind the entity.** If the cost genuinely can't be threaded to one
       usage event, propose/confirm the metered entity for the cost site (the Phase 1.6
       per-site question — search self / input object / recent; engineer confirms).

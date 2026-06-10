@@ -518,5 +518,35 @@ class ConsolidationDoubleCountDetection(unittest.TestCase):
         self.assertEqual(si.check_consolidation_double_count(cost_inv, omap), [])
 
 
+class ResolvePairing(unittest.TestCase):
+    """The THREAD: discovery resolves the cost<->usage pairing from the call-graph edges
+    and writes the path. fan-out==1 -> sibling-pair; else individual (cost-only)."""
+
+    def test_single_usage_caller_is_sibling_pair_with_the_path(self):
+        omap = {"edges": [{"output_workflow_id": "svc.dunning.email",
+                           "inputs": [{"cost_workflow_id": "svc.dunning.llm"}]}]}
+        r = si.resolve_pairing(omap, "svc.dunning.llm")
+        self.assertEqual(r["pattern"], "sibling-pair")
+        self.assertEqual(r["paired_usage_workflow_id"], "svc.dunning.email")  # the path
+
+    def test_many_usage_callers_is_cost_only_not_sibling_pair(self):
+        # a SHARED cost (e.g. llm_helpers) feeding many usages must NOT sibling-pair
+        # (double-counts) -> cost-only / individual -> its lone event hits track/loud-emit.
+        omap = {"edges": [
+            {"output_workflow_id": "svc.a", "inputs": [{"cost_workflow_id": "svc.shared.llm"}]},
+            {"output_workflow_id": "svc.b", "inputs": [{"cost_workflow_id": "svc.shared.llm"}]},
+        ]}
+        r = si.resolve_pairing(omap, "svc.shared.llm")
+        self.assertEqual(r["pattern"], "cost-only")
+        self.assertIsNone(r["paired_usage_workflow_id"])
+        self.assertIn("consolidation", r["reason"])
+
+    def test_orphan_cost_no_usage_caller_is_cost_only(self):
+        r = si.resolve_pairing({"edges": []}, "svc.orphan.llm")
+        self.assertEqual(r["pattern"], "cost-only")
+        self.assertIsNone(r["paired_usage_workflow_id"])
+        self.assertIn("orphan", r["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

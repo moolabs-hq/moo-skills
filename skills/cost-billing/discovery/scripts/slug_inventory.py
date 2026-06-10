@@ -262,6 +262,46 @@ def check_duplicates(by_product: dict[str, dict[str, list[dict]]]) -> list[str]:
 # Consolidation double-count detection (Dogfood #4 enforcement)
 # ──────────────────────────────────────────────────────────────────────
 
+def _fan_out_map(omap: dict) -> dict[str, set[str]]:
+    """Invert the call-graph edges: cost_workflow_id -> {usage output_workflow_ids that
+    consume it}. Defensive against agent-authored YAML that parses to non-dict shapes."""
+    fan_out: dict[str, set[str]] = {}
+    for edge in (omap.get("edges") if isinstance(omap, dict) else []) or []:
+        if not isinstance(edge, dict):
+            continue
+        out_wf = edge.get("output_workflow_id")
+        if not out_wf:
+            continue
+        for inp in edge.get("inputs") or []:
+            if not isinstance(inp, dict):
+                continue
+            cost_wf = inp.get("cost_workflow_id")
+            if cost_wf:
+                fan_out.setdefault(cost_wf, set()).add(out_wf)
+    return fan_out
+
+
+def resolve_pairing(omap: dict, cost_workflow_id: str) -> dict:
+    """THREAD (discovery-side): from the call-graph edges, resolve how a cost event pairs
+    with usage events, and write the PATH. Exactly ONE consuming usage -> sibling-pair
+    (the cost is owned by that usage; emit them together with the usage entity). ZERO or
+    MANY -> cost-only / individual events (a shared/orphan cost can't be cleanly paired —
+    that's fine; its lone event falls to the entity track -> loud-emit fallback). NEVER
+    sibling-pair a fan-out>=2 cost — it double-counts (once per agent + at the cost site).
+
+    Returns {pattern, paired_usage_workflow_id|None, reason} — written into the inventory
+    so the codemod emits a sibling-pair only where a real 1:1 path exists."""
+    outs = sorted(_fan_out_map(omap).get(cost_workflow_id, set()))
+    if len(outs) == 1:
+        return {"pattern": "sibling-pair", "paired_usage_workflow_id": outs[0],
+                "reason": "single-usage-pair"}
+    if len(outs) >= 2:
+        return {"pattern": "cost-only", "paired_usage_workflow_id": None,
+                "reason": f"consolidation:{len(outs)}-usages"}
+    return {"pattern": "cost-only", "paired_usage_workflow_id": None,
+            "reason": "orphan-no-usage-pair"}
+
+
 def check_consolidation_double_count(cost_inv: dict, omap: dict) -> list[str]:
     """Detect cost-events marked `pattern: sibling-pair` at a CONSOLIDATION
     site — a single cost feeding >=2 usage outputs.
@@ -280,19 +320,7 @@ def check_consolidation_double_count(cost_inv: dict, omap: dict) -> list[str]:
     # Invert the omap: cost_workflow_id -> set(output_workflow_ids).
     # Defensive (PR #9 review NIT): edges/inputs/entries from agent-authored
     # YAML may parse to non-dict shapes; skip those rather than AttributeError.
-    fan_out: dict[str, set[str]] = {}
-    for edge in (omap.get("edges") if isinstance(omap, dict) else []) or []:
-        if not isinstance(edge, dict):
-            continue
-        out_wf = edge.get("output_workflow_id")
-        if not out_wf:
-            continue
-        for inp in edge.get("inputs") or []:
-            if not isinstance(inp, dict):
-                continue
-            cost_wf = inp.get("cost_workflow_id")
-            if cost_wf:
-                fan_out.setdefault(cost_wf, set()).add(out_wf)
+    fan_out = _fan_out_map(omap)
 
     warnings: list[str] = []
     for entry in (cost_inv.get("entries") if isinstance(cost_inv, dict) else []) or []:
