@@ -1340,5 +1340,50 @@ class ServiceSurfacePathRepoRelative(unittest.TestCase):
                              [".env.example"])
 
 
+class SingleServiceFallback(unittest.TestCase):
+    """Blocker 2 (raw dogfood): a per-`--service` run's signed doc has NO
+    integration.services (not in the 04-final schema); the service identity is the
+    top-level service_slug + scan_scope + repo. Without the fallback, the scan found
+    no services and wired nothing."""
+
+    def _parse(self, yaml_text):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "04-final.signed.yaml"
+            p.write_text(yaml_text)
+            return els.parse_services_and_granularity(p)
+
+    def test_derives_single_service_from_top_level_when_integration_services_absent(self):
+        svcs, _, _, _ = self._parse(
+            "service_slug: moo-arc\n"
+            "scan_scope:\n  service_subdir: services/moo-arc\n"
+            "repo:\n  languages: [python]\n"
+            "integration:\n  env_loader_granularity: per-service\n")
+        self.assertEqual(svcs, [{"slug": "moo-arc", "root": "services/moo-arc",
+                                 "language": "python"}])
+
+    def test_root_is_service_dir_not_package_dir_from_target(self):
+        # the moo-arc dogfood doc shape: repo has no languages; sdk_package_install does;
+        # scan_scope.target is the PACKAGE dir (services/moo-arc/app). root must strip the
+        # package tail to the service dir so config -> app/config.py -> import app.moolabs_*.
+        svcs, _, _, _ = self._parse(
+            "service_slug: moo-arc\n"
+            "scan_scope:\n  target: services/moo-arc/app\n"
+            "repo:\n  primary_path: .\n"
+            "integration:\n  sdk_package_install:\n    python: pip install moolabs\n")
+        self.assertEqual(svcs[0]["slug"], "moo-arc")
+        self.assertEqual(svcs[0]["language"], "python")
+        self.assertEqual(svcs[0]["root"], "services/moo-arc")   # service dir, NOT .../app
+
+    def test_integration_services_still_wins_when_present(self):
+        svcs, _, _, _ = self._parse(
+            "service_slug: ignored\n"
+            "integration:\n  services:\n    - slug: a\n      root: services/a\n      language: go\n")
+        self.assertEqual([s["slug"] for s in svcs], ["a"])   # NOT the fallback
+
+    def test_no_service_slug_no_derivation(self):
+        svcs, _, _, _ = self._parse("repo:\n  shape: monorepo\n")
+        self.assertEqual(svcs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

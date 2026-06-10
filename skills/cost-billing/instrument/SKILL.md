@@ -256,6 +256,10 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
    - Provide a custom expression (e.g., `request.headers.get('x-org-id')`)
    - Mark "not available" → the codemod will skip that attribution key for the whole service
 3. Detect per-file overrides: routes flagged in `repo-profile.yaml > middleware_bypass[]` (webhooks, healthchecks) get their own override prompt.
+3b. **Confirm `entity_id` PER EVENT SITE — this is a separate, per-entry question, not a per-service one.** The framework keys above have one source for the whole service; the metered **entity** differs per event (the email's id, the cash-application record, the account). So loop over EVERY usage/cost inventory entry and ask one question per site:
+   - Candidates: `discovery/scripts/context_classifier.propose_entity_id_candidates(source, entry.line)` — id-like locals/params PLUS `self.<id>` and **input-object-param** attributes (`comm.id`, `case.customer_id`).
+   - **When that list is empty, you MUST still ask** — that's the common shape (the entity lives on `self` or the input object, not a local; ~4 of moo-arc's 7 sites). Present the `self.*` / input-object candidates; if there are genuinely none, ask the engineer to TYPE the metered-entity expression for that site. **Never skip the question and never auto-fill** — an unconfirmed `entity_id` is `null`, and the codemod REFUSES to emit that billable event (it will not silently fall back to the per-request correlation id, which double-counts on retry).
+   - The engineer confirms exactly ONE expression as the metered entity (the dedup grain + sibling-pair join key — NOT the correlation id). Persist it as a **per-FILE override** in `attribution-bindings.yaml > overrides[]` (`file: <the callsite file>`, `bindings.entity_id.source: <expr>`) — the same place Phase 1.6 persists the other confirmed bindings, keyed by the callsite file. The proposer's list stays on the inventory entry's `entity_id_candidate` as the proposal record. `task_planner` reads the confirmed entity from the per-file override (override-only — NEVER a service-wide default, which would bypass per-callsite confirmation) or the inventory entry's `entity_id`; an unconfirmed `entity_id_candidate` alone does not satisfy the gate.
 4. Persist confirmations to `.moolabs/customer-context/attribution-bindings.yaml`:
 
    ```yaml
@@ -300,19 +304,37 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 5. **Refuse to proceed if confirmations are missing.** Phase 2c reads `attribution-bindings.yaml` and aborts if any key the templates need is neither confirmed nor explicitly marked `source: null`. Fail loud — never silently substitute.
 
-   **`entity_id` is REQUIRED for billable events — unbound = refuse, never fall back.**
-   `entity_id` is the metered entity (above). When it is UNBOUND for a billable
-   callsite, the codemod does NOT emit a billing call — the template renders a loud
-   `MOOLABS BILLING NOT EMITTED … entity_id is UNBOUND` comment instead. It must
-   NOT fall back to the correlation id (per-request → retries double-count) or a
-   fresh UUID (no dedup). Bind the metered entity per workflow, then re-run. This is
-   the fix for the retry-double-count: dedup is per-entity, not per-request. (The
-   per-request correlation id is preserved separately in `meta.correlation_id` for
-   tracing.) **Consolidated-cost caveat:** when a single cost is emitted ONCE at a
-   shared site but bills MANY usage events (a consolidated cost — see discovery's
-   cost-consolidation rule), that cost site's entity may differ from the per-action
-   usage entities. Choose `entity_id` deliberately so the dedup grain — and any
-   usage↔cost relationship you rely on downstream — still holds.
+   **`entity_id` attribution — thread, then track, then (last resort) flag. NEVER fall
+   back to the per-request correlation id (retries double-count) or a fresh UUID (no
+   dedup).** A cost is often computed where the metered entity is NOT directly available
+   — a SHARED helper that computes a cost (LLM tokens, an API call, a render) on behalf
+   of MANY callers. Attribute that cost in THIS order; only descend when the level above
+   is genuinely impossible:
+
+   1. **THREAD it (preferred) — sibling-pair, RESOLVED IN DISCOVERY.** Discovery traces
+      the call-graph edges and resolves the cost↔usage pairing
+      (`slug_inventory.resolve_pairing`), writing the PATH into the inventory: a cost
+      consumed by EXACTLY ONE usage event is its sibling → `pattern: sibling-pair`,
+      `paired_usage_workflow_id: <the usage workflow>`. The codemod then emits ONE
+      sibling-pair (usage + cost together) carrying that usage's `entity_id` — attribution
+      automatic, one entity by construction. This is STATIC analysis, NOT a customer
+      refactor: the codemod does not change any helper signature. A cost with ZERO or MANY
+      usage callers has no clean pair (a shared or orphan helper) → discovery resolves it
+      to `cost-only`, and it emits as an INDIVIDUAL event (levels 2–3 below). That is NOT
+      a failure: forcing sibling-pair on a shared cost double-counts (once per caller AND
+      at the cost site).
+   2. **TRACK it down — bind the entity.** If the cost genuinely can't be threaded to one
+      usage event, propose/confirm the metered entity for the cost site (the Phase 1.6
+      per-site question — search self / input object / recent; engineer confirms).
+   3. **LAST RESORT — emit + LOUDLY flag (do NOT drop the billing).** Only when you can
+      NEITHER thread NOR track down what entity should have been passed: emit the event
+      anyway with a big-words `>>> ADD THE ENTITY_ID <<<` banner, a CONSTANT placeholder
+      (`__MOOLABS_ADD_ENTITY_ID__` — never the correlation id, so retries don't
+      double-count), and `meta.entity_id_status = "UNATTRIBUTED_PLACEHOLDER"` so the
+      unattributed events are discoverable server-side. The dev replaces the placeholder
+      and re-runs. This is strictly better than dropping the event — the cost is captured,
+      loudly, recoverably. (The per-request correlation id stays in `meta.correlation_id`
+      for tracing only.)
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
@@ -323,6 +345,45 @@ Driven by `scripts/config_wire.py`. Reads
 of cost-billing-discovery) and produces
 `.moolabs/customer-context/config-wiring-plan.yaml` describing the per-service
 env-wiring decisions.
+
+**Preferred path — mirror the customer's MOST-RECENTLY-ADDED secret (don't make them hunt).** The strongest "how do we wire a secret here" signal is the last secret the team actually wired — it is the path they currently consider correct, and it is blame-detectable, so the skill PROPOSES it and the engineer just confirms (same ergonomics as the entity_id prompt, near-zero effort):
+
+1. **Auto-propose the exemplar — from the last THREE secrets, not one.** Run `shared/scripts/secret_exemplar`:
+   - Config: `propose_exemplar(settings_source, line_dates=blame_line_dates(settings_path, [f.lineno for f in find_secret_fields(settings_source)]))`. It ranks the customer's secret-typed fields (`SecretStr` / `*_api_key` / `*_token` / `*_secret`) by `git blame` author date, MIRRORS the primary (newest), and forms an **opinion from the last 3** — a consensus `secret_type` (majority `SecretStr` vs plain) and an `agreement` level (`unanimous` / `majority` / `split` / `single`). One secret can be an anomaly (a deprecated path); the last few are the convention the team currently considers correct. `confidence="blame"` when dated; `"position"` (last-defined) when blame is unavailable. **If `agreement == "split"`, the recent convention is unsettled — surface that and ask harder, don't auto-mirror.**
+   - Deployment (if in-repo): the newest secret variable in `modules/secrets/variables.tf` / the k8s Secret (the agent blames it the same way; HCL/yaml is read, not AST-parsed).
+2. **Ask ONE confirm-or-correct question**, presenting the last 3 + the opinion, e.g.: *"Your last 3 secrets — `STRIPE_API_KEY`, `TWILIO_TOKEN`, `SENDGRID_KEY` — are all `SecretStr` read via the `settings` singleton (`@app/config.py:42`), provisioned in `@…/modules/secrets/variables.tf`. I'll wire `MOOLABS_API_KEY` the same way. Confirm, or @-link a different secret."* When the 3 disagree (`split`), say so: *"…your recent secrets mix `SecretStr` and plain — which is the pattern for new secrets?"* If the detector returns None (no secret field) or infra is in a separate repo, fall back to: *"Paste / @-link one secret you wire like you'd wire a new one."*
+3. **Trace-and-mirror** (structurally copy the exemplar, do NOT hand-author a generic shape):
+   - Config → `mode = "modify"`: add `moolabs_api_key` to the SAME Settings class **and mirror the ACCESS IDIOM** — `config_wire` runs `secret_exemplar.detect_access_idiom` on the config and imports the RIGHT symbol: a module **singleton** (`from app.config import settings` + `settings.moolabs_api_key`) vs a **factory** (`from app.config import get_settings` + `get_settings().moolabs_api_key`). Mirroring the field alone is not enough — the helper must READ it the way the customer's code does (moo-arc is a singleton; a hardcoded `get_settings()` ImportErrors). `detect_access_idiom` is the SEARCH half (how it's read); blame is the recency half (which field) — both are needed.
+   - **Deployment → TRACE the exemplar's COMPLETE path; do NOT assume a pattern.** A customer may wire secrets via terraform, k8s, AWS Secrets Manager / Vault directly, or plain env — you cannot enumerate them, so FOLLOW the real secret instead of classifying a format. `secret_exemplar.grep_tokens(repo_root, [exemplar.field, env_var_for_field(exemplar.field)])` (e.g. `arc_global_api_key` + `ARC_GLOBAL_API_KEY`) returns EVERY file:line the secret touches, in any format — the breadcrumbs of its path. Then follow **TWO HOPS** (one grep only finds the first):
+     - **Hop 1 — injection** (where the env var enters the runtime): terraform `{ name = "ARC_GLOBAL_API_KEY", valueFrom = … }`, k8s `name: ARC_GLOBAL_API_KEY` / `secretKeyRef`, `os.environ["ARC_GLOBAL_API_KEY"]`, `.env` `ARC_GLOBAL_API_KEY=`.
+     - **Hop 2 — declaration** (where the secret is stored): read the injection site's reference — the `valueFrom` / `secretKeyRef` / **store key** (e.g. `"shared/api-key"`, a DIFFERENT string from the env var) — then `grep_tokens` THAT key to find the secrets-map entry / k8s `Secret` manifest / `secretsmanager` resource that declares it.
+     - **Mirror `MOOLABS_API_KEY` at EVERY site — PLAN the additive edit, then ASK the engineer's permission to apply it. NEVER auto-decide "checklist".** Run `shared/scripts/secret_deploy_mirror.py --plan --repo-root <root> --anchor-env <EXEMPLAR_ENV> --swaps "<swaps>" [--new-store-key <key>]`. It anchors on the exemplar's UNIQUE env var (so other secrets sharing the store key stay untouched — a blind swap would corrupt the secrets that share `shared/api-key`), inserts ADDITIVE siblings PER ANCHORED BLOCK (idempotent only against the SAME block — a different task-def already carrying `MOOLABS_API_KEY`, e.g. the UI's `ui_secrets`, does NOT suppress wiring arc's own block), and SURFACES `skipped_already_wired`. **Choose the store key by MIRRORING the customer's convention — do NOT default to a dedicated key.** First grep `MOOLABS_API_KEY` itself: if the env var is ALREADY wired anywhere (another service/block) read which store key it uses. If the customer's secrets (incl. any existing `MOOLABS_API_KEY`, and the exemplar) REUSE a shared store key — moo-arc: `ARC_GLOBAL_API_KEY`, `CLS_API_KEY`, and the UI's `MOOLABS_API_KEY` ALL → `shared/api-key` — then REUSE it: `--swaps "<EXEMPLAR_ENV>=MOOLABS_API_KEY"` only (no store-key swap), NO `--new-store-key`, NO new declaration. Mint a dedicated key (`--swaps "...,<exemplar_store_key>=<svc>/moolabs-api-key" --new-store-key <svc>/moolabs-api-key`, in an EXISTING namespace so Hop-2 can anchor) ONLY if dedicated-per-secret is their actual pattern. Then **ASK ONE permission question, SHOWING the planned diff** (same confirm-or-correct style as the exemplar ask above): *"I traced `MOOLABS_API_KEY`'s mirror of `<EXEMPLAR_ENV>`. It's already wired for `<other service>` via `<store key>` — I'll mirror the SAME convention for this service: [the plan's injection lines]. Already-wired blocks (NOT touched — verify): [skipped_already_wired]. **Apply it, leave it as a checklist to apply by hand, or skip?**"* On **apply** → `secret_deploy_mirror.py --apply` (same args) then `terraform fmt` the written files (the secrets map is `=`-aligned — `fmt` re-aligns it; commit the fmt'd result). The edit is additive + anchored + a reviewable diff, applied ONLY on explicit permission — NO silent auto-edit of shared infra AND NO silent checklist. The skill's only autonomous act is to ASK. (Seeding the secret VALUE in the store stays a human step — you can't commit a secret.)
+4. **COMPLETENESS GATE — the trace is complete ONLY when you have found all THREE: the config field, the runtime-env INJECTION site, AND the secret DECLARATION/storage.** If you found only some, KEEP SEARCHING (widen tokens; follow the store key). NEVER emit a partial path: config-only (read but never provided) and injection-only (env var → a store key that doesn't exist) both leave `MOOLABS_API_KEY` empty at runtime — that is exactly the gap where a config change shipped with no terraform. Validate each mirrored block by structural diff against the exemplar's; if it doesn't match, FLAG — don't ship a guessed block.
+
+   **This gate is MECHANICALLY ENFORCED — it is no longer self-policed** (prose-only, the trace got silently skipped: dogfood 2026-06-10, `MOOLABS_API_KEY` shipped unwired). `config_wire` computes deterministic EVIDENCE — it greps the customer's secret env vars and, if ANY appears in an infra file, writes `secret_path.trace_required: true` (+ `infra_hits`) into `config-wiring-plan.yaml`. You MUST then RECORD your trace decision in `attribution-bindings.yaml` under a per-service `secret_path:` block, and **`task_planner` REFUSES TO RUN (return 2)** when `trace_required` is true but no decision is recorded:
+   ```yaml
+   secret_path:
+     status: traced            # gate token: traced | skipped | no-infra | separate-repo
+     decision: apply           # the engineer's PERMISSION: apply | checklist | skip
+     store_key: shared/api-key # REUSED the convention (UI/ARC_GLOBAL/CLS all → shared/api-key); no new key
+     injection_sites: ["…/environments/prod/main.tf:699", "…/regional/main.tf:1369"]  # arc's blocks
+     applied_files:            # when decision=apply: the .tf files secret_deploy_mirror --apply wrote
+       - "infrastructure/terraform/environments/prod/main.tf"
+       - "infrastructure/terraform/regional/main.tf"
+     # declaration: only when minting a DEDICATED key (reuse needs none — shared/api-key exists)
+     # mirrored_checklist: only when decision=checklist (the planned new_lines for the PR body)
+     # skipped_already_wired: blocks the file already carried MOOLABS_API_KEY at the anchor (verify)
+     reason: "…"               # REQUIRED when decision=skip / status=skipped
+   ```
+   `status: traced` (you found + mirrored the path — whether `decision: apply` wrote the
+   `.tf` or `decision: checklist` left it for the engineer) AND `status: skipped` (an
+   explicit `decision: skip` with a reason) both RESOLVE the gate. It enforces a recorded
+   DECISION + the engineer's PERMISSION — the skill never picks checklist on its own and
+   never silently auto-edits shared infra; it ALWAYS plans the diff and ASKS. The only
+   thing it forbids is silently skipping. (Evidence is python-only today — `find_secret_fields`
+   is python AST; TS/Go configs produce no evidence so the gate is a no-op there until extended.)
+
+When NO exemplar exists at all (greenfield repo with zero secrets wired), fall back to the generic stub below. The bootstrap engineer-stage secret question (Q14) defers to this auto-detection: it no longer asks the engineer to specify the secret source up front — Phase 1.7 detects + confirms it against the real repo.
 
 For each service:
 

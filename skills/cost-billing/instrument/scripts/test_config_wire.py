@@ -772,6 +772,7 @@ class AccessorRuntimeRegression(unittest.TestCase):
                     'env_config': {
                         'mode': 'modify',
                         'settings_import_path': 'mock.settings',
+                        'settings_import_name': 'get_settings',
                         'api_key_accessor': accessor,
                         'stub_emit_path': None,
                     },
@@ -874,6 +875,116 @@ class NodeDrivenWiring(unittest.TestCase):
                          "get_settings().moolabs_api_key.get_secret_value()")
         # modify imports the CUSTOMER module (file-derived), not the stub
         self.assertEqual(plan["settings_import_path"], "app.config")
+
+
+class AccessIdiomMirror(unittest.TestCase):
+    """Phase 1.7 mirror: the modify accessor + imported symbol follow the customer's
+    ACCESS IDIOM (singleton vs factory), not a hardcoded get_settings(). The singleton
+    case is moo-arc's — and the one that ImportError'd (no get_settings in app/config.py)."""
+
+    _MODIFY_NODE = "python-pydantic-v1-settings"
+
+    def _plan(self, config_src, repo_root):
+        import os
+        os.makedirs(os.path.join(repo_root, "app"), exist_ok=True)
+        with open(os.path.join(repo_root, "app", "config.py"), "w") as f:
+            f.write(config_src)
+        svc = {"service_slug": "svc",
+               "app_config": {"node_id": self._MODIFY_NODE, "file": "app/config.py"},
+               "deployment_surfaces": []}
+        return cw.plan_service_env_wire(svc, "python", repo_root=repo_root)
+
+    def test_singleton_config_imports_settings_not_get_settings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            plan = self._plan(
+                "from pydantic_settings import BaseSettings\n"
+                "class Settings(BaseSettings):\n    arc_global_api_key: str = ''\n"
+                "settings = Settings()\n", d)
+        self.assertEqual(plan["mode"], "modify")
+        self.assertEqual(plan["settings_import_name"], "settings")
+        self.assertEqual(plan["api_key_accessor"],
+                         "settings.moolabs_api_key.get_secret_value()")
+
+    def test_factory_config_keeps_get_settings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            plan = self._plan(
+                "class Settings:\n    api_key: str = ''\n"
+                "def get_settings():\n    return Settings()\n", d)
+        self.assertEqual(plan["settings_import_name"], "get_settings")
+        self.assertEqual(plan["api_key_accessor"],
+                         "get_settings().moolabs_api_key.get_secret_value()")
+
+    def test_no_repo_root_defaults_to_factory(self):
+        svc = {"service_slug": "svc",
+               "app_config": {"node_id": self._MODIFY_NODE, "file": "app/config.py"},
+               "deployment_surfaces": []}
+        plan = cw.plan_service_env_wire(svc, "python", repo_root=None)
+        self.assertEqual(plan["settings_import_name"], "get_settings")  # back-compat default
+
+
+class SecretPathEvidence(unittest.TestCase):
+    """config_wire computes deterministic secret-path EVIDENCE for the gate: a
+    deployment path exists (trace_required) when ANY of the customer's secrets is
+    grep-found in an infra file. Robust to which exemplar is picked. python-only
+    (find_secret_fields is python AST). grep_tokens falls back to `grep -rn` when
+    not a git repo, so these need no git fixture."""
+
+    def test_is_infra_path(self):
+        self.assertTrue(cw._is_infra_path("infrastructure/terraform/main.tf"))
+        self.assertTrue(cw._is_infra_path("modules/secrets/variables.tf"))
+        self.assertTrue(cw._is_infra_path("deploy/k8s/secret.yaml"))
+        self.assertFalse(cw._is_infra_path("app/config.py"))
+        self.assertFalse(cw._is_infra_path("src/index.ts"))
+
+    def test_trace_required_when_a_secret_env_appears_in_infra(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "app").mkdir()
+            (root / "infrastructure").mkdir()
+            (root / "app" / "config.py").write_text(
+                "from pydantic import Field\n"
+                "class Settings:\n"
+                "    arc_global_api_key: str = Field(default='', alias='ARC_GLOBAL_API_KEY')\n"
+            )
+            (root / "infrastructure" / "main.tf").write_text(
+                'secrets = [{ name = "ARC_GLOBAL_API_KEY", valueFrom = x }]\n'
+            )
+            sp = cw._compute_secret_path({"file": "app/config.py"}, str(root), "python")
+            self.assertTrue(sp["trace_required"])
+            self.assertTrue(any(".tf" in h for h in sp["infra_hits"]))
+            self.assertEqual(sp["exemplar_env_var"], "ARC_GLOBAL_API_KEY")
+            self.assertEqual(sp["moolabs_env_var"], "MOOLABS_API_KEY")
+
+    def test_no_secret_fields_no_trace_required(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "app").mkdir()
+            (root / "app" / "config.py").write_text("class Settings:\n    host: str = 'x'\n")
+            sp = cw._compute_secret_path({"file": "app/config.py"}, str(root), "python")
+            self.assertFalse(sp["trace_required"])
+            self.assertEqual(sp["infra_hits"], [])
+
+    def test_secret_in_config_only_not_infra_wired_not_required(self):
+        # Secret detected, but its env var is in NO infra file (infra in a separate
+        # repo / not yet wired). trace_required False — the infra_discovery_gap path
+        # handles "where's your IaC", not this gate.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "app").mkdir()
+            (root / "app" / "config.py").write_text(
+                "from pydantic import Field\n"
+                "class Settings:\n"
+                "    stripe_api_key: str = Field(default='', alias='STRIPE_API_KEY')\n"
+            )
+            sp = cw._compute_secret_path({"file": "app/config.py"}, str(root), "python")
+            self.assertFalse(sp["trace_required"])
+
+    def test_non_python_no_evidence(self):
+        sp = cw._compute_secret_path({"file": "src/env.ts"}, ".", "typescript")
+        self.assertFalse(sp["trace_required"])
+        self.assertEqual(sp["moolabs_env_var"], "MOOLABS_API_KEY")
 
 
 if __name__ == "__main__":

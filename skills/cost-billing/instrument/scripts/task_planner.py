@@ -145,7 +145,16 @@ class EnvWireTask:
     api_key_accessor: str
     stub_emit_path: str | None
     deployment_stubs: list[dict]
+    # the symbol the helper imports — "settings" (singleton idiom) | "get_settings"
+    # (factory). MUST reach the template (it renders `import {{ settings_import_name }}`)
+    # or the singleton path renders `from app.config import ` -> SyntaxError.
+    settings_import_name: str = "get_settings"
     infra_discovery_gap: bool = False
+    # Secret-path EVIDENCE from config_wire (Phase 1.7): trace_required=True means a
+    # real deployment path exists (the exemplar env var was grep-found in infra
+    # file(s)) that the two-hop trace must mirror. The gate in main() refuses unless
+    # the trace decision is recorded in attribution-bindings.yaml > secret_path.
+    secret_path: dict = field(default_factory=dict)
 
 
 def _load_config_wiring_plan(path: Path) -> list[dict]:
@@ -173,9 +182,46 @@ def build_env_wire_tasks(config_wiring_path: Path) -> list[EnvWireTask]:
             api_key_accessor=svc.get("api_key_accessor", ""),
             stub_emit_path=svc.get("stub_emit_path"),
             deployment_stubs=svc.get("deployment_stubs") or [],
+            settings_import_name=svc.get("settings_import_name") or "get_settings",
             infra_discovery_gap=bool(svc.get("infra_discovery_gap", False)),
+            secret_path=svc.get("secret_path") or {},
         ))
     return out
+
+
+def _load_secret_path_record(path: Path) -> dict:
+    """Read the per-service `secret_path` DECISION block from attribution-bindings.yaml
+    (Phase 1.7). Returns {} when absent. `status` is the gate token — one of
+    traced / skipped / no-infra / separate-repo. (The deterministic EVIDENCE — whether
+    a trace is REQUIRED — lives in config-wiring-plan; this is the engineer's recorded
+    resolution.)"""
+    if not path.exists():
+        return {}
+    data = _read_yaml(path) or {}
+    sp = data.get("secret_path")
+    return sp if isinstance(sp, dict) else {}
+
+
+# A recorded secret_path.status that RESOLVES the gate (the engineer made + recorded
+# a decision). Anything else (None / "pending" / absent) leaves the gate open.
+_SECRET_PATH_RESOLVED = {"traced", "skipped", "no-infra", "separate-repo"}
+
+
+def secret_path_gate_violation(
+    env_wire_tasks: list[EnvWireTask], recorded_status: str | None
+):
+    """The secret-path enforcement gate (pure, so it's unit-testable without main()'s
+    full customer-context). Returns the first EnvWireTask whose deployment trace is
+    REQUIRED (config_wire's deterministic evidence: the customer's secrets appear in
+    infra files) but whose decision was NOT recorded (recorded_status not in the
+    resolved set), else None. A None return means every required trace was resolved
+    (traced or explicitly skipped) — the run may proceed."""
+    if recorded_status in _SECRET_PATH_RESOLVED:
+        return None
+    for ewt in env_wire_tasks:
+        if (ewt.secret_path or {}).get("trace_required"):
+            return ewt
+    return None
 
 
 def _shasum(text: str) -> str:
@@ -375,6 +421,25 @@ def _resolve_sources_for_file(
     for key in _TEMPLATE_ATTRIBUTION_KEYS:
         resolved.setdefault(key, None)
     return resolved
+
+
+def _file_override_entity_id(file_path: str, overrides: list[dict[str, Any]]) -> str | None:
+    """The CONFIRMED entity_id from the per-FILE attribution-binding override ONLY — the
+    grain Phase 1.6 persists the confirmed metered entity at (per callsite-file).
+
+    Read DIRECTLY from the overrides list keyed by file, NEVER from the collapsed
+    `sources_for_file` (which merges service-DEFAULT + per-file override into one value).
+    A service-default entity_id must NOT flow — it would silently bypass per-callsite
+    confirmation for files nobody looked at (round-1 adversarial finding). A per-file
+    override is categorically different: the human confirmed THAT file's entity."""
+    for ov in overrides or []:
+        if ov.get("file") != file_path:
+            continue
+        b = (ov.get("bindings") or {}).get("entity_id")
+        if isinstance(b, dict):
+            return b.get("source")
+        return b if isinstance(b, str) else None
+    return None
 
 
 def _pattern_for(entry: dict[str, Any], output_input_index: dict[str, list[str]]) -> str:
@@ -1014,13 +1079,25 @@ def build_tasks(
             _anchor = enriched_entry.get("idempotency_anchor")
             if isinstance(_anchor, dict) and "confidence" not in _anchor:
                 enriched_entry["idempotency_anchor"] = {**_anchor, "confidence": "unknown"}
+            # entity_id is PER-CALLSITE-CONFIRMED. Source it from (in order): the
+            # inventory entry (if discovery wrote it there), then the per-FILE
+            # attribution-binding override (where Phase 1.6 actually persists the
+            # confirmed metered entity). NEVER the service DEFAULT — read override-only
+            # via _file_override_entity_id, NOT sources_for_file["entity_id"] (which
+            # collapses default+override and would re-admit the bypass the round-1 review
+            # closed). A proposed-but-unconfirmed candidate is deliberately NOT read, and
+            # "" is falsy -> None, so an unconfirmed/blank entity still hits the refuse.
+            _entity = (entry.get("entity_id")
+                       or _file_override_entity_id(file_path, attribution_overrides or [])
+                       or None)
+            insert_sources = {**sources_for_file, "entity_id": _entity}
             inserts.append(
                 Insert(
                     line=int(entry.get("line", 0) or 0),
                     pattern=pattern,
                     entry=enriched_entry,
                     attribution_keys=_attribution_keys_for(primary_fw),
-                    attribution_sources=sources_for_file,
+                    attribution_sources=insert_sources,
                 )
             )
         # stable task id
@@ -1191,6 +1268,7 @@ def emit_tasks_yaml(
             lines.append(f"    service_slug: {_yaml_scalar(t.service_slug)}")
             lines.append(f"    mode: {t.mode}")
             lines.append(f"    settings_import_path: {_yaml_scalar(t.settings_import_path)}")
+            lines.append(f"    settings_import_name: {_yaml_scalar(t.settings_import_name)}")
             lines.append(f"    api_key_accessor: {_yaml_scalar(t.api_key_accessor)}")
             lines.append(f"    stub_emit_path: {_yaml_scalar(t.stub_emit_path)}")
             # PR #531 gap-detection: execution agent reads this and emits
@@ -1316,6 +1394,41 @@ def main(argv: list[str] | None = None) -> int:
     # slugs_emit_path (build_slugs_emit_tasks). Both derive from the SAME anchor
     # so the emitted slugs file's package matches the import that references it.
     env_wire_tasks = build_env_wire_tasks(Path(args.config_wiring_plan))
+
+    # GATE: secret-path deployment trace required but not recorded -> REFUSE.
+    # config_wire's deterministic evidence (secret_path.trace_required) means the
+    # exemplar's env var was grep-found in infra file(s): a real deployment path
+    # exists that the Phase 1.7 two-hop trace must mirror. The engineer must record
+    # the trace DECISION in attribution-bindings.yaml > secret_path.status — traced
+    # (+ the mirror) OR skipped (+ reason). Without it, the trace gets silently
+    # skipped and MOOLABS_API_KEY ships unwired (empty at runtime). This is the
+    # enforcement that the prose-only "COMPLETENESS GATE" never had. Same
+    # REFUSING-TO-RUN/return-2 shape as the attribution gates above. (Auto-editing
+    # shared terraform stays opt-in — this enforces a recorded DECISION, not a write.)
+    recorded_secret_path = _load_secret_path_record(bindings_path)
+    _violating = secret_path_gate_violation(
+        env_wire_tasks, recorded_secret_path.get("status")
+    )
+    if _violating is not None:
+        sp = _violating.secret_path or {}
+        hits = sp.get("infra_hits") or []
+        env = sp.get("exemplar_env_var") or "<the exemplar secret's env var>"
+        shown = ", ".join(hits[:5]) + (" …" if len(hits) > 5 else "")
+        sys.stderr.write(
+            f"REFUSING TO RUN: secret-path deployment trace required but not recorded "
+            f"for service '{_violating.service_slug}'.\n"
+            f"  the customer's secrets appear in {len(hits)} infra file/line(s): {shown}\n"
+            f"  A real deployment path exists that MOOLABS_API_KEY must mirror "
+            f"(mirror it like {env}).\n"
+            f"  Run the Phase 1.7 two-hop trace (config -> injection -> declaration) and\n"
+            f"  record the decision in {bindings_path} under `secret_path:`\n"
+            f"    status: traced        # + injection_sites + declaration + mirrored_checklist\n"
+            f"  OR, if you'll wire it by hand / it's elsewhere:\n"
+            f"    status: skipped       # + reason   (also: no-infra | separate-repo)\n"
+            f"  Otherwise MOOLABS_API_KEY ships unwired (empty at runtime).\n"
+        )
+        return 2
+
     anchor = stub_anchor(env_wire_tasks)
 
     # Mirror build_tasks' primary-language selection so build_slugs_emit_tasks

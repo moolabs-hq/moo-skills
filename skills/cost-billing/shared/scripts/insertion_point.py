@@ -108,6 +108,46 @@ def find_insertion_point(source: str, lineno: int, language: str = "python",
     return None
 
 
+def validate_target_function(source: str, target_function: str,
+                             language: str = "python") -> str | None:
+    """Discovery-time check (D1): confirm a structured `target_function` actually
+    exists as a function in `source`. Returns None when found, else a reason string
+    so the inventory build catches a typo'd / stale name BEFORE the codemod runs
+    (the codemod also flags it, but failing early at capture time is louder). A name
+    that can't be validated here (parse failure / tree-sitter absent) returns None —
+    do not block on an inability to check."""
+    if not target_function:
+        return None
+    lang = (language or "python").lower()
+    if lang == "python":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return None
+        # Name-only existence check (same contract as _select_function's lookup): a
+        # method and a module-level function with the same name are indistinguishable
+        # here — accepted, since placement also resolves by name.
+        names = {n.name for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if target_function not in names:
+            return (f"target_function '{target_function}' is not a function defined "
+                    "in this file — fix the name or the file:line anchor")
+        return None
+    if lang in ("typescript", "javascript", "go"):
+        parser = _ts_parser(lang)
+        if parser is None:
+            return None  # can't check without tree-sitter -> don't block
+        try:
+            tree = parser.parse(source.encode())
+        except Exception:  # noqa: BLE001
+            return None
+        if _ts_named_function(tree.root_node, target_function) is None:
+            return (f"target_function '{target_function}' is not a function defined "
+                    "in this file — fix the name or the file:line anchor")
+        return None
+    return None
+
+
 def apply_insert(source: str, after_line: int, insert_text: str, indent: str) -> str:
     """Splice `insert_text` into `source` immediately AFTER the 1-based `after_line`,
     re-indented with the `indent` whitespace string. LANGUAGE-AGNOSTIC (pure text):

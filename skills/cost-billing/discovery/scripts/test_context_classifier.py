@@ -266,5 +266,113 @@ class CallSiteResolution(unittest.TestCase):
         self.assertEqual(c.context, "http_request")
 
 
+class EntityIdProposer(unittest.TestCase):
+    """P/entity_id capture: WEAK candidates (id-like params/locals), candidates only.
+    Negative cases lead — a false candidate is worse than none."""
+
+    def test_proposes_id_like_params_and_locals(self):
+        src = _src("""
+            def compose(email_id, db):
+                record_id = lookup(email_id)
+                draft = render(record_id)
+                return draft
+        """)
+        cands = cc.propose_entity_id_candidates(src, 3)
+        self.assertIn("email_id", cands)
+        self.assertIn("record_id", cands)
+        self.assertNotIn("db", cands)
+        self.assertNotIn("draft", cands)
+
+    def test_entity_on_self_and_input_object_when_locals_empty(self):
+        # The 4-of-7 moo-arc case: NO id-like local/param — the entity lives on `self`
+        # or the input-object param (comm.id, case.customer_id). The proposer must
+        # surface those so Phase 1.6 has something to ask about.
+        src = _src("""
+            def handle(self, comm, case):
+                draft = render(comm.id)
+                log(self.case_id)
+                return build(case.customer_id)
+        """)
+        cands = cc.propose_entity_id_candidates(src, 3)
+        self.assertIn("comm.id", cands)            # input-object attr (bare .id)
+        self.assertIn("self.case_id", cands)       # self attr
+        self.assertIn("case.customer_id", cands)   # input-object attr (_id)
+
+    def test_no_id_like_proposes_nothing(self):
+        # NEGATIVE (the one that matters): nothing id-like anywhere -> [] -> REFUSE.
+        # Not a bare local/param, not a self/input id-attr (comm.valid / x.status are
+        # NOT entities).
+        src = _src("""
+            def compose(self, payload, valid):
+                result = work(payload.status)
+                ok = valid.check()
+                return result
+        """)
+        self.assertEqual(cc.propose_entity_id_candidates(src, 3), [])
+
+    def test_nested_function_scope_not_leaked(self):
+        # _own_scope_nodes, NOT ast.walk: a NESTED helper's id-like local / self-attr
+        # must NOT be proposed for the OUTER function — it'd be a wrong candidate a
+        # human could confirm -> NameError / mis-bill at the outer scope.
+        src = _src("""
+            def outer(self, comm):
+                def _helper():
+                    record_id = compute()
+                    return record_id
+                result = process(comm.id)
+                return result
+        """)
+        cands = cc.propose_entity_id_candidates(src, 5)   # the call-site line in outer
+        self.assertIn("comm.id", cands)
+        self.assertNotIn("record_id", cands)              # nested helper's local
+        src2 = _src("""
+            def outer(self, comm):
+                def _helper():
+                    return self.nested_id
+                return process(comm.id)
+        """)
+        cands2 = cc.propose_entity_id_candidates(src2, 4)
+        self.assertIn("comm.id", cands2)
+        self.assertNotIn("self.nested_id", cands2)        # nested helper's self-attr
+
+    def test_vararg_and_kwarg_id_like_params(self):
+        # *args / **kwargs were silently omitted before the fix.
+        src = _src("""
+            def dispatch(self, *record_id, **customer_id):
+                return work()
+        """)
+        cands = cc.propose_entity_id_candidates(src, 2)
+        self.assertIn("record_id", cands)    # *args id-like
+        self.assertIn("customer_id", cands)  # **kwargs id-like
+
+    def test_request_and_tracing_ids_excluded(self):
+        # request_id / trace_id / correlation_id / span_id are id-like but are per-
+        # request/tracing ids, NOT the metered entity — surfacing them invites the
+        # correlation-id-as-entity mis-bill. Excluded (bare + attr forms).
+        src = _src("""
+            def h(self, request, request_id, trace_id, email_id):
+                return work(request.correlation_id, self.span_id)
+        """)
+        cands = cc.propose_entity_id_candidates(src, 2)
+        self.assertIn("email_id", cands)                    # a real entity id stays
+        self.assertNotIn("request_id", cands)               # bare param
+        self.assertNotIn("trace_id", cands)                 # bare param
+        self.assertNotIn("request.correlation_id", cands)   # input-object attr
+        self.assertNotIn("self.span_id", cands)             # self attr
+        # compound/prefixed variants caught by the _-suffix match; real id families pass
+        src2 = _src("""
+            def g(self, client_request_id, parent_trace_id, record_id, customer_id):
+                return work()
+        """)
+        c2 = cc.propose_entity_id_candidates(src2, 2)
+        self.assertNotIn("client_request_id", c2)   # prefixed request id
+        self.assertNotIn("parent_trace_id", c2)     # prefixed trace id
+        self.assertIn("record_id", c2)              # NOT a tracing family -> kept
+        self.assertIn("customer_id", c2)            # billing grain -> kept
+
+    def test_syntax_error_proposes_nothing(self):
+        self.assertEqual(cc.propose_entity_id_candidates("def (:\n", 1), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

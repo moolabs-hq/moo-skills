@@ -36,11 +36,14 @@ _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW idempotency: confirm entity_id is STABLE across a retry of this
 # event — a per-request / correlation id double-counts on retry.{% endif %}
-{% if attribution_sources.entity_id %}{% call guarded(entry.emission_guard) -%}
+{% if not attribution_sources.entity_id %}# >>> ADD THE ENTITY_ID <<< — entity_id UNBOUND; emitting a placeholder so the
+# cost is captured, not dropped. Replace "__MOOLABS_ADD_ENTITY_ID__" with the
+# metered entity id and re-run (never bill on the correlation id — double-counts).
+{% endif %}{% call guarded(entry.emission_guard) -%}
 emit_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
-    entity_id=str({{ attribution_sources.entity_id }}),
+    entity_id={{ ('str(' ~ attribution_sources.entity_id ~ ')') if attribution_sources.entity_id else '"__MOOLABS_ADD_ENTITY_ID__"' }},
     meter_slug={{ entry.meter_slug_const if entry.meter_slug_const else '"' ~ entry.workflow_id ~ '"' }},
     value={{ entry.refund_unit.derivation }},
     spans=[{
@@ -50,19 +53,15 @@ emit_event_safe(
         {% endif %}
     }],
     meta={
-        "workflow_id": "{{ entry.workflow_id }}",
+        {% if not attribution_sources.entity_id %}"entity_id_status": "UNATTRIBUTED_PLACEHOLDER",
+        {% endif %}"workflow_id": "{{ entry.workflow_id }}",
         "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}
     },
 )
-{%- endcall %}{% else %}
-# ─────────────────────────────────────────────────────────────────────────────
-# MOOLABS BILLING NOT EMITTED: entity_id (the metered entity) is UNBOUND here.
-# Billing on the per-request correlation id double-counts on retry. Bind the
-# metered entity's id for this workflow in attribution-bindings, then re-run.
-{% endif %}
+{%- endcall %}
 {% elif entry.pattern == "usage-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK insert (usage-only, v0.3.0-rc1) — emit_usage_event_safe.
@@ -79,27 +78,26 @@ _moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
 {% if entry.idempotency_anchor is defined and entry.idempotency_anchor %}# REVIEW: idempotency anchor (confidence={{ entry.idempotency_anchor.confidence }}){% else %}# REVIEW idempotency: confirm entity_id is STABLE across a retry of this
 # event — a per-request / correlation id double-counts on retry.{% endif %}
-{% if attribution_sources.entity_id %}{% call guarded(entry.emission_guard) -%}
+{% if not attribution_sources.entity_id %}# >>> ADD THE ENTITY_ID <<< — entity_id UNBOUND; emitting a placeholder so the
+# cost is captured, not dropped. Replace "__MOOLABS_ADD_ENTITY_ID__" with the
+# metered entity id and re-run (never bill on the correlation id — double-counts).
+{% endif %}{% call guarded(entry.emission_guard) -%}
 emit_usage_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else entry.workflow_id) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
-    entity_id=str({{ attribution_sources.entity_id }}),
+    entity_id={{ ('str(' ~ attribution_sources.entity_id ~ ')') if attribution_sources.entity_id else '"__MOOLABS_ADD_ENTITY_ID__"' }},
     meter_slug={{ entry.meter_slug_const if entry.meter_slug_const else '"' ~ entry.workflow_id ~ '"' }},
     value={{ entry.refund_unit.derivation }},
     meta={
-        "workflow_id": "{{ entry.workflow_id }}",
+        {% if not attribution_sources.entity_id %}"entity_id_status": "UNATTRIBUTED_PLACEHOLDER",
+        {% endif %}"workflow_id": "{{ entry.workflow_id }}",
         "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}
     },
 )
-{%- endcall %}{% else %}
-# ─────────────────────────────────────────────────────────────────────────────
-# MOOLABS BILLING NOT EMITTED: entity_id (the metered entity) is UNBOUND here.
-# Billing on the per-request correlation id double-counts on retry. Bind the
-# metered entity's id for this workflow in attribution-bindings, then re-run.
-{% endif %}
+{%- endcall %}
 {% elif entry.pattern == "cost-only" %}
 # ─────────────────────────────────────────────────────────────────────────────
 # moolabs SDK insert (cost-only, v0.3.0-rc1) — emit_cost_event_safe.
@@ -115,11 +113,14 @@ from {{ entry.helper_import_path }} import emit_cost_event_safe
 _moolabs_span_id = str(_moolabs_uuid.uuid4())
 {% if not attribution_sources.request_id %}_moolabs_event_id = str(_moolabs_uuid.uuid4())
 {% endif %}
-{% if attribution_sources.entity_id %}{% call guarded(entry.emission_guard) -%}
+{% if not attribution_sources.entity_id %}# >>> ADD THE ENTITY_ID <<< — entity_id UNBOUND; emitting a placeholder so the
+# cost is captured, not dropped. Replace "__MOOLABS_ADD_ENTITY_ID__" with the
+# metered entity id and re-run (never bill on the correlation id — double-counts).
+{% endif %}{% call guarded(entry.emission_guard) -%}
 emit_cost_event_safe(
     event_type={{ entry.event_type_const if entry.event_type_const else '"' ~ (entry.event_type if entry.event_type else (entry.cost_kind if entry.cost_kind else entry.workflow_id)) ~ '"' }},
     customer_id=str({{ attribution_sources.customer_id if attribution_sources.customer_id else (attribution_sources.request_id if attribution_sources.request_id else '"unknown"') }}),
-    entity_id=str({{ attribution_sources.entity_id }}),
+    entity_id={{ ('str(' ~ attribution_sources.entity_id ~ ')') if attribution_sources.entity_id else '"__MOOLABS_ADD_ENTITY_ID__"' }},
     spans=[{
         "span_id": _moolabs_span_id,
         {% if entry.cost_micros_source %}"cost_micros": {{ entry.cost_micros_source }},
@@ -127,17 +128,13 @@ emit_cost_event_safe(
         {% endif %}
     }],
     meta={
-        "workflow_id": "{{ entry.workflow_id }}",
+        {% if not attribution_sources.entity_id %}"entity_id_status": "UNATTRIBUTED_PLACEHOLDER",
+        {% endif %}"workflow_id": "{{ entry.workflow_id }}",
         "feature_key": {{ entry.feature_key_const if entry.feature_key_const else '"' ~ (entry.workflow_id.split('.')[1] if entry.workflow_id.count('.') >= 1 else entry.workflow_id) ~ '"' }},
         {% if attribution_sources.consumer_agent %}"consumer_agent": {{ attribution_sources.consumer_agent }},
         {% endif %}{% if attribution_sources.request_id %}"correlation_id": {{ attribution_sources.request_id }},
         {% endif %}
     },
 )
-{%- endcall %}{% else %}
-# ─────────────────────────────────────────────────────────────────────────────
-# MOOLABS BILLING NOT EMITTED: entity_id (the metered entity) is UNBOUND here.
-# Billing on the per-request correlation id double-counts on retry. Bind the
-# metered entity's id for this workflow in attribution-bindings, then re-run.
-{% endif %}
+{%- endcall %}
 {% endif %}

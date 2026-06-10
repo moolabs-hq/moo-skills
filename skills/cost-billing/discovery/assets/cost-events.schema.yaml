@@ -40,6 +40,29 @@ $defs:
         type: integer
         minimum: 1
 
+      target_function:
+        type: string
+        description: |
+          D1 — the function the billable cost runs in (the emission/consolidation
+          site) when it differs from the function at `file`:`line`. For a consolidated
+          cost this is the chokepoint function (the enclosing function of the
+          `primary_emission_via_consolidation` line). The codemod re-anchors placement
+          to this named function + flags the disagreement; validate it via
+          shared/insertion_point.validate_target_function. Omit when `line` is right.
+      entity_id_candidate:
+        type: array
+        items: { type: string }
+        description: |
+          PROPOSED metered-entity expressions (id-like params/locals PLUS `self.<id>`
+          and input-object-param attributes like `comm.id`), candidates only — a
+          human confirms one into `entity_id`. The codemod does NOT read this; an
+          unconfirmed candidate still REFUSES.
+      entity_id:
+        type: string
+        description: |
+          CONFIRMED metered entity (dedup grain + sibling-pair join key), NOT the
+          per-request correlation id. Human-confirmed only; absent -> codemod REFUSES.
+
       vendor:
         type: string
         enum:

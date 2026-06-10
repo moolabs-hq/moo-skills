@@ -1122,6 +1122,45 @@ def emit_inventory_yaml(inventory: dict, dest: Path) -> None:
 # Signed-yaml parser (read services + env_loader_granularity)
 # ──────────────────────────────────────────────────────────────────────
 
+def _service_dir_from_target(target: str | None, slug: str) -> str | None:
+    """The service/import ROOT from a scan target. `scan_scope.target` is the SCAN target
+    (often the package dir, e.g. `services/moo-arc/app`), but the import ROOT — the dir the
+    customer's code imports FROM, used to compute dotted import paths — is the service dir
+    `services/moo-arc`. Strip the package tail by cutting at the slug segment; without it,
+    config is found relative to `app/` and every derived import drops the `app.` prefix."""
+    if not target:
+        return None
+    parts = target.strip("/").split("/")
+    if slug in parts:
+        return "/".join(parts[: parts.index(slug) + 1])
+    return None
+
+
+def _derive_single_service(data: dict) -> dict | None:
+    """Derive ONE service entry from the top-level CONTRACTUAL fields a single-`--service`
+    bootstrap writes (service_slug + scan_scope + repo) — used when `integration.services`
+    is absent (it is not in the 04-final schema; the multi-service list path is separate).
+    `root` is the service/import ROOT (NOT scan_scope.target's package dir) so derived
+    import paths are package-qualified. Language: `repo.languages[0]` (contractual) else
+    the `sdk_package_install` language key (also per-language) else python."""
+    slug = data.get("service_slug")
+    if not slug:
+        return None
+    scan = data.get("scan_scope") or {}
+    repo = data.get("repo") or {}
+    root = (scan.get("service_subdir")
+            or _service_dir_from_target(scan.get("target"), slug)
+            or repo.get("primary_path") or f"services/{slug}")
+    langs = repo.get("languages") or []
+    if langs:
+        language = langs[0]
+    else:
+        install = (data.get("integration") or {}).get("sdk_package_install") or {}
+        language = next((k for k in install
+                         if k in ("python", "typescript", "javascript", "go")), "python")
+    return {"slug": slug, "root": root, "language": language}
+
+
 def parse_services_and_granularity(signed_yaml_path: Path) -> tuple[list[dict], str, str, str | None]:
     """Read `04-final.signed.yaml` and return:
       (services, env_loader_granularity, granularity_source, shared_config_path)
@@ -1146,6 +1185,15 @@ def parse_services_and_granularity(signed_yaml_path: Path) -> tuple[list[dict], 
             "root": s.get("root") or s.get("path") or "",
             "language": s.get("language") or "python",
         })
+
+    # Single-`--service` run: `integration.services` is NOT in the 04-final schema
+    # (it has only sdk/env_loader keys). The service identity lives in the CONTRACTUAL
+    # top-level fields the engineer-bootstrap writes — service_slug + scan_scope + repo.
+    # Without this, a per-service run (the documented common case) scanned NOTHING.
+    if not services:
+        derived = _derive_single_service(data)
+        if derived:
+            services = [derived]
 
     granularity = integration.get("env_loader_granularity")
     if granularity:

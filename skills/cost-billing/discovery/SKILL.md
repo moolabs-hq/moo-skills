@@ -175,6 +175,10 @@ Run `scripts/refund_test.py` **(aspirational — not yet on disk; see the Script
 
 Each candidate gets a confidence ∈ [0, 1] and a `refund_unit` (per-token, per-render, per-minute, per-seat, per-completion).
 
+**Per-entry placement + entity capture (feeds the codemod's D1 + entity_id gates).** For each usage/cost entry, also set:
+- **`target_function`** — the function the billable work actually runs in, WHEN it differs from the function at `file`:`line` (e.g. `line` landed on a prompt builder or a reconcile loop, but the event bills a `generate_*` / `_send_*` completion; or a consolidated cost whose chokepoint function differs from the call's). The codemod's placement engine re-anchors to this named function and flags the disagreement; without it, a wrong `line` → wrong-function emit. Validate the name exists in the file with `shared/scripts/insertion_point.validate_target_function(source, name, language)` — fix the name (or the `line`) if it flags. Omit when `line` already sits in the right function.
+- **`entity_id_candidate`** — run `discovery/scripts/context_classifier.propose_entity_id_candidates(source, line)` for a WEAK list of id-like params/locals in the emission function. These are CANDIDATES only. If the list is empty, do NOT invent one — leave it empty (the honest "we don't know the entity" state). A human confirms exactly one (the metered entity — the id of the thing billed FOR, the dedup grain, NOT the per-request correlation id) into **`entity_id`** at review time. **The codemod reads only the confirmed `entity_id` and REFUSES to emit a billing call until it is set** — an unconfirmed candidate does not satisfy the gate (a per-request id double-counts on retry). This is the discovery-side capture for the retry-double-count fix; the confirmation itself happens at three-role review (the engineer/CFO owns the entity's domain meaning).
+
 ### Phase 5: Output-input-map proposal + three-role surface
 
 **Goal:** propose the linkage graph and emit the three inventories.
