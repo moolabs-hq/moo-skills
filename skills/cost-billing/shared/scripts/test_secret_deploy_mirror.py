@@ -73,5 +73,53 @@ class PlanInserts(unittest.TestCase):
         self.assertEqual(sdm.plan_inserts("/tmp", "X", {}), [])
 
 
+@unittest.skipUnless(shutil.which("grep") and shutil.which("git"), "grep+git required")
+class DeclarationAndApply(unittest.TestCase):
+    def _repo(self, files: dict[str, str]) -> str:
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for path, content in files.items():
+            full = os.path.join(d, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(content)
+        subprocess.run(["git", "init", "-q", d], check=True)
+        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+        return d
+
+    def test_declaration_mirrors_existing_entry_in_same_namespace(self):
+        d = self._repo({
+            "environments/prod/main.tf":
+                '    "arc/together-api-key" = { description = "Together API key" }\n'
+                '    "bff/resend-api-key"   = { description = "Resend email API key" }\n',
+        })
+        e = sdm.plan_declaration_insert(d, "arc/moolabs-api-key", "Moolabs SDK API key")
+        self.assertIsNotNone(e)
+        self.assertIn('"arc/moolabs-api-key"', e.new_line)
+        self.assertIn('description = "Moolabs SDK API key"', e.new_line)
+        self.assertTrue(e.new_line.startswith("    "))   # indentation mirrored
+
+    def test_declaration_idempotent_when_already_declared(self):
+        d = self._repo({"main.tf": '    "arc/moolabs-api-key" = { description = "x" }\n'})
+        self.assertIsNone(sdm.plan_declaration_insert(d, "arc/moolabs-api-key", "y"))
+
+    def test_apply_writes_sibling_after_anchor(self):
+        d = self._repo({"main.tf": "line1\nANCHOR\nline3\n"})
+        edits = [sdm.InsertEdit(file="main.tf", anchor_line=2, anchor_text="ANCHOR", new_line="NEW")]
+        self.assertEqual(sdm.apply_inserts(d, edits), ["main.tf"])
+        with open(os.path.join(d, "main.tf")) as f:
+            self.assertEqual(f.read(), "line1\nANCHOR\nNEW\nline3\n")
+
+    def test_apply_multiple_inserts_same_file_keeps_line_numbers_valid(self):
+        d = self._repo({"main.tf": "a\nb\nc\n"})
+        edits = [
+            sdm.InsertEdit(file="main.tf", anchor_line=1, anchor_text="a", new_line="A2"),
+            sdm.InsertEdit(file="main.tf", anchor_line=3, anchor_text="c", new_line="C2"),
+        ]
+        sdm.apply_inserts(d, edits)
+        with open(os.path.join(d, "main.tf")) as f:
+            self.assertEqual(f.read(), "a\nA2\nb\nc\nC2\n")   # both land at the right anchors
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -21,11 +21,17 @@ as a reviewable, additive diff (validate with `terraform fmt`/`validate` before 
 from __future__ import annotations
 
 import os
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 import secret_exemplar
 
 _DEFAULT_INFRA_EXTS = (".tf", ".tfvars", ".hcl")
+
+# A secrets-map DECLARATION entry: `"<ns>/<name>" = { description = "..." }`. Captures the
+# leading indentation so the mirrored entry aligns (terraform fmt re-aligns regardless).
+_DECL_RE = re.compile(r'^(\s*)"([a-z0-9]+/[a-z0-9._-]+)"\s*=\s*\{\s*description')
 
 
 @dataclass(frozen=True)
@@ -96,3 +102,73 @@ def plan_inserts(
             continue  # the anchor line didn't carry the env var verbatim — skip
         edits.append(InsertEdit(file=rel, anchor_line=lineno, anchor_text=anchor_text, new_line=new_line))
     return edits
+
+
+def plan_declaration_insert(
+    repo_root: str,
+    new_store_key: str,
+    description: str,
+    prefer_files: tuple[str, ...] | list[str] | None = None,
+    exts: tuple[str, ...] = _DEFAULT_INFRA_EXTS,
+    timeout: int = 120,
+) -> InsertEdit | None:
+    """Hop 2 — declare the new store key in the secrets map (so `secret_arns[new_store_key]`
+    resolves). Mirror an EXISTING declaration entry's structure, anchoring in the SAME FILE as
+    the injection when possible (`prefer_files` = the injection edits' files) — moo-arc has
+    PER-ENVIRONMENT secrets maps, so a prod injection must get a prod declaration, not dev's.
+    Idempotent: returns None if `new_store_key` is already declared in a preferred file (or no
+    declaration map is found — then it stays a flagged checklist item)."""
+    ns = new_store_key.split("/")[0]
+    prefer = set(prefer_files or [])
+    hits = secret_exemplar.grep_tokens(repo_root, [f'"{ns}/'], timeout=timeout)
+    seen_files: dict[str, list[str]] = {}
+    candidates: list[tuple[str, int, str]] = []  # (file, line, indentation)
+    for rel, lineno, _snippet in hits:
+        if not rel.lower().endswith(exts):
+            continue
+        if rel not in seen_files:
+            try:
+                with open(os.path.join(repo_root, rel)) as f:
+                    seen_files[rel] = f.readlines()
+            except OSError:
+                seen_files[rel] = []
+        lines = seen_files[rel]
+        if 1 <= lineno <= len(lines):
+            m = _DECL_RE.match(lines[lineno - 1])
+            if m:
+                candidates.append((rel, lineno, m.group(1)))
+    if not candidates:
+        return None
+    # co-locate with the injection: prefer a candidate in one of the injection's files.
+    chosen = next((c for c in candidates if c[0] in prefer), candidates[0])
+    rel, lineno, indent = chosen
+    if f'"{new_store_key}"' in "".join(seen_files[rel]):
+        return None  # already declared in the chosen file — idempotent
+    new_line = f'{indent}"{new_store_key}" = {{ description = "{description}" }}'
+    return InsertEdit(file=rel, anchor_line=lineno,
+                      anchor_text=seen_files[rel][lineno - 1].rstrip("\n"), new_line=new_line)
+
+
+def apply_inserts(repo_root: str, edits: list[InsertEdit]) -> list[str]:
+    """WRITE each edit: insert `new_line` AFTER `anchor_line`. Per file, applies bottom-up so
+    earlier anchor line numbers stay valid. Preserves the file's newline. Returns files written."""
+    by_file: dict[str, list[InsertEdit]] = defaultdict(list)
+    for e in edits:
+        by_file[e.file].append(e)
+    written: list[str] = []
+    for rel, es in by_file.items():
+        path = os.path.join(repo_root, rel)
+        try:
+            with open(path) as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for e in sorted(es, key=lambda x: -x.anchor_line):  # bottom-up: indices don't shift
+            if not (1 <= e.anchor_line <= len(lines)):
+                continue
+            nl = e.new_line if e.new_line.endswith("\n") else e.new_line + "\n"
+            lines.insert(e.anchor_line, nl)  # 0-based index == 1-based anchor_line -> AFTER anchor
+        with open(path, "w") as f:
+            f.writelines(lines)
+        written.append(rel)
+    return written
