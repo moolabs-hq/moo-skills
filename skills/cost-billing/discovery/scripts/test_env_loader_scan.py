@@ -1361,8 +1361,10 @@ class SingleServiceFallback(unittest.TestCase):
         self.assertEqual(svcs, [{"slug": "moo-arc", "root": "services/moo-arc",
                                  "language": "python"}])
 
-    def test_language_from_sdk_package_install_when_repo_languages_absent(self):
-        # the moo-arc dogfood doc shape: repo has no languages; sdk_package_install does.
+    def test_root_is_service_dir_not_package_dir_from_target(self):
+        # the moo-arc dogfood doc shape: repo has no languages; sdk_package_install does;
+        # scan_scope.target is the PACKAGE dir (services/moo-arc/app). root must strip the
+        # package tail to the service dir so config -> app/config.py -> import app.moolabs_*.
         svcs, _, _, _ = self._parse(
             "service_slug: moo-arc\n"
             "scan_scope:\n  target: services/moo-arc/app\n"
@@ -1370,7 +1372,7 @@ class SingleServiceFallback(unittest.TestCase):
             "integration:\n  sdk_package_install:\n    python: pip install moolabs\n")
         self.assertEqual(svcs[0]["slug"], "moo-arc")
         self.assertEqual(svcs[0]["language"], "python")
-        self.assertEqual(svcs[0]["root"], "services/moo-arc/app")
+        self.assertEqual(svcs[0]["root"], "services/moo-arc")   # service dir, NOT .../app
 
     def test_integration_services_still_wins_when_present(self):
         svcs, _, _, _ = self._parse(
