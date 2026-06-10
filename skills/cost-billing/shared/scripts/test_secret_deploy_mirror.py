@@ -7,6 +7,9 @@ is mirrored, and only as a new sibling (additive)."""
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import shutil
 import subprocess
@@ -53,11 +56,47 @@ class PlanInserts(unittest.TestCase):
         self.assertIn("ARC_GLOBAL_API_KEY", e.anchor_text)      # original kept for review
 
     def test_idempotent_skips_file_already_carrying_new_env(self):
+        # ANCHOR-LOCAL: the mirror is the line right AFTER the anchor -> skip (re-run).
         d = self._repo({
             "main.tf": '{ name = "ARC_GLOBAL_API_KEY" }\n{ name = "MOOLABS_API_KEY" }\n',
         })
         swaps = {"ARC_GLOBAL_API_KEY": "MOOLABS_API_KEY"}
         self.assertEqual(sdm.plan_inserts(d, "ARC_GLOBAL_API_KEY", swaps), [])
+
+    def test_distant_new_env_in_OTHER_block_does_not_suppress_this_block(self):
+        # THE moo-arc bug (regional/main.tf): the UI's ui_secrets block already carries
+        # MOOLABS_API_KEY, but arc's OWN task-def must still be wired. A file-wide
+        # idempotency check skipped the whole file -> arc unwired in regional. Anchor-
+        # local idempotency must still wire arc's anchor despite the distant MOOLABS.
+        # Convention: REUSE shared/api-key (no store swap) — matching the UI + ARC_GLOBAL.
+        d = self._repo({
+            "regional/main.tf":
+                '    { name = "ARC_GLOBAL_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '    { name = "RESEND_WEBHOOK_SECRET", valueFrom = x }\n'
+                '  ]\n'
+                '  ui_secrets = [\n'
+                '    { name = "MOOLABS_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '  ]\n',
+        })
+        swaps = {"ARC_GLOBAL_API_KEY": "MOOLABS_API_KEY"}   # reuse shared/api-key
+        edits = sdm.plan_inserts(d, "ARC_GLOBAL_API_KEY", swaps)
+        self.assertEqual(len(edits), 1)                    # arc's block IS wired
+        self.assertEqual(edits[0].anchor_line, 1)
+        self.assertIn('name = "MOOLABS_API_KEY"', edits[0].new_line)
+        self.assertIn('shared/api-key', edits[0].new_line)  # convention reuse, NOT a dedicated key
+
+    def test_comment_lines_mentioning_env_are_not_mirrored(self):
+        # real moo-arc regional/main.tf has COMMENTS mentioning ARC_GLOBAL_API_KEY
+        # (e.g. "# ARC accepts this shared key via ARC_GLOBAL_API_KEY ..."). grep finds
+        # them, but mirroring a comment emits a nonsense sibling — only WIRING lines count.
+        d = self._repo({
+            "main.tf":
+                '    # ARC accepts this shared key via ARC_GLOBAL_API_KEY and resolves tenant\n'
+                '    { name = "ARC_GLOBAL_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n',
+        })
+        edits = sdm.plan_inserts(d, "ARC_GLOBAL_API_KEY", {"ARC_GLOBAL_API_KEY": "MOOLABS_API_KEY"})
+        self.assertEqual(len(edits), 1)            # ONLY the wiring line, NOT the comment
+        self.assertEqual(edits[0].anchor_line, 2)
 
     def test_scopes_to_infra_files_never_app_code(self):
         d = self._repo({
@@ -119,6 +158,83 @@ class DeclarationAndApply(unittest.TestCase):
         sdm.apply_inserts(d, edits)
         with open(os.path.join(d, "main.tf")) as f:
             self.assertEqual(f.read(), "a\nA2\nb\nc\nC2\n")   # both land at the right anchors
+
+
+@unittest.skipUnless(shutil.which("grep") and shutil.which("git"), "grep+git required")
+class Cli(unittest.TestCase):
+    """The CLI Phase 1.7 invokes: --plan previews the diff for the permission ask
+    (writes nothing + surfaces already-wired sites); --apply writes the additive edit."""
+
+    def _repo(self, files: dict[str, str]) -> str:
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for path, content in files.items():
+            full = os.path.join(d, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(content)
+        subprocess.run(["git", "init", "-q", d], check=True)
+        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+        return d
+
+    def _run(self, argv: list[str]):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = sdm.main(argv)
+        return rc, json.loads(buf.getvalue())
+
+    def test_plan_reuse_convention_surfaces_already_wired_writes_nothing(self):
+        d = self._repo({
+            # arc's block: fresh -> injection edit (REUSE shared/api-key, no store swap)
+            "environments/prod/main.tf":
+                '    { name = "ARC_GLOBAL_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '    { name = "CLS_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n',
+            # already mirrored AT THIS anchor (a prior apply) -> skipped + SURFACED
+            "regional/main.tf":
+                '    { name = "ARC_GLOBAL_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '    { name = "MOOLABS_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n',
+        })
+        rc, out = self._run([
+            "--repo-root", d, "--anchor-env", "ARC_GLOBAL_API_KEY",
+            "--swaps", "ARC_GLOBAL_API_KEY=MOOLABS_API_KEY", "--plan",   # reuse shared/api-key
+        ])
+        self.assertEqual(rc, 0)
+        inj_files = {e["file"] for e in out["injection_edits"]}
+        self.assertIn("environments/prod/main.tf", inj_files)       # fresh -> planned
+        self.assertNotIn("regional/main.tf", inj_files)             # already mirrored at anchor -> skip
+        self.assertIn('valueFrom = module.secrets.secret_arns["shared/api-key"]',
+                      out["injection_edits"][0]["new_line"])        # CONVENTION reuse, not dedicated
+        self.assertIsNone(out["declaration_edit"])                  # no new store key -> no declaration
+        surfaced = {s["file"] for s in out["skipped_already_wired"]}
+        self.assertIn("regional/main.tf", surfaced)                 # honest surfacing
+        self.assertNotIn("MOOLABS_API_KEY",
+                         open(os.path.join(d, "environments/prod/main.tf")).read())  # wrote nothing
+
+    def test_apply_reuse_convention_wires_this_block_not_the_other(self):
+        # The moo-arc multi-block reality: arc's task-def + the UI's ui_secrets (already has
+        # MOOLABS_API_KEY) in ONE file. --apply must wire ARC's block and leave the UI's alone.
+        d = self._repo({
+            "regional/main.tf":
+                '    { name = "ARC_GLOBAL_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '    { name = "RESEND_WEBHOOK_SECRET", valueFrom = x }\n'
+                '  ]\n'
+                '  ui_secrets = [\n'
+                '    { name = "MOOLABS_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"] }\n'
+                '  ]\n',
+        })
+        rc, out = self._run([
+            "--repo-root", d, "--anchor-env", "ARC_GLOBAL_API_KEY",
+            "--swaps", "ARC_GLOBAL_API_KEY=MOOLABS_API_KEY", "--apply",
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("regional/main.tf", out["written"])
+        lines = open(os.path.join(d, "regional/main.tf")).read().splitlines()
+        self.assertIn("ARC_GLOBAL_API_KEY", lines[0])               # anchor untouched
+        self.assertIn(                                              # arc's mirror inserted right after
+            'name = "MOOLABS_API_KEY", valueFrom = module.secrets.secret_arns["shared/api-key"]', lines[1])
+        content = "\n".join(lines)
+        self.assertEqual(content.count('name = "MOOLABS_API_KEY"'), 2)  # new arc + pre-existing UI
+        self.assertIn("ui_secrets", content)                        # UI block intact
 
 
 if __name__ == "__main__":
