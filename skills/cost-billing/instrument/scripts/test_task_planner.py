@@ -483,6 +483,83 @@ class EnvWireTaskGapDetection(unittest.TestCase):
             self.assertIs(parsed["env_wire_tasks"][0]["infra_discovery_gap"], True)
 
 
+class SecretPathGate(unittest.TestCase):
+    """The enforcement gate (fix for the silently-skipped deployment trace): when
+    config_wire's evidence says a deployment path exists (trace_required) but no
+    secret_path DECISION was recorded, the run REFUSES. A recorded resolved status
+    (traced / skipped / no-infra / separate-repo) lets it proceed; trace_required
+    false is never gated. `secret_path_gate_violation` is the pure core."""
+
+    def _ewt(self, trace_required, hits=None):
+        return tp.EnvWireTask(
+            task_id="env_wire_001_svc", service_slug="svc", mode="stub",
+            settings_import_path="app.moolabs_settings",
+            api_key_accessor="get_settings().moolabs_api_key.get_secret_value()",
+            stub_emit_path="app/moolabs_settings.py", deployment_stubs=[],
+            secret_path={"trace_required": trace_required, "infra_hits": hits or [],
+                         "exemplar_env_var": "ARC_GLOBAL_API_KEY"},
+        )
+
+    def test_required_and_unrecorded_refuses(self):
+        ewt = self._ewt(True, ["infrastructure/terraform/prod/main.tf:699"])
+        self.assertIs(tp.secret_path_gate_violation([ewt], None), ewt)
+
+    def test_required_and_traced_proceeds(self):
+        self.assertIsNone(
+            tp.secret_path_gate_violation([self._ewt(True, ["x.tf:1"])], "traced"))
+
+    def test_required_and_skipped_proceeds(self):
+        self.assertIsNone(
+            tp.secret_path_gate_violation([self._ewt(True, ["x.tf:1"])], "skipped"))
+
+    def test_required_and_unrecognized_status_still_refuses(self):
+        # an in-progress / unknown status is NOT a resolution -> still gated.
+        ewt = self._ewt(True, ["x.tf:1"])
+        self.assertIs(tp.secret_path_gate_violation([ewt], "pending"), ewt)
+
+    def test_not_required_never_gated(self):
+        self.assertIsNone(tp.secret_path_gate_violation([self._ewt(False)], None))
+
+    def test_build_env_wire_tasks_reads_secret_path(self):
+        with tempfile.TemporaryDirectory() as t:
+            plan = Path(t) / "config-wiring-plan.yaml"
+            plan.write_text(
+                'services:\n'
+                '  - service_slug: "svc"\n'
+                '    mode: stub\n'
+                '    settings_import_path: "app.moolabs_settings"\n'
+                '    api_key_accessor: "x"\n'
+                '    stub_emit_path: "app/moolabs_settings.py"\n'
+                '    deployment_stubs: []\n'
+                '    secret_path:\n'
+                '      exemplar_env_var: "ARC_GLOBAL_API_KEY"\n'
+                '      trace_required: true\n'
+                '      infra_hits: ["infrastructure/terraform/prod/main.tf:699"]\n'
+            )
+            tasks = tp.build_env_wire_tasks(plan)
+            self.assertTrue(tasks[0].secret_path.get("trace_required"))
+            self.assertEqual(
+                tasks[0].secret_path.get("exemplar_env_var"), "ARC_GLOBAL_API_KEY")
+
+    def test_load_secret_path_record_reads_status(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = Path(t) / "attribution-bindings.yaml"
+            b.write_text(
+                'service_slug: "svc"\n'
+                'bindings: {}\n'
+                'secret_path:\n'
+                '  status: skipped\n'
+                '  reason: "wired by hand in shared terraform"\n'
+            )
+            self.assertEqual(tp._load_secret_path_record(b).get("status"), "skipped")
+
+    def test_load_secret_path_record_absent_is_empty(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = Path(t) / "attribution-bindings.yaml"
+            b.write_text('service_slug: "svc"\nbindings: {}\n')
+            self.assertEqual(tp._load_secret_path_record(b), {})
+
+
 class TasksYamlTopLevelGeneratedAtQuoted(unittest.TestCase):
     """Dogfood #3: the top-level `generated_at` in emit_tasks_yaml was emitted
     UNQUOTED, so PyYAML safe_load coerces the ISO-8601 string to a

@@ -360,6 +360,18 @@ env-wiring decisions.
      - **Mirror `MOOLABS_API_KEY` at EVERY site found** — emit the mirrored block where the edit is service-scoped; emit a CHECKLIST naming the exact `file:line` where it's a SHARED/repo-scope module (cross-service blast radius — do not auto-edit).
 4. **COMPLETENESS GATE — the trace is complete ONLY when you have found all THREE: the config field, the runtime-env INJECTION site, AND the secret DECLARATION/storage.** If you found only some, KEEP SEARCHING (widen tokens; follow the store key). NEVER emit a partial path: config-only (read but never provided) and injection-only (env var → a store key that doesn't exist) both leave `MOOLABS_API_KEY` empty at runtime — that is exactly the gap where a config change shipped with no terraform. Validate each mirrored block by structural diff against the exemplar's; if it doesn't match, FLAG — don't ship a guessed block.
 
+   **This gate is MECHANICALLY ENFORCED — it is no longer self-policed** (prose-only, the trace got silently skipped: dogfood 2026-06-10, `MOOLABS_API_KEY` shipped unwired). `config_wire` computes deterministic EVIDENCE — it greps the customer's secret env vars and, if ANY appears in an infra file, writes `secret_path.trace_required: true` (+ `infra_hits`) into `config-wiring-plan.yaml`. You MUST then RECORD your trace decision in `attribution-bindings.yaml` under a per-service `secret_path:` block, and **`task_planner` REFUSES TO RUN (return 2)** when `trace_required` is true but no decision is recorded:
+   ```yaml
+   secret_path:
+     status: traced            # gate token: traced | skipped | no-infra | separate-repo
+     injection_sites: ["…/environments/prod/main.tf:699", "…/regional/main.tf:1369"]
+     declaration: { store_key: "shared/api-key", site: "…/modules/secrets/…:NN" }
+     mirrored_checklist:       # the precise terraform steps for the PR body (MOOLABS_API_KEY)
+       - 'add { name = "MOOLABS_API_KEY", valueFrom = module.secrets.secret_arns["moolabs/api-key"] } to the ecs-service task-def (mirror ARC_GLOBAL_API_KEY)'
+     reason: "…"               # REQUIRED when status=skipped
+   ```
+   `status: traced` (you found + mirrored the path) AND `status: skipped` / `no-infra` / `separate-repo` (an explicit human decision NOT to auto-wire shared infra, with a reason) both RESOLVE the gate. It enforces a recorded DECISION — it never auto-edits shared/repo-scope terraform (blast radius); the only thing it forbids is silently skipping. (Evidence is python-only today — `find_secret_fields` is python AST; TS/Go configs produce no evidence so the gate is a no-op there until that's extended.)
+
 When NO exemplar exists at all (greenfield repo with zero secrets wired), fall back to the generic stub below. The bootstrap engineer-stage secret question (Q14) defers to this auto-detection: it no longer asks the engineer to specify the secret source up front — Phase 1.7 detects + confirms it against the real repo.
 
 For each service:

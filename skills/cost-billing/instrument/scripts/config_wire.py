@@ -294,6 +294,85 @@ def _detect_access_idiom(app_config: dict, repo_root, language: str):
     return idiom if idiom.kind in ("singleton", "factory") else None
 
 
+# Path segments that mark a file as infrastructure (deployment) rather than app
+# code. Used by the secret-path EVIDENCE check below — NOT a format classifier
+# (we don't parse terraform vs k8s here; the agent does that during the trace).
+_INFRA_DIR_SEGMENTS = {
+    "terraform", "infra", "infrastructure", "k8s", "kubernetes",
+    "helm", "deploy", "deployment", "manifests",
+}
+
+
+def _is_infra_path(p: str) -> bool:
+    """True when a grep hit's path is an infra/deployment file (a deployment
+    path exists there). `.tf*` anywhere, or a yaml/json under an infra dir."""
+    pl = p.lower()
+    if pl.endswith((".tf", ".tf.json", ".tfvars")):
+        return True
+    if set(pl.split("/")) & _INFRA_DIR_SEGMENTS and pl.endswith(
+        (".yaml", ".yml", ".tf", ".json")
+    ):
+        return True
+    return False
+
+
+def _compute_secret_path(app_config: dict, repo_root, language: str) -> dict:
+    """Deterministic EVIDENCE for the secret-path gate (Phase 1.7).
+
+    Propose the customer's exemplar secret (their last-added — `propose_exemplar`),
+    derive its env var (`env_var_for_field`), and `grep_tokens` the repo for it. If
+    that env var appears in ANY infra file, a real deployment path EXISTS that the
+    two-hop trace must mirror → `trace_required=True`. NO format classification here
+    (terraform vs k8s vs Vault is the agent's job during the trace) — this only
+    answers "does a path exist that must be traced". python-only today
+    (`find_secret_fields` is python AST); other langs → no evidence.
+
+    grep_tokens RAISES on timeout (never silent-empty); a timeout here forces the
+    gate (`trace_required=True` with a marker) rather than falsely passing."""
+    moolabs_env = secret_exemplar.env_var_for_field("moolabs_api_key")
+    base = {"exemplar_env_var": None, "moolabs_env_var": moolabs_env,
+            "infra_hits": [], "trace_required": False}
+    if language != "python" or repo_root is None:
+        return base
+    rel = app_config.get("file")
+    if not rel:
+        return base
+    abs_path = Path(repo_root) / rel
+    try:
+        src = abs_path.read_text(encoding="utf-8")
+    except OSError:
+        return base
+    fields = secret_exemplar.find_secret_fields(src)
+    if not fields:
+        return base
+    # The exemplar to MIRROR is the blame-NEWEST secret (the team's current
+    # convention) — pass blame dates so we don't pick a stale position-last field.
+    dates = secret_exemplar.blame_line_dates(str(abs_path), [f.lineno for f in fields])
+    exemplar = secret_exemplar.propose_exemplar(src, line_dates=dates)
+    exemplar_env = (
+        secret_exemplar.env_var_for_field(exemplar.field.name) if exemplar else None
+    )
+    # EVIDENCE is robust to WHICH exemplar is picked: a deployment path exists if
+    # ANY of the customer's secrets is infra-wired (the wiring PATTERN exists). So
+    # grep EVERY secret field's name + env var, not just the one exemplar's.
+    tokens: list[str] = []
+    for f in fields:
+        tokens.append(f.name)
+        tokens.append(secret_exemplar.env_var_for_field(f.name))
+    tokens = list(dict.fromkeys(t for t in tokens if t))  # dedupe, preserve order
+    try:
+        hits = secret_exemplar.grep_tokens(str(repo_root), tokens)
+    except Exception:
+        # grep timed out / failed — do NOT silently pass; force the gate so a
+        # human verifies the deployment path rather than shipping it unwired.
+        return {"exemplar_env_var": exemplar_env, "moolabs_env_var": moolabs_env,
+                "infra_hits": ["<grep failed/timed out — verify the deployment path by hand>"],
+                "trace_required": True}
+    infra_hits = [f"{p}:{ln}" for (p, ln, _txt) in hits if _is_infra_path(p)]
+    return {"exemplar_env_var": exemplar_env, "moolabs_env_var": moolabs_env,
+            "infra_hits": infra_hits, "trace_required": bool(infra_hits)}
+
+
 def plan_service_env_wire(service: dict, language: str, repo_root=None) -> dict:
     """Derive the per-service env-wiring plan from an inventory entry.
 
@@ -312,6 +391,9 @@ def plan_service_env_wire(service: dict, language: str, repo_root=None) -> dict:
     # the instrument layer can surface a DEVELOPER ACTION REQUIRED checklist
     # in the PR body asking where the customer's IaC actually lives.
     infra_discovery_gap = bool(service.get("infra_discovery_gap", False))
+    # Deterministic secret-path evidence: does a real deployment path exist that
+    # the Phase 1.7 two-hop trace must mirror? (Drives the task_planner gate.)
+    secret_path = _compute_secret_path(app_config, repo_root, language)
 
     node = _resolve_node(node_key, language)
     # No node (unrecognized service or empty node_key) → stub mode.
@@ -331,6 +413,7 @@ def plan_service_env_wire(service: dict, language: str, repo_root=None) -> dict:
             "stub_emit_path": app_config.get("emit_path"),
             "deployment_stubs": deployment_stubs,
             "infra_discovery_gap": infra_discovery_gap,
+            "secret_path": secret_path,
         }
 
     # modify mode: wire into the customer's EXISTING config module. The import
@@ -360,6 +443,7 @@ def plan_service_env_wire(service: dict, language: str, repo_root=None) -> dict:
         "stub_emit_path": None,
         "deployment_stubs": deployment_stubs,
         "infra_discovery_gap": infra_discovery_gap,
+        "secret_path": secret_path,
     }
 
 
@@ -439,6 +523,30 @@ def emit_config_wiring_plan_yaml(plan: dict, dest: Path) -> None:
                 f"    infra_discovery_gap: "
                 f"{str(svc.get('infra_discovery_gap', False)).lower()}"
             )
+            # Secret-path EVIDENCE (Phase 1.7). trace_required=true means the
+            # exemplar's env var was grep-found in infra file(s) — a real
+            # deployment path exists that the two-hop trace must mirror; the
+            # task_planner gate REFUSES until the trace decision is recorded in
+            # attribution-bindings.yaml > secret_path.
+            sp = svc.get("secret_path") or {}
+            lines.append("    secret_path:")
+            lines.append(
+                f"      exemplar_env_var: "
+                f"{_quote(sp['exemplar_env_var']) if sp.get('exemplar_env_var') else 'null'}"
+            )
+            lines.append(
+                f"      moolabs_env_var: {_quote(sp.get('moolabs_env_var') or 'MOOLABS_API_KEY')}"
+            )
+            lines.append(
+                f"      trace_required: {str(bool(sp.get('trace_required'))).lower()}"
+            )
+            hits = sp.get("infra_hits") or []
+            if not hits:
+                lines.append("      infra_hits: []")
+            else:
+                lines.append("      infra_hits:")
+                for h in hits:
+                    lines.append(f"        - {_quote(h)}")
             stubs = svc.get("deployment_stubs", [])
             if not stubs:
                 lines.append(f"    deployment_stubs: []")
@@ -491,11 +599,16 @@ def main(argv: list[str] | None = None) -> int:
         help="path to 04-final.signed.yaml for per-service language lookup",
     )
     ap.add_argument("--customer-context-dir", default=".moolabs/customer-context")
+    ap.add_argument(
+        "--repo-root", default=".",
+        help="customer repo root — used to grep the secret-path EVIDENCE and to "
+             "mirror the config access idiom. Defaults to cwd (the skill runs at repo root).",
+    )
     args = ap.parse_args(argv)
 
     inv = load_env_routing_inventory(Path(args.env_routing_inventory))
     languages = _read_services_languages(Path(args.signed_yaml))
-    plan = build_plan(inv, languages)
+    plan = build_plan(inv, languages, Path(args.repo_root))
 
     out_dir = Path(args.customer_context_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
