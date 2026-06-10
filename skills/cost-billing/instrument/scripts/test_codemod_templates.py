@@ -163,26 +163,60 @@ class CallsiteRenderSmoke(unittest.TestCase):
                 out = self._render(tpl, _sibling_entry())
                 self._assert_py_compiles(out, f"{tpl} sibling-pair")
 
-    def test_entity_id_is_metered_entity_and_refuses_when_unbound(self):
+    def test_entity_id_is_metered_entity_and_emits_placeholder_when_unbound(self):
         # P/entity_id: entity_id must be the METERED ENTITY (the dedup grain), NOT the
         # per-request correlation id (which double-counts on retry). Bound -> emit
-        # uses the entity + keeps correlation in meta. UNBOUND -> the codemod REFUSES
-        # to emit (loud comment, no billable call), never silently bills on the
-        # correlation id.
+        # uses the entity + keeps correlation in meta. UNBOUND -> level-3 "never drop
+        # the billing": the codemod STILL emits, with a CONSTANT placeholder + a loud
+        # banner + meta.entity_id_status, so the cost is captured recoverably — but
+        # NEVER on the correlation id (constant placeholder => retries dedup, not
+        # double-count).
         for tpl in _PY_TEMPLATES:
             with self.subTest(tpl=tpl):
                 out = self._render(tpl, _usage_entry())          # entity_id bound in _sources
                 self.assertIn("entity_id=str(req.state.email_id)", out)   # the metered entity
                 self.assertIn('"correlation_id":', out)                   # correlation kept in meta
-                entity_line = next(l for l in out.splitlines() if "entity_id=str(" in l)
+                entity_line = next(l for l in out.splitlines() if "entity_id=" in l)
                 self.assertNotIn("get_correlation_id", entity_line)       # NOT the correlation id
-                # unbound -> refuse, no billable emit
+                self.assertNotIn("__MOOLABS_ADD_ENTITY_ID__", out)        # bound -> no placeholder
+                self.assertNotIn("UNATTRIBUTED_PLACEHOLDER", out)
+                # unbound -> EMIT a placeholder, do NOT drop the billing
                 unbound = _sources()
                 unbound["entity_id"] = None
                 out2 = self.env.get_template(tpl).render(entry=_usage_entry(),
                                                          attribution_sources=unbound)
-                self.assertNotIn("emit_usage_event_safe(", out2)
-                self.assertIn("NOT EMITTED", out2)
+                self.assertIn("emit_usage_event_safe(", out2)             # still emits
+                self.assertNotIn("NOT EMITTED", out2)                     # not dropped
+                self.assertIn('entity_id="__MOOLABS_ADD_ENTITY_ID__"', out2)
+                self.assertIn('"entity_id_status": "UNATTRIBUTED_PLACEHOLDER"', out2)
+                self.assertIn(">>> ADD THE ENTITY_ID <<<", out2)
+                entity_line2 = next(l for l in out2.splitlines() if "entity_id=" in l)
+                self.assertNotIn("get_correlation_id", entity_line2)      # placeholder, not corr id
+
+    def test_unbound_entity_emits_placeholder_all_templates_all_patterns(self):
+        # Level-3 "never drop the billing" — LANGUAGE-AGNOSTIC. Every callsite template
+        # (PY + TS), every pattern, with an UNBOUND entity_id, must still EMIT: the
+        # constant placeholder, meta.entity_id_status, and the loud banner — never the
+        # drop comment, never the correlation id. Locks TS as well as PY (the fix is a
+        # per-language transform, not a python copy).
+        entries = {"usage-only": _usage_entry, "cost-only": _cost_entry,
+                   "sibling-pair": _sibling_entry}
+        for tpl in _PY_TEMPLATES + _TS_TEMPLATES:
+            for pat, mk in entries.items():
+                with self.subTest(tpl=tpl, pattern=pat):
+                    unbound = {**_sources(), "entity_id": None}
+                    out = self.env.get_template(tpl).render(
+                        entry=mk(), attribution_sources=unbound)
+                    self.assertNotIn("NOT EMITTED", out)                 # not dropped
+                    self.assertIn("__MOOLABS_ADD_ENTITY_ID__", out)      # placeholder present
+                    self.assertIn("UNATTRIBUTED_PLACEHOLDER", out)       # meta status flag
+                    self.assertIn(">>> ADD THE ENTITY_ID <<<", out)      # loud banner
+                    self.assertRegex(out, r"_event_safe\(|EventSafe\(")  # an emit fired
+                    # the placeholder is a BARE constant, never str()/String()-wrapped
+                    self.assertNotIn('str("__MOOLABS_ADD_ENTITY_ID__")', out)
+                    self.assertNotIn("String('__MOOLABS_ADD_ENTITY_ID__')", out)
+                    if tpl in _PY_TEMPLATES:
+                        self._assert_py_compiles(out, f"{tpl} {pat} unbound")
 
     def test_emission_guard_gates_the_emit(self):
         # O: a CFO emission_guard must GATE the emit (bill only when not blocked).
@@ -441,48 +475,61 @@ class EndToEndPipeline(unittest.TestCase):
                 attribution_overrides=attribution_overrides or [], slug_inventory=None)
         return tasks[0].inserts[0]
 
-    def test_entity_id_capture_proposed_candidate_still_refuses(self):
+    def test_entity_id_capture_proposed_candidate_emits_placeholder_not_candidate(self):
         # THE blocking assertion: a discovery-PROPOSED entity_id candidate is NOT a
         # confirmed binding. The planner reads only the confirmed `entity_id`; a
-        # candidate-only entry must still flow entity_id=None -> the template REFUSES.
-        # (If a candidate ever satisfied the gate, the refuse-don't-fallback invariant
-        # would be defeated through the back door.)
+        # candidate-only entry flows entity_id=None. Level-3: the template now EMITS a
+        # CONSTANT placeholder (never drops the billing) but MUST NOT use the
+        # unconfirmed candidate as the entity (that would defeat the confirm gate
+        # through the back door).
         base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
                 "event_type": "svc.x", "product_slug": "svc"}
         env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
                           undefined=StrictUndefined, keep_trailing_newline=True)
-        # proposed-but-unconfirmed -> refuse
+        # proposed-but-unconfirmed -> emit placeholder, NOT the candidate
         ins = self._build_one({**base, "entity_id_candidate": ["email_id"]})
         self.assertIsNone(ins.attribution_sources.get("entity_id"))
         out = env.get_template("python-fastapi.j2").render(
             entry=ins.entry, attribution_sources=ins.attribution_sources)
-        self.assertNotIn("emit_usage_event_safe(", out)
-        self.assertIn("NOT EMITTED", out)
-        # CONFIRMED -> the per-entry entity flows + emits
+        self.assertIn("emit_usage_event_safe(", out)
+        self.assertNotIn("NOT EMITTED", out)
+        self.assertIn('entity_id="__MOOLABS_ADD_ENTITY_ID__"', out)
+        self.assertNotIn("email_id", out)   # the unconfirmed candidate is NOT used
+        # CONFIRMED -> the per-entry entity flows + emits (no placeholder)
         ins2 = self._build_one({**base, "entity_id": "self.email_id"})
         self.assertEqual(ins2.attribution_sources.get("entity_id"), "self.email_id")
         out2 = env.get_template("python-fastapi.j2").render(
             entry=ins2.entry, attribution_sources=ins2.attribution_sources)
         self.assertIn("entity_id=str(self.email_id)", out2)
+        self.assertNotIn("__MOOLABS_ADD_ENTITY_ID__", out2)
 
-    def test_entity_id_empty_string_refuses(self):
-        # "" is falsy -> None -> refuse (not entity_id=str()).
+    def test_entity_id_empty_string_is_none(self):
+        # "" is falsy -> None (so the template takes the placeholder path, never
+        # entity_id=str("")).
         base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
                 "event_type": "svc.x", "product_slug": "svc"}
         ins = self._build_one({**base, "entity_id": ""})
         self.assertIsNone(ins.attribution_sources.get("entity_id"))
 
-    def test_entity_id_service_level_binding_does_not_bypass_per_entry_refuse(self):
+    def test_entity_id_service_level_binding_does_not_bypass_per_entry_confirmation(self):
         # IMPORTANT (review): a service-level entity_id binding must NOT be inherited
         # by an entry with no CONFIRMED per-entry entity_id — that would silently
-        # bypass the refuse gate for every site. The per-entry value (None here) wins.
+        # bypass per-callsite confirmation for every site. The per-entry value (None
+        # here) wins -> the template emits the PLACEHOLDER, and the service-wide id
+        # must NOT leak into the emit.
         base = {"file": "svc/api.py", "line": 5, "workflow_id": "svc.x",
                 "event_type": "svc.x", "product_slug": "svc"}
         ins = self._build_one(
             {**base, "entity_id_candidate": ["email_id"]},   # no confirmed entity_id
             attribution_defaults={"customer_id": "self.tenant_id", "request_id": "r",
                                   "entity_id": "self.service_wide_id"})  # service binding
-        self.assertIsNone(ins.attribution_sources.get("entity_id"))  # NOT inherited -> refuse
+        self.assertIsNone(ins.attribution_sources.get("entity_id"))  # NOT inherited
+        env = Environment(loader=FileSystemLoader(str(_TPL_DIR)),
+                          undefined=StrictUndefined, keep_trailing_newline=True)
+        out = env.get_template("python-fastapi.j2").render(
+            entry=ins.entry, attribution_sources=ins.attribution_sources)
+        self.assertIn('entity_id="__MOOLABS_ADD_ENTITY_ID__"', out)   # placeholder, not inherited
+        self.assertNotIn("self.service_wide_id", out)                 # service id does NOT leak
 
     def test_per_file_override_entity_id_emits(self):
         # Blocker 1 (raw dogfood): Phase 1.6 persists the confirmed metered entity in
@@ -502,6 +549,8 @@ class EndToEndPipeline(unittest.TestCase):
             entry=ins.entry, attribution_sources=ins.attribution_sources)
         self.assertIn("entity_id=str(remittance_id)", out)
         self.assertNotIn("NOT EMITTED", out)
+        self.assertNotIn("__MOOLABS_ADD_ENTITY_ID__", out)   # bound -> no placeholder
+        self.assertNotIn("UNATTRIBUTED_PLACEHOLDER", out)
 
     def test_anchor_without_confidence_renders(self):
         # round-4 CRITICAL: the schema marks idempotency_anchor.confidence OPTIONAL;
