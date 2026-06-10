@@ -304,19 +304,38 @@ The snapshot is the **input contract** for Phase 2 (helper) and Phase 2b (call-s
 
 5. **Refuse to proceed if confirmations are missing.** Phase 2c reads `attribution-bindings.yaml` and aborts if any key the templates need is neither confirmed nor explicitly marked `source: null`. Fail loud — never silently substitute.
 
-   **`entity_id` is REQUIRED for billable events — unbound = refuse, never fall back.**
-   `entity_id` is the metered entity (above). When it is UNBOUND for a billable
-   callsite, the codemod does NOT emit a billing call — the template renders a loud
-   `MOOLABS BILLING NOT EMITTED … entity_id is UNBOUND` comment instead. It must
-   NOT fall back to the correlation id (per-request → retries double-count) or a
-   fresh UUID (no dedup). Bind the metered entity per workflow, then re-run. This is
-   the fix for the retry-double-count: dedup is per-entity, not per-request. (The
-   per-request correlation id is preserved separately in `meta.correlation_id` for
-   tracing.) **Consolidated-cost caveat:** when a single cost is emitted ONCE at a
-   shared site but bills MANY usage events (a consolidated cost — see discovery's
-   cost-consolidation rule), that cost site's entity may differ from the per-action
-   usage entities. Choose `entity_id` deliberately so the dedup grain — and any
-   usage↔cost relationship you rely on downstream — still holds.
+   **`entity_id` attribution — thread, then track, then (last resort) flag. NEVER fall
+   back to the per-request correlation id (retries double-count) or a fresh UUID (no
+   dedup).** A cost is often computed where the metered entity is NOT directly available
+   — a SHARED helper that computes a cost (LLM tokens, an API call, a render) on behalf
+   of MANY callers. Attribute that cost in THIS order; only descend when the level above
+   is genuinely impossible:
+
+   1. **THREAD it (preferred) — sibling-pair at the caller.** The cost belongs to the
+      usage event that TRIGGERED it. Emit usage and cost TOGETHER as a sibling-pair at
+      the CALLER's site, carrying the CALLER's `entity_id` — then attribution is
+      automatic (one entity, by construction; no propagation needed). This requires the
+      cost to reach the caller, so THREAD it back: expose the shared helper's cost to its
+      caller. The exact mechanism is CUSTOMER CODE and varies (an optional param so the
+      helper emits the cost itself with a passed entity; an added return/out value the
+      caller forwards; a small result object) — the ENGINEER makes that cross-cutting
+      change. The codemod emits the sibling-pair scaffolding + a precise, reviewable
+      REFACTOR INSTRUCTION naming the helper, its callers, and the cost source; it does
+      NOT rewrite the helper's signature (a tuple-arity / return-shape change is a
+      RUNTIME break that `py_compile` cannot catch — engineer-owned, like `terraform
+      apply`). Prefer a NON-BREAKING shape (optional param / additive return).
+   2. **TRACK it down — bind the entity.** If the cost genuinely can't be threaded to one
+      usage event, propose/confirm the metered entity for the cost site (the Phase 1.6
+      per-site question — search self / input object / recent; engineer confirms).
+   3. **LAST RESORT — emit + LOUDLY flag (do NOT drop the billing).** Only when you can
+      NEITHER thread NOR track down what entity should have been passed: emit the event
+      anyway with a big-words `>>> ADD THE ENTITY_ID <<<` banner, a CONSTANT placeholder
+      (`__MOOLABS_ADD_ENTITY_ID__` — never the correlation id, so retries don't
+      double-count), and `meta.entity_id_status = "UNATTRIBUTED_PLACEHOLDER"` so the
+      unattributed events are discoverable server-side. The dev replaces the placeholder
+      and re-runs. This is strictly better than dropping the event — the cost is captured,
+      loudly, recoverably. (The per-request correlation id stays in `meta.correlation_id`
+      for tracing only.)
 
 **Re-run semantics:** Phase 1.6 is incremental. If a binding for some key already exists with a recent `confirmed_at`, the script skips re-prompting unless `--reconfirm` is passed. New routes added since last run trigger override prompts only for those files.
 
