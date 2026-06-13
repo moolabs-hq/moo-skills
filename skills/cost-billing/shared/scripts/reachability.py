@@ -129,3 +129,34 @@ def classify_reachability(repo_root: str, func_name: str, def_file: str | None =
         f"dead/test/admin path; the meter will stay at ZERO. Re-anchor to the live "
         f"function, or de-scope this event.",
     )
+
+
+def audit_emit_reachability(entries, repo_root, fn_key="target_function", timeout=120):
+    """Run the gate over emit-site inventory entries (each carrying `target_function`).
+
+    Returns (annotations, findings):
+      - annotations: {entry_index: Reachability} — write the verdict back into the
+        inventory entry (`reachability: {status, note}`) so the review sees it.
+      - findings: the FLAGGED entries (provably dead-in-prod). These BLOCK the engineer
+        signoff — the engineer must re-anchor to the live function or explicitly de-scope
+        the event. `unverified` entries are NOT findings, but the signoff still owes each
+        one the runtime trace (this gate cannot prove liveness, only catch certain death)."""
+    annotations: dict[int, Reachability] = {}
+    findings: list[dict] = []
+    for i, entry in enumerate(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        fn = entry.get(fn_key)
+        if not fn:
+            continue
+        r = classify_reachability(repo_root, fn, entry.get("file"), timeout)
+        annotations[i] = r
+        if r.flagged:
+            findings.append({
+                "target_function": fn,
+                "file": entry.get("file"),
+                "workflow_id": entry.get("workflow_id"),
+                "status": r.status,
+                "note": r.note,
+            })
+    return annotations, findings

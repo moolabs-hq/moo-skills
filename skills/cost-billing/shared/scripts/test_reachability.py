@@ -104,6 +104,22 @@ class ClassifyReachability(unittest.TestCase):
         d = self._repo({"app/x.py": "def foo(a):\n    return a\n"})
         self.assertEqual(rc.find_callers(d, "foo", "app/x.py"), [])
 
+    def test_audit_returns_findings_only_for_flagged_entries(self):
+        d = self._repo({
+            "app/live.py": "def live_fn(x):\n    return x\n",
+            "app/orchestrator.py": "from x import live_fn\ndef run():\n    live_fn(1)\n",
+            "app/dead.py": "def dead_fn(x):\n    return x\n",
+            "tests/test_dead.py": "from x import dead_fn\ndef test():\n    dead_fn(1)\n",
+        })
+        entries = [
+            {"target_function": "live_fn", "file": "app/live.py", "workflow_id": "wf.live"},
+            {"target_function": "dead_fn", "file": "app/dead.py", "workflow_id": "wf.dead"},
+        ]
+        anns, findings = rc.audit_emit_reachability(entries, d)
+        self.assertEqual(anns[0].status, "unverified")
+        self.assertEqual(anns[1].status, "test_only")
+        self.assertEqual([f["workflow_id"] for f in findings], ["wf.dead"])  # only the dead one blocks
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
