@@ -2,7 +2,7 @@
 never calls (#572 dead-emit class: test-only / admin-only / dead-twin / orphan).
 
 The verdict is bounded + deterministic: find a target's CALLERS, classify them by file
-kind. Only-test / only-admin / no callers -> FLAGGED. A prod caller -> live_candidate
+kind. Only-test / only-admin / no callers -> FLAGGED. A prod caller -> unverified
 (not auto-confirmed — dynamic dispatch needs the runtime trace; it just isn't obviously
 dead). Mirrors the audit's three dead emits."""
 
@@ -27,8 +27,16 @@ class FileKind(unittest.TestCase):
         self.assertEqual(rc._file_kind("app/agents/risk_scoring_test.py"), "test")
         self.assertEqual(rc._file_kind("src/foo.spec.ts"), "test")
         self.assertEqual(rc._file_kind("app/admin/router.py"), "admin")
+        self.assertEqual(rc._file_kind("app/admin_router.py"), "admin")
         self.assertEqual(rc._file_kind("e2e/flows/checkout.ts"), "e2e")
         self.assertEqual(rc._file_kind("app/agents/orchestrator.py"), "prod")
+
+    def test_prod_domain_dirs_not_misclassified(self):
+        # review I4: `integration/` is a real prod domain dir (not e2e); admin-SUBSTRING
+        # filenames are prod. Mis-flagging these is a false FLAG on live sites.
+        self.assertEqual(rc._file_kind("app/integration/payment_gateway.py"), "prod")
+        self.assertEqual(rc._file_kind("app/superadmin.py"), "prod")
+        self.assertEqual(rc._file_kind("app/load_administration.py"), "prod")
 
 
 @unittest.skipUnless(shutil.which("grep") and shutil.which("git"), "grep+git required")
@@ -115,10 +123,38 @@ class ClassifyReachability(unittest.TestCase):
             {"target_function": "live_fn", "file": "app/live.py", "workflow_id": "wf.live"},
             {"target_function": "dead_fn", "file": "app/dead.py", "workflow_id": "wf.dead"},
         ]
-        anns, findings = rc.audit_emit_reachability(entries, d)
+        anns, findings, owed = rc.audit_emit_reachability(entries, d)
         self.assertEqual(anns[0].status, "unverified")
         self.assertEqual(anns[1].status, "test_only")
-        self.assertEqual([f["workflow_id"] for f in findings], ["wf.dead"])  # only the dead one blocks
+        self.assertEqual([f["workflow_id"] for f in findings], ["wf.dead"])   # only the dead one blocks
+        # review I5: unverified is NOT collapsed into findings — it lands in owed_trace,
+        # so a consumer cannot read it as a pass by checking `not findings`.
+        self.assertEqual([f["workflow_id"] for f in owed], ["wf.live"])
+
+    def test_go_receiver_method_orphan_is_flagged(self):  # review C1
+        d = self._repo({"app/svc.go": "func (s *Svc) doThing(ctx Context) error {\n  return nil\n}\n"})
+        self.assertEqual(rc.classify_reachability(d, "doThing").status, "orphan")
+
+    def test_ts_class_method_orphan_is_flagged(self):  # review C1
+        d = self._repo({"src/svc.ts": "class Svc {\n  doThing(x: number): void {\n    return;\n  }\n}\n"})
+        self.assertEqual(rc.classify_reachability(d, "doThing").status, "orphan")
+
+    def test_prefix_collision_callers_do_not_count(self):  # review C3
+        d = self._repo({
+            "app/t.py": "def foo(a):\n    return a\n",
+            "app/c.py": "def x():\n    re_foo(1)\n    my_foo(2)\n",
+        })
+        self.assertEqual(rc.classify_reachability(d, "foo").status, "orphan")
+
+    def test_monorepo_sibling_service_caller_does_not_count(self):  # review C2
+        d = self._repo({
+            "services/service-a/app/svc.py": "def do_thing(x):\n    return x\n",
+            "services/service-b/app/caller.py": "def run():\n    do_thing(1)\n",
+        })
+        # repo_root is service-a (a subdir of the git toplevel); service-b's same-name
+        # caller is OUT of scope -> service-a's emit reads orphan (flag), not unverified.
+        r = rc.classify_reachability(os.path.join(d, "services", "service-a"), "do_thing")
+        self.assertEqual(r.status, "orphan")
 
 
 if __name__ == "__main__":
