@@ -59,7 +59,7 @@ class ClassifyReachability(unittest.TestCase):
             "app/orchestrator.py": "from app.agents.risk_scoring import evaluate_case\n"
                                    "def run():\n    evaluate_case(1)\n",
         })
-        r = rc.classify_reachability(d, "evaluate_case", "app/agents/risk_scoring.py")
+        r = rc.classify_reachability(d, "evaluate_case")
         self.assertEqual(r.status, "unverified")   # NOT a pass — runtime trace still owed
         self.assertFalse(r.flagged)
         self.assertIn("app/orchestrator.py", r.prod_caller_files)
@@ -72,7 +72,7 @@ class ClassifyReachability(unittest.TestCase):
             "app/orchestrator.py": "from x import evaluate_case\ndef run():\n    evaluate_case(1)\n",
             "app/admin/router.py": "from x import evaluate_case\ndef debug():\n    evaluate_case(2)\n",
         })
-        r = rc.classify_reachability(d, "evaluate_case", "app/agents/risk_scoring.py")
+        r = rc.classify_reachability(d, "evaluate_case")
         self.assertEqual(r.status, "unverified")
         self.assertFalse(r.flagged)
 
@@ -84,7 +84,7 @@ class ClassifyReachability(unittest.TestCase):
                 "from app.agents.dispute import classify_dispute\n"
                 "def test_b():\n    classify_dispute(1)\n",
         })
-        r = rc.classify_reachability(d, "classify_dispute", "app/agents/dispute.py")
+        r = rc.classify_reachability(d, "classify_dispute")
         self.assertEqual(r.status, "test_only")
         self.assertTrue(r.flagged)
 
@@ -95,7 +95,7 @@ class ClassifyReachability(unittest.TestCase):
             "app/admin/router.py": "from app.cash import apply_single_remittance\n"
                                    "def sweep():\n    apply_single_remittance(1)\n",
         })
-        r = rc.classify_reachability(d, "apply_single_remittance", "app/cash.py")
+        r = rc.classify_reachability(d, "apply_single_remittance")
         self.assertEqual(r.status, "admin_e2e_only")
         self.assertTrue(r.flagged)
 
@@ -104,13 +104,13 @@ class ClassifyReachability(unittest.TestCase):
         d = self._repo({
             "app/comms.py": "def generate_dunning_email_async(x):\n    return x\n",
         })
-        r = rc.classify_reachability(d, "generate_dunning_email_async", "app/comms.py")
+        r = rc.classify_reachability(d, "generate_dunning_email_async")
         self.assertEqual(r.status, "orphan")
         self.assertTrue(r.flagged)
 
     def test_definition_line_is_not_counted_as_a_caller(self):
         d = self._repo({"app/x.py": "def foo(a):\n    return a\n"})
-        self.assertEqual(rc.find_callers(d, "foo", "app/x.py"), [])
+        self.assertEqual(rc.find_callers(d, "foo"), [])
 
     def test_audit_returns_findings_only_for_flagged_entries(self):
         d = self._repo({

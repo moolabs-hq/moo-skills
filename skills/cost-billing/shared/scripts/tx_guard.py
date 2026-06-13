@@ -11,6 +11,15 @@ This statically flags the PROVABLE pre-commit placements (the bounded, certain c
 stays silent otherwise — it cannot prove a placement is post-commit (control flow is
 unbounded), so `clear` is "not obviously pre-commit", not a guarantee. Same loud-when-
 certain contract as the reachability gate. Python-focused (AST); other languages -> unknown.
+
+Known limitations (matching is name-based, not type-based — receiver-type inference would
+need stubs, disproportionate here):
+  - A non-DB context manager whose method is `begin`/`atomic`/`transaction`
+    (`tracer.begin()`, `timer.begin()`) can FALSE-flag `inside_tx`. Rare in practice (OTel
+    uses `start_as_current_span`); the reviewer overrides when it fires.
+  - An emit in an inner function defined LEXICALLY inside a `with tx:` block but dispatched
+    AFTER commit (a callback/queue) can false-flag `inside_tx` — lexical scope ≠ execution.
+Both are conservative (a false flag costs a human glance; never a silent pass).
 """
 
 from __future__ import annotations
@@ -93,17 +102,24 @@ def classify_tx_position(source: str, line: int, language: str = "python") -> Tx
                         "the block exits.",
                     )
 
-    # (3) an explicit .commit() LATER in the same function -> the emit likely precedes it
+    # (3) an explicit .commit() LATER in the same function, with NONE before the emit ->
+    # the emit likely precedes the (only) commit. If a commit ALREADY ran before the emit,
+    # the emit is post-commit even when an unrelated `.commit()` (an audit flush, a second
+    # tx) follows later — flagging that is a false positive (worse than a miss: erodes
+    # trust). So flag only when no commit precedes the emit line.
     if fn is not None:
-        for node in ast.walk(fn):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "commit" and node.lineno > line):
-                return TxPosition(
-                    "before_commit",
-                    f"a .commit() at line {node.lineno} follows this emit (line {line}) in "
-                    f"'{fn.name}' — the emit likely fires BEFORE commit -> phantom/over-bill "
-                    f"on rollback. Place the emit AFTER the commit.",
-                )
+        commits = [n for n in ast.walk(fn)
+                   if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                       and n.func.attr == "commit")]
+        later = sorted((n for n in commits if n.lineno > line), key=lambda n: n.lineno)
+        earlier = [n for n in commits if n.lineno < line]
+        if later and not earlier:
+            return TxPosition(
+                "before_commit",
+                f"a .commit() at line {later[0].lineno} follows this emit (line {line}) in "
+                f"'{fn.name}' with none before it — the emit likely fires BEFORE commit -> "
+                f"phantom/over-bill on rollback. Place the emit AFTER the commit.",
+            )
 
     return TxPosition(
         "clear",

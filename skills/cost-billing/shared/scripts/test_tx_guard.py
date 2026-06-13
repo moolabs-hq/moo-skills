@@ -71,6 +71,20 @@ class ClassifyTxPosition(unittest.TestCase):
         self.assertEqual(r.status, "clear")
         self.assertFalse(r.flagged)
 
+    def test_emit_after_commit_with_later_unrelated_commit_is_clear(self):
+        # round-2 IMPORTANT: an emit correctly AFTER session.commit(), followed by an
+        # unrelated later .commit() (audit flush / second tx), must NOT false-flag.
+        src = (
+            "def process(session):\n"
+            "    save(session)\n"
+            "    session.commit()\n"               # line 3 — billable action committed
+            "    emit_usage_event_safe(x)\n"       # line 4 — CORRECT, post-commit
+            "    audit_log.commit()\n"             # line 5 — unrelated later commit
+        )
+        r = tg.classify_tx_position(src, 4)
+        self.assertEqual(r.status, "clear")
+        self.assertFalse(r.flagged)
+
     def test_no_transaction_is_clear(self):
         src = "def process():\n    emit_usage_event_safe(entity_id=x)\n"
         self.assertEqual(tg.classify_tx_position(src, 2).status, "clear")

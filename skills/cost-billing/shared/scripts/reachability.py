@@ -123,7 +123,7 @@ def _service_rel(repo_root: str) -> str:
     return "."
 
 
-def find_callers(repo_root: str, func_name: str, def_file: str | None = None,
+def find_callers(repo_root: str, func_name: str,
                  scope_to_service: bool = True, timeout: int = 120) -> list[tuple[str, int]]:
     """Real call-shaped references to `func_name`, MINUS its own definition, scoped to the
     service. Drops: docs/config files; prefix-collision hits (`re_foo(`); definition lines
@@ -149,11 +149,11 @@ def find_callers(repo_root: str, func_name: str, def_file: str | None = None,
     return out
 
 
-def classify_reachability(repo_root: str, func_name: str, def_file: str | None = None,
+def classify_reachability(repo_root: str, func_name: str,
                           scope_to_service: bool = True, timeout: int = 120) -> Reachability:
     """Is `func_name` (a target emit site) reachable from production code? Classifies its
     callers; only-test / only-admin / orphan are FLAGGED (`.flagged`)."""
-    callers = find_callers(repo_root, func_name, def_file, scope_to_service, timeout)
+    callers = find_callers(repo_root, func_name, scope_to_service, timeout)
     if not callers:
         return Reachability(
             "orphan", [], [],
@@ -207,7 +207,7 @@ def audit_emit_reachability(entries, repo_root, fn_key="target_function",
         if not fn:
             continue
         try:
-            r = classify_reachability(repo_root, fn, entry.get("file"), scope_to_service, timeout)
+            r = classify_reachability(repo_root, fn, scope_to_service, timeout)
         except subprocess.TimeoutExpired:
             r = Reachability("error", [], [],
                              f"reachability gate timed out for '{fn}' — gate ran INCOMPLETE "
