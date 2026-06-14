@@ -160,4 +160,5 @@ Per the skill's 5-round safety valve, stopping the autonomous loop and surfacing
 - PR #17: 6 review rounds, 24 fix commits, head 0cc3000. 88 tests green, ruff clean, CI: no checks configured.
 - Fix commits: a4ae0f2 (r1), 1167c33 (r2), 4765212 (r3), f0606d4 (r4), 27c5610 (r5), 0cc3000 (r6).
 - Recommendation: ready-for-human; the formal 2-clean-round gate is unmet (would need 2 more rounds) — user to decide continue-vs-accept.
-- Merge status: NOT MERGED — awaiting explicit user permission.
+- **USER DECISION (2026-06-14): Accept ready-for-human, stop looping.** Loop ended at round 6 by user choice.
+- Merge status: NOT MERGED — user reviews/merges. No merge permission given to the agent.
