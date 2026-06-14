@@ -103,6 +103,10 @@ def _create_cur(clients, ui, *, account_id, dry_run, out):
     ui.say(str(report_def))
     ui.say("Required S3 bucket policy:")
     ui.say(str(policy))
+    ui.say(
+        "Creating this needs cur:PutReportDefinition + s3:PutBucketPolicy, and the "
+        "account must have 'IAM access to Billing' enabled (else CUR calls 403)."
+    )
 
     if dry_run:
         ui.say("[dry-run] no changes applied.")

@@ -1614,6 +1614,16 @@ maybe_setup_cur() {
     return 0
   fi
 
+  echo "  ── AWS account & permissions ──────────────────────────────────"
+  echo "  Use the account whose bill you want to ingest (single-account v1)."
+  echo "  The chosen profile / SSO role needs at SETUP time:"
+  echo "    cur:PutReportDefinition, cur:DescribeReportDefinitions,"
+  echo "    s3:PutBucketPolicy, s3:ListAllMyBuckets, sts:GetCallerIdentity"
+  echo "  AND the account must have 'IAM access to Billing' enabled"
+  echo "  (Billing console → Account → IAM access) — without it, CUR calls 403"
+  echo "  even with the right IAM policy. Ongoing 'push' needs only READ"
+  echo "  (s3:GetObject + cur:DescribeReportDefinitions)."
+
   # boto3 needs valid credentials before configure can call STS. Let the engineer
   # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
   # token doesn't blow up the wizard.

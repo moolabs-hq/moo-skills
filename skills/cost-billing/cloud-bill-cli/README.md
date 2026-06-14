@@ -47,7 +47,30 @@ Cron example:
 0 6 * * *  set -a; . ~/.config/moo-cloud-bill/credentials; set +a; moo-cloud-bill push
 ```
 
-## Minimum read IAM (for ongoing `push`)
+## Which AWS account / SSO role to use
+
+Log in (`aws sso login --profile <name>`) to the **account whose bill you want to
+ingest**. v1 is **single-account** — for an AWS Organizations consolidated bill you
+would use the management/payer account, but multi-account is deferred.
+
+**Account-level gotcha:** the account must have **"IAM access to Billing" enabled**
+(Billing console → *Account* → *IAM access*). Without it, CUR API calls return 403
+**even when the IAM policy is correct** — this is an account root toggle, separate
+from IAM.
+
+## Permissions — two distinct sets
+
+**`configure` (one-time setup, your interactive SSO creds — not stored):**
+
+```
+sts:GetCallerIdentity
+cur:PutReportDefinition          (create the CUR; us-east-1 only)
+cur:DescribeReportDefinitions    (discover/reuse an existing CUR)
+s3:ListAllMyBuckets              (bucket pick-list)
+s3:PutBucketPolicy               (let AWS billing write to the bucket)
+```
+
+**`push` (ongoing, the cron role — read only):**
 
 ```
 s3:ListBucket                 (the delivery bucket)
@@ -56,9 +79,6 @@ cur:DescribeReportDefinitions
 ce:Get*
 organizations:Describe*, organizations:List*
 ```
-
-`configure`'s create path additionally needs `cur:PutReportDefinition` and
-`s3:PutBucketPolicy` — used interactively with your own credentials, not stored.
 
 ## The 24–48h floor
 
