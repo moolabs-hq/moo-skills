@@ -17,6 +17,8 @@
 #   ./install.sh --no-prune                   # don't auto-remove stale cost-billing-* skills
 #                                             # (default: prune skills not in the persona's install list,
 #                                             # e.g. deprecated cost-billing-bootstrap or cost-billing-reconcile)
+#   (engineering/all personas are asked interactively whether to set up the AWS CUR now —
+#    installs the moo-cloud-bill CLI and runs its `configure` wizard)
 #   ./install.sh --package                    # skip local install; produce .zip bundles
 #                                             # uploadable to Claude Desktop / web Projects
 #                                             # (Settings → Skills → drag-and-drop). Each .zip
@@ -218,6 +220,23 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# ──────────────────────────────────────────────────────────────────────
+# Run-once coordination across the per-platform fan-out
+# ──────────────────────────────────────────────────────────────────────
+# The installer re-invokes itself ("$0 --platform X") once per detected platform,
+# so a shell variable can't guard "run this once" — each child is its own process.
+# A run id is exported by the top-level process and inherited by every child; an
+# atomic mkdir marker keyed to it ensures the CUR setup runs exactly once.
+if [[ -z "${_MCB_RUN_ID:-}" ]]; then
+  export _MCB_RUN_ID="$$"
+  _MCB_RUN_OWNER=1            # only the top-level process cleans the marker up
+fi
+_CUR_SETUP_MARKER="${TMPDIR:-/tmp}/.moo-cloud-bill-cur-setup.${_MCB_RUN_ID}"
+if [[ "${_MCB_RUN_OWNER:-0}" == "1" ]]; then
+  rm -rf "$_CUR_SETUP_MARKER" 2>/dev/null || true   # clean slate (stale PID reuse)
+  trap 'rm -rf "$_CUR_SETUP_MARKER" 2>/dev/null || true' EXIT
+fi
 
 # ──────────────────────────────────────────────────────────────────────
 # Platform detection
@@ -1406,6 +1425,10 @@ if [[ $DRY_RUN -eq 1 ]]; then
   if [[ -n "$REPO" ]]; then
     echo "[dry-run] would scaffold customer-context/ at $REPO/.moolabs/customer-context/"
   fi
+  if [[ -d "$SUITE_SRC_DIR/cloud-bill-cli" ]] \
+     && [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]]; then
+    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, then run 'configure')"
+  fi
   exit 0
 fi
 
@@ -1535,6 +1558,153 @@ echo "  cost-billing-shared/sdk-surface-reference.md"
 echo "  cost-billing-shared/v1-decisions-log.md"
 echo "  cost-billing-shared/three-role-review.md"
 echo "  cost-billing-shared/gaps-tracker.md"
+echo ""
+
+# ── Optional: set up the AWS CUR via the moo-cloud-bill CLI ─────────────────
+# Installs the customer-run CLI (NOT an agent skill) and runs its discovery-first
+# `configure` wizard (creates/reuses the AWS Legacy CUR; mutates AWS only on the
+# engineer's explicit confirmation). Opt-in: always asks interactively (skipped
+# only when there's no TTY). Engineering/all personas only.
+list_aws_profiles() {
+  # Prefer the AWS CLI (authoritative); fall back to parsing ~/.aws files so this
+  # works even if the CLI isn't installed. Portable awk (BSD + GNU), no bash 4.
+  if command -v aws >/dev/null 2>&1; then
+    local out; out="$(aws configure list-profiles 2>/dev/null)"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
+  fi
+  local cfg="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+  local creds="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
+  {
+    [[ -f "$cfg" ]]   && awk -F'[][]' '/^\[/{p=$2; sub(/^profile[ \t]+/,"",p); print p}' "$cfg"
+    [[ -f "$creds" ]] && awk -F'[][]' '/^\[/{print $2}' "$creds"
+  } 2>/dev/null | awk 'NF' | sort -u
+}
+
+maybe_setup_cur() {
+  # Run ONCE across the whole multi-platform fan-out. Each platform re-invokes the
+  # script as a separate process, so a shell var can't guard this — claim an atomic
+  # marker (mkdir is atomic) keyed to the shared run id. First process wins; the
+  # rest return immediately.
+  if ! mkdir "$_CUR_SETUP_MARKER" 2>/dev/null; then
+    return 0
+  fi
+  [[ $PACKAGE_MODE -eq 1 || $UNINSTALL -eq 1 ]] && return 0
+  # CUR setup is the customer engineer's job — only the engineering persona (who
+  # also installs cost-billing-cloud-bill). Skip finance/CPO/team-product
+  # (different machines in the chain-handoff design).
+  case "$PERSONA" in engineering|team-engineer|engineer|all) ;; *) return 0 ;; esac
+  local cli_dir="$SUITE_SRC_DIR/cloud-bill-cli"
+  [[ -d "$cli_dir" ]] || return 0   # not bundled in this layout
+
+  # Defensive: never mutate during a dry-run (the dry-run block exits earlier and
+  # previews this step, so this guard only matters if the call site ever moves).
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[dry-run] would offer to install the CLI and run 'moo-cloud-bill configure'."
+    return 0
+  fi
+
+  # Always ask interactively; only a non-interactive shell (no TTY) skips it.
+  if [[ ! -t 0 ]]; then
+    echo "AWS CUR setup: skipped (non-interactive). Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"
+    return 0
+  fi
+  echo "─── AWS Cost & Usage Report setup ──────────────────────────────────"
+  echo "moo-cloud-bill configures your AWS CUR and pushes it to Acute (needs AWS creds)."
+  printf "Configure the CUR now (installs the CLI, then runs its discovery-first wizard)? [y/N]: "
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) echo "Skipped. Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"; return 0 ;;
+  esac
+
+  # Prefer pip into the active env so the command is immediately invocable here.
+  local pipcmd=""
+  if command -v pip  >/dev/null 2>&1; then pipcmd="pip install"
+  elif command -v pip3 >/dev/null 2>&1; then pipcmd="pip3 install"
+  elif command -v pipx >/dev/null 2>&1; then pipcmd="pipx install"
+  else
+    echo "  ! pip not found — install + configure manually:  pip install \"$cli_dir\" && moo-cloud-bill configure" >&2
+    return 0
+  fi
+
+  echo "  Installing the CLI ($pipcmd)…"
+  if ! $pipcmd "$cli_dir"; then
+    echo "  ! CLI install failed — run manually:  $pipcmd \"$cli_dir\" && moo-cloud-bill configure" >&2
+    return 0
+  fi
+
+  echo "  ── AWS account & permissions ──────────────────────────────────"
+  echo "  Use the account whose bill you want to ingest (single-account v1)."
+  echo "  The chosen profile / SSO role needs at SETUP time:"
+  echo "    cur:PutReportDefinition, cur:DescribeReportDefinitions,"
+  echo "    s3:ListAllMyBuckets, s3:PutBucketPolicy, sts:GetCallerIdentity"
+  echo "    (+ s3:CreateBucket if you create a new delivery bucket)"
+  echo "  AND the account must have 'IAM access to Billing' enabled"
+  echo "  (Billing console → Account → IAM access) — without it, CUR calls 403"
+  echo "  even with the right IAM policy. Ongoing 'push' needs only READ"
+  echo "  (s3:GetObject + cur:DescribeReportDefinitions)."
+
+  # boto3 needs valid credentials before configure can call STS. Let the engineer
+  # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
+  # token doesn't blow up the wizard.
+  local _profiles=() _p _i _choice
+  while IFS= read -r _p; do [[ -n "$_p" ]] && _profiles+=("$_p"); done < <(list_aws_profiles)
+
+  local aws_profile=""
+  if [[ ${#_profiles[@]} -gt 0 ]]; then
+    echo "  Select an AWS profile for boto3:"
+    _i=1
+    for _p in "${_profiles[@]}"; do echo "    $_i) $_p"; _i=$((_i+1)); done
+    echo "    $_i) (none — use the default credential chain)"
+    printf "  Choice [1-%d]: " "$_i"
+    read -r _choice
+    if [[ "$_choice" =~ ^[0-9]+$ ]] && (( _choice >= 1 && _choice < _i )); then
+      aws_profile="${_profiles[$((_choice - 1))]}"
+    fi   # the "none" option or any other input → empty → default credential chain
+  else
+    echo "  No AWS profiles found in ~/.aws — using the default credential chain."
+  fi
+  local profile_args=()
+  [[ -n "$aws_profile" ]] && profile_args=(--profile "$aws_profile")
+
+  if command -v aws >/dev/null 2>&1; then
+    printf "  Run 'aws sso login %s' now? [Y/n]: " "${aws_profile:+--profile $aws_profile}"
+    read -r ans
+    case "$ans" in
+      n|N|no|NO) echo "    Skipping SSO login — ensure your credentials are valid." ;;
+      *) aws sso login "${profile_args[@]}" \
+           || echo "    ! 'aws sso login' failed (non-SSO profile or error) — continuing; configure will report if creds are invalid." ;;
+    esac
+  else
+    echo "    (aws CLI not found — ensure your AWS credentials are valid before configure)"
+  fi
+
+  # One command prefix for both the installed entry point and the from-source run.
+  local mcb_cmd
+  if command -v moo-cloud-bill >/dev/null 2>&1; then
+    mcb_cmd=(moo-cloud-bill)
+  else
+    mcb_cmd=(env "PYTHONPATH=$cli_dir/src" python3 -m moo_cloud_bill)
+  fi
+
+  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
+  "${mcb_cmd[@]}" "${profile_args[@]}" configure \
+    || echo "  (configure did not finish — re-run later:  moo-cloud-bill ${aws_profile:+--profile $aws_profile} configure)"
+
+  # Capture the Moolabs API key (separate from AWS creds) so push/seed can reach
+  # Acute. init has its own skip path if you don't have the key yet.
+  echo "  Now capture your Moolabs API key (Moolabs UI → API Keys) so 'push' can send data:"
+  "${mcb_cmd[@]}" init || true
+
+  # Test that it actually works: Acute reachability + auth now (the part most
+  # likely misconfigured). The first CUR delivers in ~24-48h, so a real data push
+  # can't be validated yet — verify reports CUR-data readiness too.
+  echo "  Verifying the Acute connection…"
+  "${mcb_cmd[@]}" "${profile_args[@]}" verify || echo "  (verify reported an issue — see above; re-run: moo-cloud-bill verify)"
+
+  echo "  Setup done. After the CUR delivers (~24–48h), schedule:  moo-cloud-bill push  (cron; profile persisted by configure)."
+}
+maybe_setup_cur
 echo ""
 
 if [[ $NO_BOOTSTRAP_CTA -eq 0 ]]; then
