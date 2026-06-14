@@ -44,6 +44,34 @@ def test_retries_on_5xx_then_succeeds():
     assert len(rec.calls) == 2
 
 
+def test_retries_on_transport_error_then_succeeds():
+    calls = {"n": 0}
+
+    def flaky_post(url, headers, json_body):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("connection reset")
+        return (201, {})
+
+    client = AcuteClient("https://acute.example", "k", post=flaky_post, sleep=lambda *_: None)
+    res = client.import_batch(_batch())
+    assert res.status_code == 201
+    assert calls["n"] == 2
+
+
+def test_transport_error_surfaces_after_max_retries():
+    import pytest
+
+    def always_fails(url, headers, json_body):
+        raise ConnectionError("down")
+
+    client = AcuteClient(
+        "https://acute.example", "k", post=always_fails, max_retries=2, sleep=lambda *_: None
+    )
+    with pytest.raises(ConnectionError):
+        client.import_batch(_batch())
+
+
 def test_does_not_retry_on_4xx():
     rec = Recorder([(422, {"detail": "bad"})])
     client = AcuteClient("https://acute.example", "k", post=rec, sleep=lambda *_: None)

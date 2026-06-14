@@ -16,7 +16,8 @@ class PushSummary:
     ok: int = 0
     failed: int = 0
     skipped_credits: int = 0
-    failed_days: list = field(default_factory=list)
+    skipped_conflicts: int = 0
+    failed_days: list[tuple[str, int]] = field(default_factory=list)
     dry_run: bool = False
 
     @property
@@ -25,7 +26,13 @@ class PushSummary:
 
 
 def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushSummary:
-    summary = PushSummary(skipped_credits=len(credits), dry_run=dry_run)
+    # `credits` carries two distinct kinds of excluded line; report them
+    # separately so dropped spend (currency conflict) isn't hidden as a "credit".
+    conflicts = [c for c in credits if str(c.get("reason", "")).startswith("currency_conflict")]
+    negatives = [c for c in credits if c not in conflicts]
+    summary = PushSummary(
+        skipped_credits=len(negatives), skipped_conflicts=len(conflicts), dry_run=dry_run
+    )
     for batch in batches:
         day = batch.billing_period_start.date().isoformat()
         if dry_run:
@@ -39,8 +46,14 @@ def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushS
             summary.failed += 1
             summary.failed_days.append((day, result.status_code))
             out(f"{day}: FAILED {result.status_code} — {result.body}")
-    if credits:
-        out(f"Skipped {len(credits)} credit line(s) (cost<0; Acute rejects negatives).")
+    if negatives:
+        out(f"Skipped {len(negatives)} credit line(s) (cost<0; Acute rejects negatives).")
+    if conflicts:
+        out(
+            f"WARNING: dropped {len(conflicts)} line(s) on currency conflict — "
+            f"spend may be under-reported. Reasons: "
+            + "; ".join(c["reason"] for c in conflicts[:5])
+        )
     return summary
 
 

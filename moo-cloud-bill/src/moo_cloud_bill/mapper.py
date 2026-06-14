@@ -9,8 +9,9 @@ Negative cost (credits): Acute rejects cost<0 (422), so we exclude + record them
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
+from .errors import ColumnMapError
 from .models import CloudCostRow, ImportBatch
 
 GrainKey = tuple[str, str, str, str]
@@ -60,10 +61,23 @@ def _require_columns(row: dict, col: dict) -> None:
     missing = [f for f in REQUIRED_COLUMNS if col[f] not in row]
     if missing:
         cols = ", ".join(f"{f}→{col[f]}" for f in missing)
-        raise KeyError(
+        raise ColumnMapError(
             f"CUR column map points required field(s) at absent column(s): {cols}. "
             f"Present columns: {list(row)[:12]}. Fix cur-column-map.yaml."
         )
+
+
+def _parse_cost(raw_value, col_name: str) -> Decimal:
+    # Null cost cell (pyarrow yields None) → zero; non-numeric → loud map error.
+    if raw_value is None:
+        return Decimal(0)
+    try:
+        return Decimal(str(raw_value))
+    except InvalidOperation as exc:
+        raise ColumnMapError(
+            f"cost column '{col_name}' has non-numeric value {raw_value!r} — "
+            f"the column map likely points 'cost' at the wrong column."
+        ) from exc
 
 
 def build_daily_batches(
@@ -90,7 +104,7 @@ def build_daily_batches(
             validated = True
 
         service = str(raw[col["service_name"]] or "")
-        cost = Decimal(str(raw[col["cost"]]))
+        cost = _parse_cost(raw[col["cost"]], col["cost"])
         resource_id = raw.get(col["resource_id"]) or None
         region = raw.get(col["region"]) or None
         usage_type = raw.get(col["usage_type"]) or None
@@ -122,14 +136,21 @@ def build_daily_batches(
             }
         elif acc["currency"] != currency:
             # Same Acute grain, different currency — Acute can't store both (currency
-            # isn't in its index) and summing across currencies is meaningless. Skip
-            # + record; near-impossible in real CUR (a resource bills in one currency).
+            # isn't in its index) and summing across currencies is meaningless. Keep
+            # the LARGER cost (so we never drop the bigger spend regardless of row
+            # order); record the smaller as a currency_conflict. Near-impossible in
+            # real CUR (a resource bills in one currency).
+            if cost > acc["cost"]:
+                loser_cost, loser_ccy, kept_ccy = acc["cost"], acc["currency"], currency
+                acc["cost"], acc["currency"] = cost, currency
+            else:
+                loser_cost, loser_ccy, kept_ccy = cost, currency, acc["currency"]
             credits.append({
                 "service": service,
                 "resource_id": resource_id,
-                "cost": str(cost),
-                "currency": currency,
-                "reason": f"currency_conflict: grain already {acc['currency']}, line is {currency}",
+                "cost": str(loser_cost),
+                "currency": loser_ccy,
+                "reason": f"currency_conflict: kept {kept_ccy}, dropped {loser_ccy}",
             })
         else:
             acc["cost"] += cost  # SUM to the unique-index grain (C1)

@@ -32,7 +32,10 @@ class CloudCostRow:
             "resource_id": self.resource_id,
             "region": self.region,
             "usage_type": self.usage_type,
-            "cost": str(self.cost),  # Decimal → str so JSON keeps precision
+            # Fixed-point, never scientific notation: format(Decimal("5E-7"),"f")
+            # == "0.0000005". Keeps precision and avoids any strict server-side
+            # Decimal parser choking on "5E-7".
+            "cost": format(self.cost, "f"),
             "currency": self.currency,
             "tags": dict(self.tags),
         }

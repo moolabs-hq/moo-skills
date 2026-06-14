@@ -69,7 +69,16 @@ class AcuteClient:
         url = self._base + path
         attempt = 0
         while True:
-            status, resp_body = self._post(url, self._headers(), body)
+            try:
+                status, resp_body = self._post(url, self._headers(), body)
+            except Exception:
+                # Transport-layer failure (connect/timeout/read). Re-POST is safe
+                # (Acute supersedes per period). Retry with backoff, then surface.
+                if attempt >= self._max_retries:
+                    raise
+                attempt += 1
+                self._sleep(self._backoff * attempt)
+                continue
             if status < 500 or attempt >= self._max_retries:
                 return Result(status_code=status, body=resp_body or {})
             attempt += 1

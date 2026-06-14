@@ -10,6 +10,7 @@ from . import aws
 from .acute_client import AcuteClient
 from .config import load_config
 from .credentials import default_config_dir, resolve_key
+from .errors import MooCloudBillError
 from .cur_columns import load_column_map
 from .ui import ConsoleUI
 from .commands import configure as c_configure
@@ -48,9 +49,10 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
         return _dispatch(args)
-    except (KeyError, ValueError) as exc:
-        # Loud, intentional domain errors (e.g. column-map mismatch) — show a
-        # clean message + non-zero exit so cron alerts, not a raw traceback.
+    except MooCloudBillError as exc:
+        # ONLY intentional, operator-actionable domain errors (e.g. column-map
+        # mismatch) get a clean message + non-zero exit. Programming bugs
+        # (KeyError, AttributeError, …) still surface as tracebacks.
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

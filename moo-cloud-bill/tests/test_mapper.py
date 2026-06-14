@@ -69,25 +69,50 @@ def test_tags_and_currency_carried():
     assert r.tags["user_tenant"] == "t1"
 
 
-def test_currency_conflict_same_grain_is_skipped_not_summed():
-    # Acute's unique index excludes currency, so two same-grain lines in different
-    # currencies can't both be stored. They must NOT be summed (round-1 bug) and
-    # must NOT become a dup-grain row that aborts the batch (round-2 CRITICAL).
-    # Resolution: keep the first, skip + record the conflict.
-    rows = [row(1, currency="USD"), row(2, currency="CAD")]
-    batches, credits = build_daily_batches(rows, CM)
-    assert len(batches) == 1
-    assert len(batches[0].rows) == 1
-    assert batches[0].rows[0].cost == Decimal("1")        # first kept, NOT summed to 3
-    assert batches[0].rows[0].currency == "USD"
-    assert any("currency_conflict" in c["reason"] for c in credits)
+def test_currency_conflict_keeps_larger_spend_regardless_of_order():
+    # Acute's index excludes currency, so a same-grain currency conflict can't be
+    # two rows (round-2 CRITICAL) and must not be summed (round-1 bug). Resolution:
+    # keep the LARGER spend (order-independent), record the smaller.
+    for rows in ([row(1, currency="USD"), row(5, currency="CAD")],
+                 [row(5, currency="CAD"), row(1, currency="USD")]):
+        batches, credits = build_daily_batches(rows, CM)
+        assert len(batches[0].rows) == 1
+        assert batches[0].rows[0].cost == Decimal("5")      # larger kept, never summed to 6
+        assert batches[0].rows[0].currency == "CAD"
+        assert any("currency_conflict" in c["reason"] for c in credits)
 
 
-def test_missing_cost_column_fails_loudly():
+def test_missing_cost_column_raises_columnmaperror():
     import pytest
+
+    from moo_cloud_bill.errors import ColumnMapError
     bad = {CM["service_name"]: "AmazonS3", CM["usage_start"]: "2026-05-14T03:00:00Z"}
-    with pytest.raises(KeyError):
+    with pytest.raises(ColumnMapError):
         build_daily_batches([bad], CM)
+
+
+def test_null_cost_is_treated_as_zero_not_crash():
+    r = row(0)
+    r[CM["cost"]] = None  # pyarrow yields None for a null cost cell
+    batches, _ = build_daily_batches([r], CM)
+    assert batches[0].rows[0].cost == Decimal("0")
+
+
+def test_non_numeric_cost_raises_columnmaperror():
+    import pytest
+
+    from moo_cloud_bill.errors import ColumnMapError
+    r = row(0)
+    r[CM["cost"]] = "not-a-number"  # cost column mapped to a text column
+    with pytest.raises(ColumnMapError):
+        build_daily_batches([r], CM)
+
+
+def test_zero_cost_passes_through():
+    batches, credits = build_daily_batches([row(0)], CM)
+    assert len(batches[0].rows) == 1
+    assert batches[0].rows[0].cost == Decimal("0")
+    assert credits == []
 
 
 def test_daily_period_bounds_are_half_open_utc_day():

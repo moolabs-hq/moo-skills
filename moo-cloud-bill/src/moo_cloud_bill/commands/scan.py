@@ -6,6 +6,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+from ..errors import ColumnMapError
 from ..findings import save_findings
 from ..mapper import extract_tags
 from ..models import Finding
@@ -50,7 +51,7 @@ def find_untagged(
             # silently zero every line and report no findings. Fail loudly.
             for field in ("service_name", "cost"):
                 if col[field] not in raw:
-                    raise KeyError(
+                    raise ColumnMapError(
                         f"scan: column map field '{field}'→'{col[field]}' absent from CUR row"
                     )
             validated = True
