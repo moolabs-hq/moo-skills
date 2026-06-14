@@ -79,13 +79,38 @@ def run_configure(
     return cfg
 
 
+def _select_or_create_bucket(s3, ui, *, dry_run, out):
+    """Pick an existing delivery bucket or create a new one. Returns the bucket
+    name, or None if the operator aborts."""
+    existing = aws.list_bucket_names(s3)
+    options = existing + ["➕ create a new bucket"]
+    idx = ui.choose("Delivery bucket:", options)
+    if idx == len(existing):  # the "create new" sentinel
+        return _create_new_bucket(s3, ui, dry_run=dry_run, out=out)
+    return existing[idx]
+
+
+def _create_new_bucket(s3, ui, *, dry_run, out):
+    name = (ui.ask("New bucket name (globally unique, us-east-1)", default="") or "").strip()
+    if not name:
+        ui.say("No bucket name entered — aborting.")
+        return None
+    if dry_run:
+        ui.say(f"[dry-run] would create S3 bucket '{name}' (us-east-1).")
+        return name
+    if not ui.confirm(f"Create S3 bucket '{name}' in us-east-1?"):
+        ui.say("Aborted — bucket not created.")
+        return None
+    aws.create_bucket(s3, name, region="us-east-1")
+    out(f"Created bucket '{name}'.")
+    return name
+
+
 def _create_cur(clients, ui, *, account_id, dry_run, out):
     s3, cur = clients["s3"], clients["cur"]
-    buckets = aws.list_bucket_names(s3)
-    if not buckets:
-        ui.say("No S3 buckets found — create one for CUR delivery first.")
+    bucket = _select_or_create_bucket(s3, ui, dry_run=dry_run, out=out)
+    if bucket is None:
         return None, None, None, None
-    bucket = buckets[0] if len(buckets) == 1 else buckets[ui.choose("Delivery bucket:", buckets)]
 
     while True:
         prefix_in = ui.ask("S3 prefix (e.g. cost/hourly)", default="cost/hourly")
@@ -101,7 +126,7 @@ def _create_cur(clients, ui, *, account_id, dry_run, out):
 
     ui.say("Planned ReportDefinition:")
     ui.say(str(report_def))
-    ui.say("Required S3 bucket policy:")
+    ui.say("Required S3 bucket policy (lets AWS billing write the CUR):")
     ui.say(str(policy))
     ui.say(
         "Creating this needs cur:PutReportDefinition + s3:PutBucketPolicy, and the "
@@ -112,16 +137,15 @@ def _create_cur(clients, ui, *, account_id, dry_run, out):
         ui.say("[dry-run] no changes applied.")
         return None, None, None, None
 
-    if not ui.confirm("Create this CUR via the AWS SDK (us-east-1)?"):
+    if not ui.confirm("Apply the bucket policy and create this CUR (us-east-1)?"):
         ui.say("Aborted — nothing created.")
         return None, None, None, None
+    # Policy MUST land before PutReportDefinition — AWS validates delivery access
+    # at creation, so a bucket without the policy (esp. a brand-new one) fails.
+    aws.put_bucket_policy(s3, bucket, policy)
+    out("Applied bucket policy.")
     aws.put_report_definition(cur, report_def)
     out(f"Created CUR '{report_name}'.")
-
-    if ui.confirm("Apply the S3 bucket policy now (else apply it yourself)?"):
-        aws.put_bucket_policy(s3, bucket, policy)
-        out("Applied bucket policy.")
-
     return bucket, prefix, report_name, "us-east-1"
 
 

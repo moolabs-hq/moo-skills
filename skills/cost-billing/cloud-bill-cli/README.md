@@ -67,6 +67,7 @@ sts:GetCallerIdentity
 cur:PutReportDefinition          (create the CUR; us-east-1 only)
 cur:DescribeReportDefinitions    (discover/reuse an existing CUR)
 s3:ListAllMyBuckets              (bucket pick-list)
+s3:CreateBucket                  (only if you create a new delivery bucket)
 s3:PutBucketPolicy               (let AWS billing write to the bucket)
 ```
 

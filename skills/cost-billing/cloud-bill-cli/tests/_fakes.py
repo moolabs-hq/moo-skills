@@ -57,12 +57,17 @@ class FakeS3:
         self.buckets = buckets or []
         self.manifest = manifest
         self.policy_calls: list = []
+        self.created_buckets: list = []
 
     def list_buckets(self):
         return {"Buckets": [{"Name": b} for b in self.buckets]}
 
     def put_bucket_policy(self, Bucket, Policy):  # noqa: N803
         self.policy_calls.append((Bucket, Policy))
+
+    def create_bucket(self, **kwargs):
+        self.created_buckets.append(kwargs.get("Bucket"))
+        return {}
 
     def get_object(self, Bucket, Key):  # noqa: N803
         if self.manifest is None:

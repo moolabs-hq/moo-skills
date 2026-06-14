@@ -83,6 +83,15 @@ def put_bucket_policy(s3, bucket: str, policy: dict) -> None:
     s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
 
 
+def create_bucket(s3, bucket: str, *, region: str = "us-east-1") -> None:
+    """Create an S3 bucket for CUR delivery. us-east-1 must NOT send a
+    LocationConstraint (AWS rejects it); every other region must."""
+    if region == "us-east-1":
+        s3.create_bucket(Bucket=bucket)
+    else:
+        s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
+
+
 def read_manifest(s3, bucket: str, prefix: str, report_name: str) -> dict:
     """Read the top-level Legacy CUR manifest JSON listing the report columns."""
     key = f"{prefix}/{report_name}/{report_name}-Manifest.json"

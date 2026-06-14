@@ -26,24 +26,40 @@ def test_reuse_path_does_not_create(tmp_path):
 def test_create_path_calls_put_report_definition(tmp_path):
     cl = clients(report_definitions=[], buckets=["mybucket"])
     ui = ScriptedUI(
-        confirms=[True, True],  # create yes; apply bucket policy yes
+        choices=[0],            # pick existing bucket 'mybucket'
+        confirms=[True],        # single confirm: apply policy + create CUR
         answers=["cost/hourly", "moolabs-cur", "USD", ""],
     )
     cfg = run_configure(cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml")
     assert len(cl["cur"].put_calls) == 1
     assert cl["cur"].put_calls[0]["TimeUnit"] == "HOURLY"
     assert cfg.bucket == "mybucket"
-    assert cl["s3"].policy_calls  # bucket policy applied
+    assert cl["s3"].policy_calls  # bucket policy applied (before the CUR create)
+
+
+def test_create_new_bucket_then_create_cur(tmp_path):
+    cl = clients(report_definitions=[], buckets=["existing"])
+    ui = ScriptedUI(
+        choices=[1],            # pick the "create a new bucket" option (index == len(existing))
+        confirms=[True, True],  # create-bucket yes; then apply-policy+create-CUR yes
+        answers=["my-new-bucket", "cost/hourly", "moolabs-cur", "USD", ""],
+    )
+    cfg = run_configure(cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml")
+    assert cl["s3"].created_buckets == ["my-new-bucket"]
+    assert cfg.bucket == "my-new-bucket"
+    assert len(cl["cur"].put_calls) == 1
+    assert cl["s3"].policy_calls  # policy applied to the new bucket before the CUR
 
 
 def test_dry_run_create_does_not_mutate(tmp_path):
     cl = clients(report_definitions=[], buckets=["mybucket"])
-    ui = ScriptedUI(answers=["cost/hourly", "moolabs-cur"])
+    ui = ScriptedUI(choices=[0], answers=["cost/hourly", "moolabs-cur"])
     result = run_configure(
         cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml", dry_run=True
     )
     assert result is None
     assert cl["cur"].put_calls == []
+    assert cl["s3"].created_buckets == []
 
 
 def test_dry_run_reuse_writes_no_files(tmp_path):
