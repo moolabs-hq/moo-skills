@@ -20,6 +20,7 @@ from .commands import push as c_push
 from .commands import review as c_review
 from .commands import scan as c_scan
 from .commands import seed as c_seed
+from .commands import verify as c_verify
 
 FINDINGS_FILE = "untagged-findings.yaml"
 COLUMN_MAP_FILE = "cur-column-map.yaml"
@@ -42,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("review", help="interactive findings review")
     r.add_argument("--seed", action="store_true", help="seed approved rows immediately")
     sub.add_parser("seed", help="POST approved findings to resource_service_map")
+    sub.add_parser("verify", help="check Acute connectivity/auth + CUR data readiness")
     return p
 
 
@@ -117,6 +119,13 @@ def _dispatch(args) -> int:
         if key is None:
             return 1
         return c_seed.run_seed(config_dir / FINDINGS_FILE, AcuteClient(cfg.acute_base, key))
+
+    if args.command == "verify":
+        cfg = load_config(config_dir=config_dir, env=os.environ, overrides=overrides)
+        key = _require_key(config_dir)
+        if key is None:
+            return 1
+        return c_verify.run_verify(cfg, key)
 
     return 2
 

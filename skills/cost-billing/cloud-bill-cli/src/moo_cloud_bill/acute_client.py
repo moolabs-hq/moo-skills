@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 IMPORT_PATH = "/api/v1/cloud-billing/import"
 RESOURCE_MAP_PATH = "/api/v1/cloud-billing/resource-map"
+IMPORTS_PATH = "/api/v1/cloud-billing/imports"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,17 @@ def _httpx_post(url: str, headers: dict, json_body: dict):
     return resp.status_code, body
 
 
+def _httpx_get(url: str, headers: dict):
+    import httpx
+
+    resp = httpx.get(url, headers=headers, timeout=30.0)
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"raw": resp.text}
+    return resp.status_code, body
+
+
 class AcuteClient:
     def __init__(
         self,
@@ -44,6 +56,7 @@ class AcuteClient:
         api_key: str,
         *,
         post=None,
+        get=None,
         max_retries: int = 3,
         backoff: float = 0.5,
         sleep=time.sleep,
@@ -53,6 +66,7 @@ class AcuteClient:
         self._base = base_url.rstrip("/")
         self._key = api_key
         self._post = post or _httpx_post
+        self._get = get or _httpx_get
         self._max_retries = max_retries
         self._backoff = backoff
         self._sleep = sleep
@@ -89,3 +103,14 @@ class AcuteClient:
 
     def upsert_resource_map(self, body: dict) -> Result:
         return self._send(RESOURCE_MAP_PATH, body)
+
+    def list_imports(self, provider: str = "aws") -> Result:
+        """GET recent import batches — a read-only auth/connectivity probe.
+        Returns ``Result(status_code=0, ...)`` on a transport failure so callers
+        can distinguish 'can't reach Acute' from an HTTP error."""
+        url = f"{self._base}{IMPORTS_PATH}?cloud_provider={provider}"
+        try:
+            status, body = self._get(url, self._headers())
+        except Exception as exc:
+            return Result(status_code=0, body={"error": str(exc)})
+        return Result(status_code=status, body=body if body is not None else {})

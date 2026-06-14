@@ -87,3 +87,25 @@ def test_resource_map_url_and_no_tenant():
     url, _, body = rec.calls[0]
     assert url.endswith(RESOURCE_MAP_PATH)
     assert "tenant_id" not in body
+
+
+def test_list_imports_get_url_and_bearer():
+    captured = {}
+
+    def fake_get(url, headers):
+        captured["url"], captured["headers"] = url, headers
+        return (200, [])
+
+    res = AcuteClient("https://acute.example", "k", get=fake_get).list_imports("aws")
+    assert res.status_code == 200
+    assert "/api/v1/cloud-billing/imports?cloud_provider=aws" in captured["url"]
+    assert captured["headers"]["Authorization"] == "Bearer k"
+
+
+def test_list_imports_transport_error_returns_status_0():
+    def boom(url, headers):
+        raise ConnectionError("down")
+
+    res = AcuteClient("https://acute.example", "k", get=boom).list_imports()
+    assert res.status_code == 0
+    assert "down" in res.body["error"]

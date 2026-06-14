@@ -24,6 +24,9 @@ moo-cloud-bill init                 # hidden prompt → persisted chmod 600
 # 2. Set up (or reuse) the CUR. Discovery-first: reuses an existing CUR if found.
 moo-cloud-bill configure            # --dry-run to preview without mutating
 
+# (optional) confirm Acute is reachable + your key works (and whether the CUR has data yet):
+moo-cloud-bill verify
+
 # 3. After AWS delivers the first CUR (~24–48h), push it on a schedule:
 moo-cloud-bill push                 # --dry-run to preview the batches
 

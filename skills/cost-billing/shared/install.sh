@@ -1696,6 +1696,12 @@ maybe_setup_cur() {
   echo "  Now capture your Moolabs API key (Moolabs UI → API Keys) so 'push' can send data:"
   "${mcb_cmd[@]}" init || true
 
+  # Test that it actually works: Acute reachability + auth now (the part most
+  # likely misconfigured). The first CUR delivers in ~24-48h, so a real data push
+  # can't be validated yet — verify reports CUR-data readiness too.
+  echo "  Verifying the Acute connection…"
+  "${mcb_cmd[@]}" "${profile_args[@]}" verify || echo "  (verify reported an issue — see above; re-run: moo-cloud-bill verify)"
+
   echo "  Setup done. After the CUR delivers (~24–48h), schedule:  moo-cloud-bill push  (cron; profile persisted by configure)."
 }
 maybe_setup_cur
