@@ -1679,15 +1679,24 @@ maybe_setup_cur() {
     echo "    (aws CLI not found — ensure your AWS credentials are valid before configure)"
   fi
 
-  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
-  local rerun="moo-cloud-bill ${aws_profile:+--profile $aws_profile} configure"
+  # One command prefix for both the installed entry point and the from-source run.
+  local mcb_cmd
   if command -v moo-cloud-bill >/dev/null 2>&1; then
-    moo-cloud-bill "${profile_args[@]}" configure || echo "  (configure did not finish — re-run later:  $rerun)"
+    mcb_cmd=(moo-cloud-bill)
   else
-    PYTHONPATH="$cli_dir/src" python3 -m moo_cloud_bill "${profile_args[@]}" configure \
-      || echo "  (configure did not finish — re-run later:  $rerun)"
+    mcb_cmd=(env "PYTHONPATH=$cli_dir/src" python3 -m moo_cloud_bill)
   fi
-  echo "  For ongoing ingestion:  moo-cloud-bill init  then schedule  moo-cloud-bill push  (cron; profile persisted by configure)."
+
+  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
+  "${mcb_cmd[@]}" "${profile_args[@]}" configure \
+    || echo "  (configure did not finish — re-run later:  moo-cloud-bill ${aws_profile:+--profile $aws_profile} configure)"
+
+  # Capture the Moolabs API key (separate from AWS creds) so push/seed can reach
+  # Acute. init has its own skip path if you don't have the key yet.
+  echo "  Now capture your Moolabs API key (Moolabs UI → API Keys) so 'push' can send data:"
+  "${mcb_cmd[@]}" init || true
+
+  echo "  Setup done. After the CUR delivers (~24–48h), schedule:  moo-cloud-bill push  (cron; profile persisted by configure)."
 }
 maybe_setup_cur
 echo ""
