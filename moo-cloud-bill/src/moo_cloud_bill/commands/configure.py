@@ -130,15 +130,7 @@ def _resolve_column_map(s3, bucket, prefix, report_name, column_map_path, *, out
         # Only "manifest not delivered yet" should fall back to defaults. A real
         # error (AccessDenied, wrong bucket) must surface, not be masked as
         # "pre-first-delivery" — which would silently default the column map.
-        if not _is_missing_manifest(exc):
+        if not aws.is_missing_manifest(exc):
             raise
         out("No CUR manifest yet (pre-first-delivery) — using documented defaults.")
         return dict(DEFAULT_COLUMN_MAP)
-
-
-def _is_missing_manifest(exc: Exception) -> bool:
-    if isinstance(exc, (KeyError, FileNotFoundError)):
-        return True
-    resp = getattr(exc, "response", None)
-    code = resp.get("Error", {}).get("Code") if isinstance(resp, dict) else None
-    return code in ("NoSuchKey", "404", "NotFound")

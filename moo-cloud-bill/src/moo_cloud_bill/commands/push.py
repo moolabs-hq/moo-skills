@@ -109,7 +109,12 @@ def _list_cur_object_keys(s3, bucket, prefix, report_name) -> list[str]:
     """
     try:
         manifest = aws.read_manifest(s3, bucket, prefix, report_name)
-    except Exception:
+    except Exception as exc:
+        # Only "manifest not delivered yet" may fall back to the glob. A real error
+        # (AccessDenied, throttle, connection) must surface — silently globbing
+        # would re-introduce the stale-assembly double-count with no alert.
+        if not aws.is_missing_manifest(exc):
+            raise
         manifest = None
     report_keys = [k for k in (manifest or {}).get("reportKeys", []) if str(k).endswith(".parquet")]
     if report_keys:

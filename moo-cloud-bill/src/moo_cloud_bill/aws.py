@@ -67,3 +67,14 @@ def iter_cur_rows(s3, bucket: str, key: str):
 
 def _read_body(body) -> bytes:
     return body.read()
+
+
+def is_missing_manifest(exc: Exception) -> bool:
+    """True iff exc means 'CUR manifest not delivered yet' (vs a real error like
+    AccessDenied / throttle / connection failure, which must NOT be swallowed).
+    """
+    if isinstance(exc, (KeyError, FileNotFoundError)):
+        return True
+    resp = getattr(exc, "response", None)
+    code = resp.get("Error", {}).get("Code") if isinstance(resp, dict) else None
+    return code in ("NoSuchKey", "404", "NotFound")

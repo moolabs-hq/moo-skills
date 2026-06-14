@@ -38,6 +38,8 @@ class FakeS3Objects:
         return {"Contents": [{"Key": self.key}, {"Key": "ignore/Manifest.json"}]}
 
     def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.endswith("-Manifest.json"):
+            raise KeyError("no manifest yet")  # → glob fallback (these tests cover that path)
         return {"Body": _Body(self.data)}
 
 
@@ -138,6 +140,25 @@ def test_manifest_reportkeys_dedups_stale_assemblies():
     client = RecordingAcuteClient()
     run_push(_config(), "k", clients={"s3": s3}, column_map=CM, client=client)
     assert client.import_calls[0].rows[0].cost == __import__("decimal").Decimal("5.00")  # not 10.00
+
+
+def test_access_denied_on_manifest_does_not_silently_glob():
+    # A real S3 error must propagate, not fall back to the (double-counting) glob.
+    import pytest
+
+    class _AccessDenied(Exception):
+        def __init__(self):
+            self.response = {"Error": {"Code": "AccessDenied"}}
+
+    class FakeS3Denied:
+        def get_object(self, Bucket, Key):  # noqa: N803
+            raise _AccessDenied()
+
+        def list_objects_v2(self, **kwargs):
+            return {"Contents": [{"Key": "cost/hourly/r/asm1/data.parquet"}]}
+
+    with pytest.raises(_AccessDenied):
+        read_cur_rows(_config(), {"s3": FakeS3Denied()})
 
 
 def test_run_push_end_to_end_aggregates_and_posts():
