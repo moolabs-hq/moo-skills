@@ -1,9 +1,26 @@
+import pytest
+
 from moo_cloud_bill.config import (
     DEFAULT_ACUTE_BASE,
     Config,
+    acute_base_from_domain,
     load_config,
     save_config,
 )
+
+
+@pytest.mark.parametrize("domain,expected", [
+    ("dev.moolabs.com", "https://acute.dev.moolabs.com"),
+    ("https://dev.moolabs.com/", "https://acute.dev.moolabs.com"),
+    ("acute.dev.moolabs.com", "https://acute.dev.moolabs.com"),  # already acute.
+    ("moolabs.com", "https://acute.moolabs.com"),
+])
+def test_acute_base_from_domain(domain, expected):
+    assert acute_base_from_domain(domain) == expected
+
+
+def test_acute_base_from_blank_domain_falls_back():
+    assert acute_base_from_domain("  ") == DEFAULT_ACUTE_BASE
 
 
 def test_defaults_when_no_file(tmp_path):

@@ -16,6 +16,20 @@ DEFAULT_ACUTE_BASE = "https://api.moolabs.com"
 CONFIG_FILENAME = "moo-cloud-bill.toml"
 
 
+def acute_base_from_domain(domain: str) -> str:
+    """Form acute's base URL from a Moolabs base domain. acute has its own public
+    ingress at ``acute.<domain>`` (NOT the BFF at api.<domain>, which doesn't proxy
+    cloud-billing). ``dev.moolabs.com`` → ``https://acute.dev.moolabs.com``.
+    Tolerates a scheme, trailing slash, or an already-``acute.`` host."""
+    host = domain.strip().rstrip("/")
+    host = host.removeprefix("https://").removeprefix("http://").rstrip("/")
+    if not host:
+        return DEFAULT_ACUTE_BASE
+    if not host.startswith("acute."):
+        host = f"acute.{host}"
+    return f"https://{host}"
+
+
 @dataclass(frozen=True)
 class Config:
     bucket: str | None = None

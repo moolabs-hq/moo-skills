@@ -23,6 +23,13 @@ def test_reuse_path_does_not_create(tmp_path):
     assert cl["cur"].put_calls == []  # nothing created
 
 
+def test_acute_base_formed_from_domain(tmp_path):
+    cl = clients(report_definitions=[USABLE_CUR])
+    ui = ScriptedUI(confirms=[True], answers=["USD", "dev.moolabs.com"])
+    cfg = run_configure(cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml")
+    assert cfg.acute_base == "https://acute.dev.moolabs.com"
+
+
 def test_create_path_calls_put_report_definition(tmp_path):
     cl = clients(report_definitions=[], buckets=["mybucket"])
     ui = ScriptedUI(

@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import aws
-from ..config import DEFAULT_ACUTE_BASE, Config, save_config
+from ..config import DEFAULT_ACUTE_BASE, Config, acute_base_from_domain, save_config
 from ..cur_columns import DEFAULT_COLUMN_MAP, build_column_map_from_manifest, save_column_map
 from ..report_definition import (
     build_bucket_policy,
@@ -68,7 +68,11 @@ def run_configure(
     save_column_map(column_map, Path(column_map_path))
 
     currency = ui.ask("Reporting currency", default="USD") or "USD"
-    acute_base = ui.ask("Acute base URL", default=DEFAULT_ACUTE_BASE) or DEFAULT_ACUTE_BASE
+    # acute is reachable at acute.<domain> (its own ingress), NOT the BFF at
+    # api.<domain> — the BFF doesn't proxy cloud-billing.
+    base_domain = ui.ask("Moolabs base domain (e.g. dev.moolabs.com)", default="")
+    acute_base = acute_base_from_domain(base_domain) if base_domain.strip() else DEFAULT_ACUTE_BASE
+    ui.say(f"Acute endpoint: {acute_base}")
 
     cfg = Config(
         bucket=bucket, prefix=prefix, report_name=report_name, region=region,
