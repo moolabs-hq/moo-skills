@@ -13,11 +13,13 @@ from decimal import Decimal
 
 from .models import CloudCostRow, ImportBatch
 
-GrainKey = tuple[str, str, str, str, str]
+GrainKey = tuple[str, str, str, str]
 
 # Logical fields the mapper cannot proceed without. A column-map that points any
 # of these at a column absent from the CUR row must fail LOUDLY — silently
 # defaulting `cost` to 0 would post a whole CUR as zero-cost and Acute would 201 it.
+# (`currency` is intentionally NOT required: if a non-standard CUR omits it, falling
+# back to the reporting currency — i.e. "no FX" — is a sensible, non-corrupting default.)
 REQUIRED_COLUMNS = ("service_name", "cost", "usage_start")
 
 
@@ -44,11 +46,14 @@ def extract_tags(raw: dict, prefix: str) -> dict:
     }
 
 
-def _grain_key(service: str, resource_id, region, usage_type, currency) -> GrainKey:
-    # Currency is part of the grain: Acute locks FX per row, so two same-resource
-    # lines in different currencies must NOT be summed into one (mixed-currency
-    # CUR lines occur e.g. with AWS Marketplace reseller items).
-    return (service, resource_id or "", region or "", usage_type or "", currency)
+def _grain_key(service: str, resource_id, region, usage_type) -> GrainKey:
+    # Matches Acute's partial-unique index EXACTLY (tenant+period+service+
+    # COALESCE(resource_id,'')+COALESCE(region,'')+COALESCE(usage_type,'')).
+    # Currency is NOT in the index, so it must NOT be in this key — else a
+    # same-resource mixed-currency pair becomes a dup-grain row that aborts the
+    # whole daily batch. Mixed currency on one grain is handled as an anomaly
+    # in build_daily_batches (skipped + recorded), never summed.
+    return (service, resource_id or "", region or "", usage_type or "")
 
 
 def _require_columns(row: dict, col: dict) -> None:
@@ -102,7 +107,7 @@ def build_daily_batches(
             continue
 
         start, end = day_bounds(parse_timestamp(raw[col["usage_start"]]))
-        grain = _grain_key(service, resource_id, region, usage_type, currency)
+        grain = _grain_key(service, resource_id, region, usage_type)
         day = buckets.setdefault((start, end), {})
         acc = day.get(grain)
         if acc is None:
@@ -115,6 +120,17 @@ def build_daily_batches(
                 "cost": cost,
                 "tags": extract_tags(raw, tags_prefix),
             }
+        elif acc["currency"] != currency:
+            # Same Acute grain, different currency — Acute can't store both (currency
+            # isn't in its index) and summing across currencies is meaningless. Skip
+            # + record; near-impossible in real CUR (a resource bills in one currency).
+            credits.append({
+                "service": service,
+                "resource_id": resource_id,
+                "cost": str(cost),
+                "currency": currency,
+                "reason": f"currency_conflict: grain already {acc['currency']}, line is {currency}",
+            })
         else:
             acc["cost"] += cost  # SUM to the unique-index grain (C1)
 

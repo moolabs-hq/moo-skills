@@ -69,15 +69,18 @@ def test_tags_and_currency_carried():
     assert r.tags["user_tenant"] == "t1"
 
 
-def test_different_currencies_same_grain_are_not_summed():
-    # Mixed-currency lines (e.g. AWS Marketplace reseller) must stay separate.
+def test_currency_conflict_same_grain_is_skipped_not_summed():
+    # Acute's unique index excludes currency, so two same-grain lines in different
+    # currencies can't both be stored. They must NOT be summed (round-1 bug) and
+    # must NOT become a dup-grain row that aborts the batch (round-2 CRITICAL).
+    # Resolution: keep the first, skip + record the conflict.
     rows = [row(1, currency="USD"), row(2, currency="CAD")]
-    batches, _ = build_daily_batches(rows, CM)
+    batches, credits = build_daily_batches(rows, CM)
     assert len(batches) == 1
-    assert len(batches[0].rows) == 2
-    by_ccy = {r.currency: r.cost for r in batches[0].rows}
-    assert by_ccy["USD"] == Decimal("1")
-    assert by_ccy["CAD"] == Decimal("2")
+    assert len(batches[0].rows) == 1
+    assert batches[0].rows[0].cost == Decimal("1")        # first kept, NOT summed to 3
+    assert batches[0].rows[0].currency == "USD"
+    assert any("currency_conflict" in c["reason"] for c in credits)
 
 
 def test_missing_cost_column_fails_loudly():

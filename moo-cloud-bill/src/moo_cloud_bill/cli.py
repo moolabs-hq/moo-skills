@@ -46,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch(args)
+    except (KeyError, ValueError) as exc:
+        # Loud, intentional domain errors (e.g. column-map mismatch) — show a
+        # clean message + non-zero exit so cron alerts, not a raw traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _dispatch(args) -> int:
     config_dir = Path(args.config) if args.config else default_config_dir()
     overrides = {"aws_profile": args.profile, "acute_base": args.acute_base}
 

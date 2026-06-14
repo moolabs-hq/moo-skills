@@ -19,7 +19,9 @@ _FIELDS = (
 
 def _to_dict(f: Finding) -> dict:
     d = {k: getattr(f, k) for k in _FIELDS}
-    d["monthly_cost_estimate_usd"] = float(f.monthly_cost_estimate_usd)
+    # str(), not float(): keep the Decimal exact in YAML (float() would round-trip
+    # through IEEE-754). _from_dict reads it back via Decimal(str(...)).
+    d["monthly_cost_estimate_usd"] = str(f.monthly_cost_estimate_usd)
     return d
 
 
