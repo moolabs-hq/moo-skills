@@ -41,6 +41,23 @@ class FakeS3Objects:
         return {"Body": _Body(self.data)}
 
 
+class FakeS3Manifest:
+    """Serves a CUR manifest for the *-Manifest.json key and parquet for the rest."""
+
+    def __init__(self, manifest, objects):
+        self.manifest = manifest
+        self.objects = objects
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        import json
+        if Key.endswith("-Manifest.json"):
+            return {"Body": _Body(json.dumps(self.manifest).encode())}
+        return {"Body": _Body(self.objects[Key])}
+
+    def list_objects_v2(self, **kwargs):
+        return {"Contents": [{"Key": k} for k in self.objects]}
+
+
 def _config():
     return Config(bucket="b", prefix="cost/hourly", report_name="r", acute_base="https://x")
 
@@ -96,6 +113,31 @@ def test_typed_parquet_columns_float64_and_datetime():
     batches, _ = build_daily_batches(rows, CM)
     assert batches[0].rows[0].cost == Decimal("0.00015")    # Decimal preserved, no float drift
     assert batches[0].billing_period_start.isoformat() == "2026-05-14T00:00:00+00:00"
+
+
+def test_manifest_reportkeys_dedups_stale_assemblies():
+    # CREATE_NEW_REPORT retains old assemblies; reading both double-counts cost.
+    # The manifest's reportKeys names only the current assembly.
+    one_row = [{
+        CM["service_name"]: "AmazonS3", CM["resource_id"]: "r1",
+        CM["region"]: "us-east-1", CM["usage_type"]: "DataTransfer",
+        CM["cost"]: "5.00", CM["currency"]: "USD",
+        CM["usage_start"]: "2026-05-14T03:00:00Z",
+    }]
+    pq_bytes = _parquet_bytes(one_row)
+    objects = {  # stale asm1 + current asm2, same row
+        "cost/hourly/r/asm1/data.parquet": pq_bytes,
+        "cost/hourly/r/asm2/data.parquet": pq_bytes,
+    }
+    manifest = {"reportKeys": ["cost/hourly/r/asm2/data.parquet"]}
+    s3 = FakeS3Manifest(manifest, objects)
+
+    rows = read_cur_rows(_config(), {"s3": s3})
+    assert len(rows) == 1  # current assembly only, not both
+
+    client = RecordingAcuteClient()
+    run_push(_config(), "k", clients={"s3": s3}, column_map=CM, client=client)
+    assert client.import_calls[0].rows[0].cost == __import__("decimal").Decimal("5.00")  # not 10.00
 
 
 def test_run_push_end_to_end_aggregates_and_posts():

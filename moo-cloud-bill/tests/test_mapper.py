@@ -108,6 +108,16 @@ def test_non_numeric_cost_raises_columnmaperror():
         build_daily_batches([r], CM)
 
 
+def test_malformed_usage_start_raises_columnmaperror():
+    import pytest
+
+    from moo_cloud_bill.errors import ColumnMapError
+    r = row(1)
+    r[CM["usage_start"]] = "not-a-date"
+    with pytest.raises(ColumnMapError):
+        build_daily_batches([r], CM)
+
+
 def test_zero_cost_passes_through():
     batches, credits = build_daily_batches([row(0)], CM)
     assert len(batches[0].rows) == 1

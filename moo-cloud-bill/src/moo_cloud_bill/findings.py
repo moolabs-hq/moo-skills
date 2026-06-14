@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from .errors import MooCloudBillError
 from .models import Finding
 
 _FIELDS = (
@@ -63,5 +64,8 @@ def save_findings(
 
 
 def load_findings(path: Path) -> list[Finding]:
-    data = yaml.safe_load(Path(path).read_text()) or {}
+    p = Path(path)
+    if not p.exists():
+        raise MooCloudBillError(f"No findings file at {p} — run `scan` first.")
+    data = yaml.safe_load(p.read_text()) or {}
     return [_from_dict(d) for d in data.get("findings", [])]

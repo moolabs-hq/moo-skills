@@ -99,6 +99,25 @@ def run_push(config, api_key, *, clients=None, column_map, client=None, dry_run=
 
 
 def _list_cur_object_keys(s3, bucket, prefix, report_name) -> list[str]:
+    """Parquet keys for the CURRENT CUR assembly only.
+
+    CREATE_NEW_REPORT retains prior assembly folders in S3; a blind glob would read
+    stale assemblies and DOUBLE-COUNT line-items (the mapper sums by grain with no
+    row-identity dedup). The manifest's `reportKeys` lists exactly the current
+    assembly's files — the authoritative dedup handle. Glob only as a pre-first-
+    delivery fallback (single assembly, so no double-count).
+    """
+    try:
+        manifest = aws.read_manifest(s3, bucket, prefix, report_name)
+    except Exception:
+        manifest = None
+    report_keys = [k for k in (manifest or {}).get("reportKeys", []) if str(k).endswith(".parquet")]
+    if report_keys:
+        return report_keys
+    return _glob_parquet_keys(s3, bucket, prefix, report_name)
+
+
+def _glob_parquet_keys(s3, bucket, prefix, report_name) -> list[str]:
     token = None
     keys: list[str] = []
     base = f"{prefix}/{report_name}/"

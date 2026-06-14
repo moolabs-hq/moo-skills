@@ -1,7 +1,15 @@
 from decimal import Decimal
 
+import pytest
+
+from moo_cloud_bill.errors import MooCloudBillError
 from moo_cloud_bill.findings import load_findings, save_findings
 from moo_cloud_bill.models import Finding
+
+
+def test_load_missing_findings_raises_clean_error(tmp_path):
+    with pytest.raises(MooCloudBillError):
+        load_findings(tmp_path / "nope.yaml")
 
 
 def test_findings_round_trip(tmp_path):

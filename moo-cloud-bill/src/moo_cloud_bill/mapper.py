@@ -24,10 +24,20 @@ GrainKey = tuple[str, str, str, str]
 REQUIRED_COLUMNS = ("service_name", "cost", "usage_start")
 
 
-def parse_timestamp(value: str) -> datetime:
-    """Parse a CUR ISO-8601 timestamp to an aware UTC datetime."""
+def parse_timestamp(value, col_name: str = "usage_start") -> datetime:
+    """Parse a CUR timestamp (str or datetime) to an aware UTC datetime.
+
+    A null/malformed value means the column map points usage_start at the wrong
+    column → ColumnMapError (symmetric with parse_cost), not a bare ValueError.
+    """
     s = str(value).strip().replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError as exc:
+        raise ColumnMapError(
+            f"usage_start column '{col_name}' has non-date value {value!r} — "
+            f"the column map likely points 'usage_start' at the wrong column."
+        ) from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -120,7 +130,7 @@ def build_daily_batches(
             })
             continue
 
-        start, end = day_bounds(parse_timestamp(raw[col["usage_start"]]))
+        start, end = day_bounds(parse_timestamp(raw[col["usage_start"]], col["usage_start"]))
         grain = _grain_key(service, resource_id, region, usage_type)
         day = buckets.setdefault((start, end), {})
         acc = day.get(grain)
