@@ -23,6 +23,13 @@ def test_no_monetary_threshold_tiny_finding_surfaces():
     assert findings[0].monthly_cost_estimate_usd == Decimal("0.50")
 
 
+def test_null_cost_does_not_crash_scan():
+    # Sibling of the mapper null-cost fix: a null cost cell must not crash scan.
+    r = row(0)
+    r[CM["cost"]] = None
+    assert find_untagged([r], CM) == []
+
+
 def test_tagged_resource_is_not_flagged():
     findings = find_untagged([row(100, tags={"tenant": "t1"})], CM)
     assert findings == []

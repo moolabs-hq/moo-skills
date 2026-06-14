@@ -43,3 +43,25 @@ def test_failed_day_sets_exit_code():
     summary = push_batches(batches, credits, RecordingAcuteClient(status=500))
     assert summary.failed == 2
     assert summary.exit_code == 1
+
+
+def test_transport_error_on_one_day_does_not_skip_others():
+    from moo_cloud_bill.acute_client import Result
+
+    class FlakyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def import_batch(self, batch):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("down")  # retries already exhausted upstream
+            return Result(201, {})
+
+    batches, credits = build_daily_batches(_rows(), CM)  # two days
+    client = FlakyClient()
+    summary = push_batches(batches, credits, client)
+    assert client.calls == 2          # second day still attempted
+    assert summary.ok == 1
+    assert summary.failed == 1
+    assert summary.exit_code == 1

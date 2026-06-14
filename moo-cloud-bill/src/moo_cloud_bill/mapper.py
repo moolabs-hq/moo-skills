@@ -67,7 +67,7 @@ def _require_columns(row: dict, col: dict) -> None:
         )
 
 
-def _parse_cost(raw_value, col_name: str) -> Decimal:
+def parse_cost(raw_value, col_name: str) -> Decimal:
     # Null cost cell (pyarrow yields None) → zero; non-numeric → loud map error.
     if raw_value is None:
         return Decimal(0)
@@ -104,7 +104,7 @@ def build_daily_batches(
             validated = True
 
         service = str(raw[col["service_name"]] or "")
-        cost = _parse_cost(raw[col["cost"]], col["cost"])
+        cost = parse_cost(raw[col["cost"]], col["cost"])
         resource_id = raw.get(col["resource_id"]) or None
         region = raw.get(col["region"]) or None
         usage_type = raw.get(col["usage_type"]) or None
@@ -142,7 +142,9 @@ def build_daily_batches(
             # real CUR (a resource bills in one currency).
             if cost > acc["cost"]:
                 loser_cost, loser_ccy, kept_ccy = acc["cost"], acc["currency"], currency
+                # Promote the new row fully — its currency AND its tags win together.
                 acc["cost"], acc["currency"] = cost, currency
+                acc["tags"] = extract_tags(raw, tags_prefix)
             else:
                 loser_cost, loser_ccy, kept_ccy = cost, currency, acc["currency"]
             credits.append({

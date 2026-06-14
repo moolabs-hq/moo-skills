@@ -28,8 +28,11 @@ class PushSummary:
 def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushSummary:
     # `credits` carries two distinct kinds of excluded line; report them
     # separately so dropped spend (currency conflict) isn't hidden as a "credit".
-    conflicts = [c for c in credits if str(c.get("reason", "")).startswith("currency_conflict")]
-    negatives = [c for c in credits if c not in conflicts]
+    def _is_conflict(c):
+        return str(c.get("reason", "")).startswith("currency_conflict")
+
+    conflicts = [c for c in credits if _is_conflict(c)]
+    negatives = [c for c in credits if not _is_conflict(c)]
     summary = PushSummary(
         skipped_credits=len(negatives), skipped_conflicts=len(conflicts), dry_run=dry_run
     )
@@ -38,7 +41,16 @@ def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushS
         if dry_run:
             out(f"[dry-run] would POST {day}: {len(batch.rows)} row(s)")
             continue
-        result = client.import_batch(batch)
+        try:
+            result = client.import_batch(batch)
+        except Exception as exc:
+            # Transport failure exhausted retries. Record this day failed and keep
+            # going so one bad day doesn't skip the rest of the month (symmetry
+            # with the 5xx path); non-zero exit still alerts cron.
+            summary.failed += 1
+            summary.failed_days.append((day, -1))
+            out(f"{day}: FAILED transport — {exc}")
+            continue
         if result.ok:
             summary.ok += 1
             out(f"{day}: {result.status_code} ({len(batch.rows)} row(s))")

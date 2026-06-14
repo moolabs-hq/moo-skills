@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..errors import ColumnMapError
 from ..findings import save_findings
-from ..mapper import extract_tags
+from ..mapper import extract_tags, parse_cost
 from ..models import Finding
 
 # Tags that, if present and non-empty, mean a line IS attributable.
@@ -55,7 +55,7 @@ def find_untagged(
                         f"scan: column map field '{field}'→'{col[field]}' absent from CUR row"
                     )
             validated = True
-        cost = Decimal(str(raw[col["cost"]]))
+        cost = parse_cost(raw[col["cost"]], col["cost"])  # null→0, non-numeric→ColumnMapError
         if cost <= 0:
             continue
         service = str(raw[col["service_name"]] or "")
