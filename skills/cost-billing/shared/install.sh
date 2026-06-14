@@ -1548,7 +1548,27 @@ echo ""
 # `configure` wizard (creates/reuses the AWS Legacy CUR; mutates AWS only on the
 # engineer's explicit confirmation). Opt-in: always asks interactively (skipped
 # only when there's no TTY). Engineering/all personas only.
+list_aws_profiles() {
+  # Prefer the AWS CLI (authoritative); fall back to parsing ~/.aws files so this
+  # works even if the CLI isn't installed. Portable awk (BSD + GNU), no bash 4.
+  if command -v aws >/dev/null 2>&1; then
+    local out; out="$(aws configure list-profiles 2>/dev/null)"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
+  fi
+  local cfg="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+  local creds="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
+  {
+    [[ -f "$cfg" ]]   && awk -F'[][]' '/^\[/{p=$2; sub(/^profile[ \t]+/,"",p); print p}' "$cfg"
+    [[ -f "$creds" ]] && awk -F'[][]' '/^\[/{print $2}' "$creds"
+  } 2>/dev/null | awk 'NF' | sort -u
+}
+
 maybe_setup_cur() {
+  # Run ONCE per invocation — this function sits inside the per-platform install
+  # loop, but the CUR setup is platform-independent (it's a customer runtime tool),
+  # so it must not re-prompt/re-install/re-configure for each detected platform.
+  [[ "${_CUR_SETUP_RAN:-0}" == "1" ]] && return 0
+  _CUR_SETUP_RAN=1
   [[ $PACKAGE_MODE -eq 1 || $UNINSTALL -eq 1 ]] && return 0
   # CUR setup is the customer engineer's job — only the engineering persona (who
   # also installs cost-billing-cloud-bill). Skip finance/CPO/team-product
@@ -1594,14 +1614,50 @@ maybe_setup_cur() {
     return 0
   fi
 
-  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
-  if command -v moo-cloud-bill >/dev/null 2>&1; then
-    moo-cloud-bill configure || echo "  (configure did not finish — re-run later:  moo-cloud-bill configure)"
+  # boto3 needs valid credentials before configure can call STS. Let the engineer
+  # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
+  # token doesn't blow up the wizard.
+  local _profiles=() _p _i _choice
+  while IFS= read -r _p; do [[ -n "$_p" ]] && _profiles+=("$_p"); done < <(list_aws_profiles)
+
+  local aws_profile=""
+  if [[ ${#_profiles[@]} -gt 0 ]]; then
+    echo "  Select an AWS profile for boto3:"
+    _i=1
+    for _p in "${_profiles[@]}"; do echo "    $_i) $_p"; _i=$((_i+1)); done
+    echo "    $_i) (none — use the default credential chain)"
+    printf "  Choice [1-%d]: " "$_i"
+    read -r _choice
+    if [[ "$_choice" =~ ^[0-9]+$ ]] && (( _choice >= 1 && _choice < _i )); then
+      aws_profile="${_profiles[$((_choice - 1))]}"
+    fi   # the "none" option or any other input → empty → default credential chain
   else
-    PYTHONPATH="$cli_dir/src" python3 -m moo_cloud_bill configure \
-      || echo "  (configure did not finish — re-run later:  moo-cloud-bill configure)"
+    echo "  No AWS profiles found in ~/.aws — using the default credential chain."
   fi
-  echo "  For ongoing ingestion:  moo-cloud-bill init  then schedule  moo-cloud-bill push  (cron)."
+  local profile_args=()
+  [[ -n "$aws_profile" ]] && profile_args=(--profile "$aws_profile")
+
+  if command -v aws >/dev/null 2>&1; then
+    printf "  Run 'aws sso login %s' now? [Y/n]: " "${aws_profile:+--profile $aws_profile}"
+    read -r ans
+    case "$ans" in
+      n|N|no|NO) echo "    Skipping SSO login — ensure your credentials are valid." ;;
+      *) aws sso login "${profile_args[@]}" \
+           || echo "    ! 'aws sso login' failed (non-SSO profile or error) — continuing; configure will report if creds are invalid." ;;
+    esac
+  else
+    echo "    (aws CLI not found — ensure your AWS credentials are valid before configure)"
+  fi
+
+  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
+  local rerun="moo-cloud-bill ${aws_profile:+--profile $aws_profile} configure"
+  if command -v moo-cloud-bill >/dev/null 2>&1; then
+    moo-cloud-bill "${profile_args[@]}" configure || echo "  (configure did not finish — re-run later:  $rerun)"
+  else
+    PYTHONPATH="$cli_dir/src" python3 -m moo_cloud_bill "${profile_args[@]}" configure \
+      || echo "  (configure did not finish — re-run later:  $rerun)"
+  fi
+  echo "  For ongoing ingestion:  moo-cloud-bill init  then schedule  moo-cloud-bill push  (cron; profile persisted by configure)."
 }
 maybe_setup_cur
 echo ""

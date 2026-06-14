@@ -55,6 +55,14 @@ def main(argv=None) -> int:
         # (KeyError, AttributeError, …) still surface as tracebacks.
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:
+        # Common AWS auth/connection failures (expired SSO token, no creds) are
+        # operator-actionable, not bugs — show a clean message, not a traceback.
+        friendly = aws.as_friendly_error(exc)
+        if friendly is None:
+            raise
+        print(f"error: {friendly}", file=sys.stderr)
+        return 1
 
 
 def _dispatch(args) -> int:

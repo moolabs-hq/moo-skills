@@ -7,6 +7,40 @@ from __future__ import annotations
 import io
 import json
 
+from .errors import MooCloudBillError
+
+# botocore exception class names that mean "credentials/connection problem, not a
+# bug" — matched by name so we don't hard-import botocore here.
+_AUTH_EXC_NAMES = {
+    "NoCredentialsError", "PartialCredentialsError", "CredentialRetrievalError",
+    "TokenRetrievalError", "SSOTokenLoadError", "UnauthorizedSSOTokenError",
+    "ProfileNotFound", "EndpointConnectionError", "ConnectTimeoutError",
+    "ReadTimeoutError", "SSOError",
+}
+_AUTH_ERR_CODES = {
+    "AccessDenied", "UnauthorizedOperation", "ExpiredToken",
+    "ExpiredTokenException", "InvalidClientTokenId", "AuthFailure",
+    "RequestExpired", "InvalidAccessKeyId", "SignatureDoesNotMatch",
+}
+
+
+def as_friendly_error(exc: Exception) -> MooCloudBillError | None:
+    """Map a common AWS auth/connection failure to a clean, actionable error.
+    Returns None for anything genuinely unexpected (let it surface as a traceback)."""
+    if type(exc).__name__ in _AUTH_EXC_NAMES:
+        return MooCloudBillError(
+            f"AWS credentials/connection problem ({type(exc).__name__}): {exc}\n"
+            "  Fix: run `aws sso login` (or `aws configure` / set AWS_PROFILE), then retry."
+        )
+    resp = getattr(exc, "response", None)
+    code = resp.get("Error", {}).get("Code") if isinstance(resp, dict) else None
+    if code in _AUTH_ERR_CODES:
+        return MooCloudBillError(
+            f"AWS authorization problem ({code}): {exc}\n"
+            "  Fix: refresh credentials (`aws sso login`) or check IAM permissions, then retry."
+        )
+    return None
+
 
 def make_clients(*, profile: str | None = None, region: str = "us-east-1") -> dict:
     """Build real boto3 clients (lazy import). CUR API is us-east-1 only."""
