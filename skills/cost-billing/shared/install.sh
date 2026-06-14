@@ -17,7 +17,8 @@
 #   ./install.sh --no-prune                   # don't auto-remove stale cost-billing-* skills
 #                                             # (default: prune skills not in the persona's install list,
 #                                             # e.g. deprecated cost-billing-bootstrap or cost-billing-reconcile)
-#   (engineering/all personas are asked interactively whether to pip-install the moo-cloud-bill CUR CLI)
+#   (engineering/all personas are asked interactively whether to set up the AWS CUR now —
+#    installs the moo-cloud-bill CLI and runs its `configure` wizard)
 #   ./install.sh --package                    # skip local install; produce .zip bundles
 #                                             # uploadable to Claude Desktop / web Projects
 #                                             # (Settings → Skills → drag-and-drop). Each .zip
@@ -1409,7 +1410,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   fi
   if [[ -d "$SUITE_SRC_DIR/cloud-bill-cli" ]] \
      && [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]]; then
-    echo "[dry-run] would prompt to pip-install the moo-cloud-bill CLI from $SUITE_SRC_DIR/cloud-bill-cli"
+    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, then run 'configure')"
   fi
   exit 0
 fi
@@ -1542,57 +1543,67 @@ echo "  cost-billing-shared/three-role-review.md"
 echo "  cost-billing-shared/gaps-tracker.md"
 echo ""
 
-# ── Optional: the moo-cloud-bill CUR-ingestion CLI ──────────────────────────
-# A customer-run Python CLI (NOT an agent skill) that reads an AWS Legacy CUR and
-# pushes it to Acute. Opt-in: always asks interactively (skipped only when there's
-# no TTY). Engineering/all personas only (who also get cost-billing-cloud-bill).
-maybe_install_cli() {
+# ── Optional: set up the AWS CUR via the moo-cloud-bill CLI ─────────────────
+# Installs the customer-run CLI (NOT an agent skill) and runs its discovery-first
+# `configure` wizard (creates/reuses the AWS Legacy CUR; mutates AWS only on the
+# engineer's explicit confirmation). Opt-in: always asks interactively (skipped
+# only when there's no TTY). Engineering/all personas only.
+maybe_setup_cur() {
   [[ $PACKAGE_MODE -eq 1 || $UNINSTALL -eq 1 ]] && return 0
-  # CLI is the customer engineer's CUR-ingestion runtime — only relevant to the
-  # engineering persona (who also installs cost-billing-cloud-bill). Skip for
-  # finance/CPO/team-product (different machines in the chain-handoff design).
+  # CUR setup is the customer engineer's job — only the engineering persona (who
+  # also installs cost-billing-cloud-bill). Skip finance/CPO/team-product
+  # (different machines in the chain-handoff design).
   case "$PERSONA" in engineering|team-engineer|engineer|all) ;; *) return 0 ;; esac
   local cli_dir="$SUITE_SRC_DIR/cloud-bill-cli"
   [[ -d "$cli_dir" ]] || return 0   # not bundled in this layout
 
-  # Always ask interactively; only a non-interactive shell (no TTY) skips it.
-  if [[ ! -t 0 ]]; then
-    echo "moo-cloud-bill CLI: skipped (non-interactive). Later:  pip install \"$cli_dir\""
+  # Defensive: never mutate during a dry-run (the dry-run block exits earlier and
+  # previews this step, so this guard only matters if the call site ever moves).
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[dry-run] would offer to install the CLI and run 'moo-cloud-bill configure'."
     return 0
   fi
-  echo "─── Optional CLI ───────────────────────────────────────────────────"
-  echo "moo-cloud-bill: customer-run CUR → Acute ingestion (pip CLI, not a skill)."
-  printf "Install it now via pip? [y/N]: "
+
+  # Always ask interactively; only a non-interactive shell (no TTY) skips it.
+  if [[ ! -t 0 ]]; then
+    echo "AWS CUR setup: skipped (non-interactive). Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"
+    return 0
+  fi
+  echo "─── AWS Cost & Usage Report setup ──────────────────────────────────"
+  echo "moo-cloud-bill configures your AWS CUR and pushes it to Acute (needs AWS creds)."
+  printf "Configure the CUR now (installs the CLI, then runs its discovery-first wizard)? [y/N]: "
   read -r reply
   case "$reply" in
     y|Y|yes|YES) ;;
-    *) echo "Skipped. Later:  pip install \"$cli_dir\""; return 0 ;;
+    *) echo "Skipped. Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"; return 0 ;;
   esac
 
-  local installer=""
-  if command -v pipx >/dev/null 2>&1; then installer="pipx install"
-  elif command -v pip  >/dev/null 2>&1; then installer="pip install"
-  elif command -v pip3 >/dev/null 2>&1; then installer="pip3 install"
+  # Prefer pip into the active env so the command is immediately invocable here.
+  local pipcmd=""
+  if command -v pip  >/dev/null 2>&1; then pipcmd="pip install"
+  elif command -v pip3 >/dev/null 2>&1; then pipcmd="pip3 install"
+  elif command -v pipx >/dev/null 2>&1; then pipcmd="pipx install"
   else
-    echo "  ! pip/pipx not found — install the CLI manually:  pip install \"$cli_dir\"" >&2
+    echo "  ! pip not found — install + configure manually:  pip install \"$cli_dir\" && moo-cloud-bill configure" >&2
     return 0
   fi
 
-  if [[ $DRY_RUN -eq 1 ]]; then
-    echo "  [dry-run] would run:  $installer \"$cli_dir\""
+  echo "  Installing the CLI ($pipcmd)…"
+  if ! $pipcmd "$cli_dir"; then
+    echo "  ! CLI install failed — run manually:  $pipcmd \"$cli_dir\" && moo-cloud-bill configure" >&2
     return 0
   fi
 
-  echo "  Installing moo-cloud-bill ($installer)…"
-  if $installer "$cli_dir"; then
-    echo "  ✓ moo-cloud-bill installed. Next:"
-    echo "      moo-cloud-bill init                 # paste your Moolabs API key (from the Moolabs UI)"
-    echo "      moo-cloud-bill configure --dry-run  # preview CUR setup (no AWS mutation)"
+  echo "  Running the CUR configuration wizard (discovery-first; mutates AWS only on your confirmation)…"
+  if command -v moo-cloud-bill >/dev/null 2>&1; then
+    moo-cloud-bill configure || echo "  (configure did not finish — re-run later:  moo-cloud-bill configure)"
   else
-    echo "  ! CLI install failed — run manually:  $installer \"$cli_dir\"" >&2
+    PYTHONPATH="$cli_dir/src" python3 -m moo_cloud_bill configure \
+      || echo "  (configure did not finish — re-run later:  moo-cloud-bill configure)"
   fi
+  echo "  For ongoing ingestion:  moo-cloud-bill init  then schedule  moo-cloud-bill push  (cron)."
 }
-maybe_install_cli
+maybe_setup_cur
 echo ""
 
 if [[ $NO_BOOTSTRAP_CTA -eq 0 ]]; then
