@@ -222,6 +222,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ──────────────────────────────────────────────────────────────────────
+# Run-once coordination across the per-platform fan-out
+# ──────────────────────────────────────────────────────────────────────
+# The installer re-invokes itself ("$0 --platform X") once per detected platform,
+# so a shell variable can't guard "run this once" — each child is its own process.
+# A run id is exported by the top-level process and inherited by every child; an
+# atomic mkdir marker keyed to it ensures the CUR setup runs exactly once.
+if [[ -z "${_MCB_RUN_ID:-}" ]]; then
+  export _MCB_RUN_ID="$$"
+  _MCB_RUN_OWNER=1            # only the top-level process cleans the marker up
+fi
+_CUR_SETUP_MARKER="${TMPDIR:-/tmp}/.moo-cloud-bill-cur-setup.${_MCB_RUN_ID}"
+if [[ "${_MCB_RUN_OWNER:-0}" == "1" ]]; then
+  rm -rf "$_CUR_SETUP_MARKER" 2>/dev/null || true   # clean slate (stale PID reuse)
+  trap 'rm -rf "$_CUR_SETUP_MARKER" 2>/dev/null || true' EXIT
+fi
+
+# ──────────────────────────────────────────────────────────────────────
 # Platform detection
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1564,11 +1581,13 @@ list_aws_profiles() {
 }
 
 maybe_setup_cur() {
-  # Run ONCE per invocation — this function sits inside the per-platform install
-  # loop, but the CUR setup is platform-independent (it's a customer runtime tool),
-  # so it must not re-prompt/re-install/re-configure for each detected platform.
-  [[ "${_CUR_SETUP_RAN:-0}" == "1" ]] && return 0
-  _CUR_SETUP_RAN=1
+  # Run ONCE across the whole multi-platform fan-out. Each platform re-invokes the
+  # script as a separate process, so a shell var can't guard this — claim an atomic
+  # marker (mkdir is atomic) keyed to the shared run id. First process wins; the
+  # rest return immediately.
+  if ! mkdir "$_CUR_SETUP_MARKER" 2>/dev/null; then
+    return 0
+  fi
   [[ $PACKAGE_MODE -eq 1 || $UNINSTALL -eq 1 ]] && return 0
   # CUR setup is the customer engineer's job — only the engineering persona (who
   # also installs cost-billing-cloud-bill). Skip finance/CPO/team-product
