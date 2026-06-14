@@ -3,7 +3,11 @@
 Customer CLI that configures an **AWS Legacy Cost-and-Usage Report (CUR)** and
 pushes it to **Moolabs Acute** (`/api/v1/cloud-billing/import`) so untagged
 cloud spend can be attributed to features/tenants. Deterministic — **no LLM at
-runtime**. See `../tasks/prd-cloud-bill-cur-report.md` for the full design.
+runtime**. See `../../../tasks/prd-cloud-bill-cur-report.md` for the full design.
+
+Bundled in the Cost+Billing suite; the engineering-persona `install.sh` asks
+interactively whether to `pip install` this CLI. It is **not** an agent skill —
+it's a customer runtime tool.
 
 ## Install
 

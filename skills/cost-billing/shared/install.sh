@@ -17,6 +17,7 @@
 #   ./install.sh --no-prune                   # don't auto-remove stale cost-billing-* skills
 #                                             # (default: prune skills not in the persona's install list,
 #                                             # e.g. deprecated cost-billing-bootstrap or cost-billing-reconcile)
+#   (engineering/all personas are asked interactively whether to pip-install the moo-cloud-bill CUR CLI)
 #   ./install.sh --package                    # skip local install; produce .zip bundles
 #                                             # uploadable to Claude Desktop / web Projects
 #                                             # (Settings → Skills → drag-and-drop). Each .zip
@@ -1406,6 +1407,10 @@ if [[ $DRY_RUN -eq 1 ]]; then
   if [[ -n "$REPO" ]]; then
     echo "[dry-run] would scaffold customer-context/ at $REPO/.moolabs/customer-context/"
   fi
+  if [[ -d "$SUITE_SRC_DIR/cloud-bill-cli" ]] \
+     && [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]]; then
+    echo "[dry-run] would prompt to pip-install the moo-cloud-bill CLI from $SUITE_SRC_DIR/cloud-bill-cli"
+  fi
   exit 0
 fi
 
@@ -1535,6 +1540,59 @@ echo "  cost-billing-shared/sdk-surface-reference.md"
 echo "  cost-billing-shared/v1-decisions-log.md"
 echo "  cost-billing-shared/three-role-review.md"
 echo "  cost-billing-shared/gaps-tracker.md"
+echo ""
+
+# ── Optional: the moo-cloud-bill CUR-ingestion CLI ──────────────────────────
+# A customer-run Python CLI (NOT an agent skill) that reads an AWS Legacy CUR and
+# pushes it to Acute. Opt-in: always asks interactively (skipped only when there's
+# no TTY). Engineering/all personas only (who also get cost-billing-cloud-bill).
+maybe_install_cli() {
+  [[ $PACKAGE_MODE -eq 1 || $UNINSTALL -eq 1 ]] && return 0
+  # CLI is the customer engineer's CUR-ingestion runtime — only relevant to the
+  # engineering persona (who also installs cost-billing-cloud-bill). Skip for
+  # finance/CPO/team-product (different machines in the chain-handoff design).
+  case "$PERSONA" in engineering|team-engineer|engineer|all) ;; *) return 0 ;; esac
+  local cli_dir="$SUITE_SRC_DIR/cloud-bill-cli"
+  [[ -d "$cli_dir" ]] || return 0   # not bundled in this layout
+
+  # Always ask interactively; only a non-interactive shell (no TTY) skips it.
+  if [[ ! -t 0 ]]; then
+    echo "moo-cloud-bill CLI: skipped (non-interactive). Later:  pip install \"$cli_dir\""
+    return 0
+  fi
+  echo "─── Optional CLI ───────────────────────────────────────────────────"
+  echo "moo-cloud-bill: customer-run CUR → Acute ingestion (pip CLI, not a skill)."
+  printf "Install it now via pip? [y/N]: "
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) echo "Skipped. Later:  pip install \"$cli_dir\""; return 0 ;;
+  esac
+
+  local installer=""
+  if command -v pipx >/dev/null 2>&1; then installer="pipx install"
+  elif command -v pip  >/dev/null 2>&1; then installer="pip install"
+  elif command -v pip3 >/dev/null 2>&1; then installer="pip3 install"
+  else
+    echo "  ! pip/pipx not found — install the CLI manually:  pip install \"$cli_dir\"" >&2
+    return 0
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "  [dry-run] would run:  $installer \"$cli_dir\""
+    return 0
+  fi
+
+  echo "  Installing moo-cloud-bill ($installer)…"
+  if $installer "$cli_dir"; then
+    echo "  ✓ moo-cloud-bill installed. Next:"
+    echo "      moo-cloud-bill init                 # paste your Moolabs API key (from the Moolabs UI)"
+    echo "      moo-cloud-bill configure --dry-run  # preview CUR setup (no AWS mutation)"
+  else
+    echo "  ! CLI install failed — run manually:  $installer \"$cli_dir\"" >&2
+  fi
+}
+maybe_install_cli
 echo ""
 
 if [[ $NO_BOOTSTRAP_CTA -eq 0 ]]; then
