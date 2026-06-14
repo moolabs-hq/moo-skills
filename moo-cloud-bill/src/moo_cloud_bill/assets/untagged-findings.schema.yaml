@@ -1,0 +1,19 @@
+# Shape of untagged-findings.yaml (informational; validated structurally in code).
+# scan emits evidence + default decision; a human edits decision/approved; seed consumes.
+generated_at: "ISO-8601 timestamp (string|null)"
+billing_period: "e.g. 2026-05 (string|null)"
+findings:
+  - resource_id: "ARN / resource id — join key → resource_service_map.resource_id (required)"
+    service: "CUR service name (string)"
+    monthly_cost_estimate_usd: "number — untagged cost in the scanned window"
+    untagged_share_pct: "int 0-100"
+    primary_pattern: "string — why it's untagged"
+    severity: "critical|high|medium|low"
+    suggested_service_mapping: "scan's guess (string|null)"
+    decision: "map | absorb | ignore   (HUMAN sets this)"
+    approved: "bool — seed skips anything not true"
+    service_name: "→ resource_service_map.service_name (required when decision=map)"
+    team_name: "optional (string|null)"
+    environment: "optional (string|null)"
+    resource_type: "optional (string|null)"
+    tags: "optional object"

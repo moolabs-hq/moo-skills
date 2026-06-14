@@ -1,0 +1,10 @@
+# Services/patterns known to under-propagate tags to child resources, so their
+# spend often lands untagged even when the parent is tagged. Informational input
+# to `scan` heuristics.
+known_non_propagating:
+  - service: AmazonS3
+    pattern: "S3 → CloudFront origin spend not tagged from the distribution"
+  - service: AmazonECS
+    pattern: "ECS task → EBS volume spend not tagged from the task"
+  - service: AmazonBedrock
+    pattern: "Invocations frequently carry no feature/tenant tag"
