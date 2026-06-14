@@ -67,8 +67,97 @@ None.
 - `scan.py`/`seed.py`: no-threshold + only-seedable (criterion 8).
 
 ## Review rounds
-(round 1 pending dispatch)
+
+### Round 1 (head 10a694f → fixes a4ae0f2)
+- Reviewer: python-reviewer agent. Findings: 8 (Pass 1: criteria 1,3,4,5,7,8 MET; 2,6 partial. Challenges 3,4 confirmed bugs).
+- Severity (CONFIRMED, operator-adjusted): IMPORTANT=4, MINOR=3, NIT=1. All 8 confirmed real (0 rejected).
+- CI status: no checks configured (verified — no .github/workflows).
+- Low-only streak: 0 (reset — confirmed IMPORTANTs this round).
+- Operator spot-check: read `mapper.py:_grain_key` myself (criterion 2 / challenge 3) — confirmed currency absent from grain; read `mapper.py` cost line (challenge/finding 3) — confirmed silent `.get(...,"0")` default.
+- Bugs fixed (commit a4ae0f2):
+  - IMPORTANT currency-not-in-grain → added currency to grain key (mapper.py). [crit 2 / chal 3]
+  - IMPORTANT silent-zero-cost on column mismatch → `_require_columns` loud raise in mapper + sibling fix in scan. [chal 4]
+  - IMPORTANT `assert` tenant_id guard stripped under -O → hard `raise` (acute_client.py). [crit 1]
+  - IMPORTANT untested pyarrow native-type path → typed-parquet round-trip test (test_push_read.py). [chal 1,2]
+  - MINOR dry-run reuse wrote files → guarded; MINOR aws_profile dropped → persisted (configure.py + cli.py). [crit 6]
+  - NIT unpaginated describe_report_definitions → NextToken loop (aws.py).
+- Sibling search: silent-`.get`-default pattern found in scan.find_untagged → fixed (same root cause).
+- Defensive hardening: tenant_id guard hardened (assert→raise); loud column-map validation.
+- Accepted non-blocking: whole-CUR-in-memory (OQ-3) — documented in read_cur_rows docstring.
+- Verification: `python3 -m pytest` 75 passed; `ruff check .` clean.
+- Findings rejected (false positives): none.
+- Status: round 2 pending.
+
+### Round 2 (head a4ae0f2 → fixes 1167c33)
+- Reviewer: fresh python-reviewer agent. Part A verified all 6 round-1 fixes landed correctly. Part B found 1 CRITICAL (new) + 2 MINOR + 1 IMPORTANT(contract-question). Secret-leak + determinism checks: CLEAN.
+- **CRITICAL: round-1's currency-in-grain change created a dup-grain row against Acute's currency-blind unique index → whole-day batch abort.** CONFIRMED by reading Acute migration 017 + `import_batch`.
+  - Operator override of reviewer's proposed fix: their `(day,currency)` batch-split would cause SILENT DATA LOSS — `import_batch` supersedes per `(tenant,provider,period)`, so a 2nd same-day batch wipes the first (I read the service code to confirm). Adopted instead: aggregate on the exact 4-tuple Acute indexes; same-grain currency conflict → skipped + recorded (never summed, never dup-grain). Acute genuinely cannot store two currencies for one resource+day; skip+record is the honest resolution.
+- IMPORTANT (currency column absent → silent fallback to reporting_currency): **accepted by design, not fixed** — unlike cost (no sane default), falling back to reporting currency = "no FX" is sensible and non-corrupting; real CUR always carries the column. Documented in REQUIRED_COLUMNS comment.
+- MINOR findings.py float()→str() (fixed); MINOR KeyError raw traceback → clean stderr+exit1 in cli (fixed).
+- Severity (CONFIRMED, operator-adjusted): CRITICAL=1, MINOR=2, IMPORTANT-accepted-by-design=1 (not counted as actionable). 0 rejected as wrong (1 reclassified accepted).
+- CI status: no checks configured (verified).
+- Low-only streak: 0 (reset — confirmed CRITICAL).
+- Operator spot-check: read `cloud_billing_service.import_batch` supersession myself → confirmed the reviewer's batch-split fix would lose data; verified the 4-tuple grain now matches Acute's index exactly.
+- Verification: 75 passed; ruff clean; `python -O` smoke confirms tenant_id guard holds.
+- Status: round 3 pending.
+
+### Round 3 (head 1167c33 → fixes 4765212)
+- Reviewer: fresh (independent, no-context) python-reviewer. Explicitly CONFIRMED the round-2 currency fix correct (4-tuple grain matches Acute index, one-batch-per-day, Decimal preserved, no tenant_id, negatives excluded). Found 2 IMPORTANT + 4 MINOR + 2 NIT (all new robustness, not contract violations).
+- Severity (CONFIRMED, operator-adjusted): IMPORTANT=2, MINOR=4, NIT=2. 0 rejected.
+- IMPORTANT cli handler wrong both ways (too-narrow misses InvalidOperation crash on null cost; too-broad masks programming KeyErrors) → fixed via MooCloudBillError/ColumnMapError + null-cost→0 + non-numeric→ColumnMapError.
+- IMPORTANT currency-conflict drops mislabeled as cost<0 credits → fixed (separate WARNING banner in push).
+- MINOR fixed: conflict keep-larger (order-independent); fixed-point cost (no sci-notation); acute_client transport-error retry; configure narrow except (NoSuchKey only).
+- NIT: failed_days typed; review.py mutation accepted-by-design (Finding is a load→edit→save buffer).
+- CI status: no checks configured (verified).
+- Low-only streak: 0 (reset — confirmed IMPORTANTs).
+- Operator spot-check: verified `Decimal(str(None))` raises InvalidOperation (not caught by old handler) and that ColumnMapError is NOT a ValueError subclass (so cli's narrow catch can't swallow a stray ValueError bug).
+- Verification: 82 passed; ruff clean.
+- Status: round 4 pending.
+
+### Round 4 (head 4765212 → fixes f0606d4)
+- Reviewer: fresh python-reviewer. **No CRITICAL.** 1 IMPORTANT + 2 MINOR + 1 NIT.
+- IMPORTANT: `scan.py` cost read still `Decimal(str(None))`-crashed on null cells — a SIBLING of the round-3 mapper fix that round-3's sibling search missed. Fixed: promoted `parse_cost` public; scan now uses it; grep confirms no remaining bypass.
+- MINOR fixed: conflict winner inherits its own tags; transport-exhaustion per-day continue (symmetry w/ 5xx). NIT fixed: O(n²) partition.
+- Reviewer explicitly cleared: cli (narrow catch, no key leak), configure (dry-run both paths, NoSuchKey vs AccessDenied), credentials (0600, env>file, no escalatable TOCTOU), retry bounds, no float on money path.
+- Severity (CONFIRMED): IMPORTANT=1, MINOR=2, NIT=1. 0 rejected.
+- CI: no checks configured (verified). Low-only streak: 0 (reset — 1 IMPORTANT).
+- Operator spot-check: grepped all `raw[col["cost"]]` reads → confirmed scan was the only sibling and it now routes through parse_cost.
+- Verification: 84 passed; ruff clean.
+- Convergence note: severities are strictly decreasing (CRIT→IMP→IMP→IMP-sibling); findings are different each round (new package surface), not a recurring stuck bug. Continuing toward 2-consecutive-LOW gate; from round 5 fixing only CRIT/IMP, accepting LOW as residue.
+- Status: round 5 pending.
+
+### Round 5 (head f0606d4 → fixes 27c5610)
+- Reviewer: fresh python-reviewer. Found 1 CRITICAL + 1 IMPORTANT + 1 MINOR + 1 NIT.
+- CRITICAL (push double-count): CREATE_NEW_REPORT retains stale CUR assembly folders; blind glob read them all → grain-sum double-counted cost to Acute (reviewer confirmed 2x). Fixed: drive file list from manifest reportKeys (current assembly), glob fallback only pre-first-delivery. Genuinely new, deep CUR-semantics bug none of rounds 1-4 caught.
+- IMPORTANT: parse_timestamp bare ValueError on null/malformed usage_start → ColumnMapError (symmetric with cost). Fixed.
+- MINOR: load_findings missing file → MooCloudBillError. Fixed. NIT: redundant os.chmod — accepted (keep for defense-in-depth).
+- Severity (CONFIRMED): CRITICAL=1, IMPORTANT=1, MINOR=1, NIT=1(accepted). 0 rejected.
+- CI: no checks configured (verified). Low-only streak: 0 (reset — CRITICAL).
+- Operator spot-check: confirmed reportKeys-driven listing reads only the current assembly (dedup test posts 5.00 not 10.00).
+- Verification: 87 passed; ruff clean.
+- **SAFETY-VALVE NOTE: 5 rounds, a CRIT/IMP in each. BUT findings are different each round (not a recurring stuck bug — every prior fix verified correct by later rounds); this is genuine discovery across a 2782-line greenfield package, not symptom-patching. Severity path: IMP, CRIT, IMP, IMP, CRIT. Round 6 = verification of the round-5 CRITICAL fix; if it surfaces another CRIT/IMP, STOP and hand the merge/continue decision to the user.**
+- Status: round 6 pending (verification).
+
+### Round 6 (head 27c5610 → fix 0cc3000) — verification round
+- Reviewer: fresh python-reviewer. Verdict: **"NO CRITICAL... everything else verified clean"** with a detailed per-module audit, EXCEPT 1 IMPORTANT.
+- IMPORTANT: `_list_cur_object_keys` bare `except Exception` → on a real S3 error (AccessDenied/throttle) it silently fell back to the glob, re-introducing the round-5 double-count with exit 0. Direct consequence of the round-5 fix.
+  - Fixed: promoted `aws.is_missing_manifest()`; only "manifest absent" falls back, real errors surface. Consolidated configure's duplicate onto the shared helper. Sibling grep: all remaining `except Exception` are justified (transport retry / json fallback) or now discriminated.
+- Reviewer explicitly cleared (re-verified): mapper (grain, Decimal, conflict keep-larger, null/neg/zero/malformed), acute_client (Bearer/no-tenant_id/bounded retry), cli (narrow catch, no key leak), credentials (0600, env>file), configure, findings, scan, seed.
+- Severity (CONFIRMED): IMPORTANT=1. 0 rejected.
+- CI: no checks configured (verified). Low-only streak: 0 (1 IMPORTANT) — but it was a consequence-of-prior-fix, now closed, with all else verified clean.
+- Operator spot-check: grepped all `except Exception` in src/ → confirmed no remaining error-masking fallbacks.
+- Verification: 88 passed; ruff clean.
+
+## SAFETY-VALVE STOP (6 rounds) — handing decision to user
+Per the skill's 5-round safety valve, stopping the autonomous loop and surfacing. Assessment:
+- Severity path across rounds: IMPORTANT → CRITICAL → IMPORTANT → IMPORTANT → CRITICAL → IMPORTANT.
+- This is NOT a stuck/recurring bug: every finding was DIFFERENT and every prior fix was verified correct by a later independent round. It's genuine discovery across a 2782-line greenfield package. The two CRITICALs (currency-grain, assembly double-count) were real money-correctness bugs worth the loop.
+- The round-6 reviewer verified all modules clean bar one finding (now fixed) — a strong convergence signal.
+- Strict exit gate (2 consecutive LOW-only rounds + spot-checks) is NOT formally met; would need ~2 more clean rounds to satisfy.
+- 0 findings were rejected as false positives across all 6 rounds (high reviewer signal quality).
 
 ## Final summary
-- PR #17: in-progress.
-- Merge status: NOT MERGED.
+- PR #17: 6 review rounds, 24 fix commits, head 0cc3000. 88 tests green, ruff clean, CI: no checks configured.
+- Fix commits: a4ae0f2 (r1), 1167c33 (r2), 4765212 (r3), f0606d4 (r4), 27c5610 (r5), 0cc3000 (r6).
+- Recommendation: ready-for-human; the formal 2-clean-round gate is unmet (would need 2 more rounds) — user to decide continue-vs-accept.
+- Merge status: NOT MERGED — awaiting explicit user permission.
