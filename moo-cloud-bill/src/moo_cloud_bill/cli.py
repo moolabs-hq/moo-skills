@@ -60,7 +60,8 @@ def main(argv=None) -> int:
         clients = aws.make_clients(profile=cfg.aws_profile, region=cfg.region)
         c_configure.run_configure(
             clients, ConsoleUI(), config_dir=config_dir,
-            column_map_path=config_dir / COLUMN_MAP_FILE, dry_run=args.dry_run,
+            column_map_path=config_dir / COLUMN_MAP_FILE, aws_profile=cfg.aws_profile,
+            dry_run=args.dry_run,
         )
         return 0
 

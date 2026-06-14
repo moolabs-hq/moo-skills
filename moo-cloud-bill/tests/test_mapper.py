@@ -69,6 +69,24 @@ def test_tags_and_currency_carried():
     assert r.tags["user_tenant"] == "t1"
 
 
+def test_different_currencies_same_grain_are_not_summed():
+    # Mixed-currency lines (e.g. AWS Marketplace reseller) must stay separate.
+    rows = [row(1, currency="USD"), row(2, currency="CAD")]
+    batches, _ = build_daily_batches(rows, CM)
+    assert len(batches) == 1
+    assert len(batches[0].rows) == 2
+    by_ccy = {r.currency: r.cost for r in batches[0].rows}
+    assert by_ccy["USD"] == Decimal("1")
+    assert by_ccy["CAD"] == Decimal("2")
+
+
+def test_missing_cost_column_fails_loudly():
+    import pytest
+    bad = {CM["service_name"]: "AmazonS3", CM["usage_start"]: "2026-05-14T03:00:00Z"}
+    with pytest.raises(KeyError):
+        build_daily_batches([bad], CM)
+
+
 def test_daily_period_bounds_are_half_open_utc_day():
     batches, _ = build_daily_batches([row(1, start="2026-05-14T23:30:00Z")], CM)
     b = batches[0]

@@ -45,7 +45,13 @@ def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushS
 
 
 def read_cur_rows(config, clients) -> list[dict]:
-    """List CUR Parquet objects under the report prefix and read all rows."""
+    """List CUR Parquet objects under the report prefix and read all rows.
+
+    NOTE (OQ-3, memory bound): this materializes the whole CUR in memory
+    (`to_pylist()` per object). Fine for typical exports; a multi-GB monthly CUR
+    on a very large account needs streaming (`pq.ParquetFile(...).iter_batches()`)
+    + per-day chunking — tracked as PRD OQ-3.
+    """
     s3 = clients["s3"]
     keys = _list_cur_object_keys(s3, config.bucket, config.prefix, config.report_name)
     raw_rows: list[dict] = []

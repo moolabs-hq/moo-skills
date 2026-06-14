@@ -26,6 +26,7 @@ def run_configure(
     *,
     config_dir: Path | None = None,
     column_map_path: Path,
+    aws_profile: str | None = None,
     dry_run: bool = False,
     out=print,
 ) -> Config | None:
@@ -57,6 +58,12 @@ def run_configure(
         if bucket is None:  # dry-run preview, nothing applied
             return None
 
+    if dry_run:
+        # Reuse path reaches here on dry-run (create path already returned None).
+        # Writing the column map / config is a mutation; a preview must not.
+        ui.say("[dry-run] would auto-fill the column map and save config — no files written.")
+        return None
+
     column_map = _resolve_column_map(s3, bucket, prefix, report_name, column_map_path, out=out)
     save_column_map(column_map, Path(column_map_path))
 
@@ -65,7 +72,7 @@ def run_configure(
 
     cfg = Config(
         bucket=bucket, prefix=prefix, report_name=report_name, region=region,
-        acute_base=acute_base, reporting_currency=currency,
+        acute_base=acute_base, reporting_currency=currency, aws_profile=aws_profile,
     )
     save_config(cfg, config_dir=config_dir)
     out("Saved config. Run `init` for the API key, then schedule `push`.")

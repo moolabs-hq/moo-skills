@@ -13,7 +13,12 @@ from decimal import Decimal
 
 from .models import CloudCostRow, ImportBatch
 
-GrainKey = tuple[str, str, str, str]
+GrainKey = tuple[str, str, str, str, str]
+
+# Logical fields the mapper cannot proceed without. A column-map that points any
+# of these at a column absent from the CUR row must fail LOUDLY — silently
+# defaulting `cost` to 0 would post a whole CUR as zero-cost and Acute would 201 it.
+REQUIRED_COLUMNS = ("service_name", "cost", "usage_start")
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -39,8 +44,21 @@ def extract_tags(raw: dict, prefix: str) -> dict:
     }
 
 
-def _grain_key(service: str, resource_id, region, usage_type) -> GrainKey:
-    return (service, resource_id or "", region or "", usage_type or "")
+def _grain_key(service: str, resource_id, region, usage_type, currency) -> GrainKey:
+    # Currency is part of the grain: Acute locks FX per row, so two same-resource
+    # lines in different currencies must NOT be summed into one (mixed-currency
+    # CUR lines occur e.g. with AWS Marketplace reseller items).
+    return (service, resource_id or "", region or "", usage_type or "", currency)
+
+
+def _require_columns(row: dict, col: dict) -> None:
+    missing = [f for f in REQUIRED_COLUMNS if col[f] not in row]
+    if missing:
+        cols = ", ".join(f"{f}→{col[f]}" for f in missing)
+        raise KeyError(
+            f"CUR column map points required field(s) at absent column(s): {cols}. "
+            f"Present columns: {list(row)[:12]}. Fix cur-column-map.yaml."
+        )
 
 
 def build_daily_batches(
@@ -60,9 +78,14 @@ def build_daily_batches(
     buckets: dict[tuple[datetime, datetime], dict[GrainKey, dict]] = {}
     credits: list[dict] = []
 
+    validated = False
     for raw in raw_rows:
-        service = str(raw.get(col["service_name"], "") or "")
-        cost = Decimal(str(raw.get(col["cost"], "0") or "0"))
+        if not validated:
+            _require_columns(raw, col)  # fail loudly on a misconfigured column map
+            validated = True
+
+        service = str(raw[col["service_name"]] or "")
+        cost = Decimal(str(raw[col["cost"]]))
         resource_id = raw.get(col["resource_id"]) or None
         region = raw.get(col["region"]) or None
         usage_type = raw.get(col["usage_type"]) or None
@@ -79,7 +102,7 @@ def build_daily_batches(
             continue
 
         start, end = day_bounds(parse_timestamp(raw[col["usage_start"]]))
-        grain = _grain_key(service, resource_id, region, usage_type)
+        grain = _grain_key(service, resource_id, region, usage_type, currency)
         day = buckets.setdefault((start, end), {})
         acc = day.get(grain)
         if acc is None:

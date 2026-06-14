@@ -46,6 +46,30 @@ def test_dry_run_create_does_not_mutate(tmp_path):
     assert cl["cur"].put_calls == []
 
 
+def test_dry_run_reuse_writes_no_files(tmp_path):
+    from moo_cloud_bill.config import config_path
+
+    cl = clients(report_definitions=[USABLE_CUR])
+    ui = ScriptedUI(confirms=[True])  # reuse yes
+    cm_path = tmp_path / "cm.yaml"
+    result = run_configure(cl, ui, config_dir=tmp_path, column_map_path=cm_path, dry_run=True)
+    assert result is None
+    assert not cm_path.exists()
+    assert not config_path(tmp_path).exists()
+
+
+def test_aws_profile_is_persisted(tmp_path):
+    from moo_cloud_bill.config import load_config
+
+    cl = clients(report_definitions=[USABLE_CUR])
+    ui = ScriptedUI(confirms=[True], answers=["USD", ""])
+    cfg = run_configure(
+        cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml", aws_profile="myprofile"
+    )
+    assert cfg.aws_profile == "myprofile"
+    assert load_config(config_dir=tmp_path, env={}).aws_profile == "myprofile"
+
+
 def test_manifest_autofills_column_map(tmp_path):
     manifest = {"columns": [
         {"category": "lineItem", "name": "ProductCode"},

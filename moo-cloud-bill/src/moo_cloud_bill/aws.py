@@ -25,7 +25,16 @@ def get_account_id(sts) -> str:
 
 
 def describe_report_definitions(cur) -> list[dict]:
-    return cur.describe_report_definitions().get("ReportDefinitions", [])
+    """All CUR report definitions, following NextToken pagination."""
+    defs: list[dict] = []
+    token = None
+    while True:
+        resp = cur.describe_report_definitions(**({"NextToken": token} if token else {}))
+        defs.extend(resp.get("ReportDefinitions", []))
+        token = resp.get("NextToken")
+        if not token:
+            break
+    return defs
 
 
 def put_report_definition(cur, report_def: dict) -> dict:

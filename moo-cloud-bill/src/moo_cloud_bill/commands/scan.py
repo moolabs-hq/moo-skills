@@ -43,11 +43,21 @@ def find_untagged(
 ) -> list[Finding]:
     col = column_map
     agg: dict[tuple[str, str | None], dict] = {}
+    validated = False
     for raw in raw_rows:
-        cost = Decimal(str(raw.get(col["cost"], "0") or "0"))
+        if not validated:
+            # Same root cause as mapper: a misconfigured cost column would
+            # silently zero every line and report no findings. Fail loudly.
+            for field in ("service_name", "cost"):
+                if col[field] not in raw:
+                    raise KeyError(
+                        f"scan: column map field '{field}'→'{col[field]}' absent from CUR row"
+                    )
+            validated = True
+        cost = Decimal(str(raw[col["cost"]]))
         if cost <= 0:
             continue
-        service = str(raw.get(col["service_name"], "") or "")
+        service = str(raw[col["service_name"]] or "")
         resource_id = raw.get(col["resource_id"]) or None
         tags = extract_tags(raw, tags_prefix)
         attributed = any(tags.get(t) for t in attribution_tags)

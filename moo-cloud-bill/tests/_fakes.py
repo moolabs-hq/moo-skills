@@ -44,7 +44,7 @@ class FakeCUR:
         self.report_definitions = report_definitions or []
         self.put_calls: list = []
 
-    def describe_report_definitions(self):
+    def describe_report_definitions(self, **kwargs):
         return {"ReportDefinitions": self.report_definitions}
 
     def put_report_definition(self, ReportDefinition):  # noqa: N803 (boto3 arg name)

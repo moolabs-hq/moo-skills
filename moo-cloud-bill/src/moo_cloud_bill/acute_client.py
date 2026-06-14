@@ -62,7 +62,10 @@ class AcuteClient:
         return {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
 
     def _send(self, path: str, body: dict) -> Result:
-        assert "tenant_id" not in body, "tenant_id must never be sent; Acute derives it"
+        # Hard raise, not assert: asserts are stripped under `python -O`, which
+        # would silently disable this contract guard.
+        if "tenant_id" in body:
+            raise ValueError("tenant_id must never be sent; Acute derives it from the Bearer key")
         url = self._base + path
         attempt = 0
         while True:
