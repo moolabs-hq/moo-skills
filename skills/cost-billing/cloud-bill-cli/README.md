@@ -1,9 +1,10 @@
 # moo-cloud-bill
 
-Customer CLI that configures an **AWS Legacy Cost-and-Usage Report (CUR)** and
-pushes it to **Moolabs Acute** (`/api/v1/cloud-billing/import`) so untagged
-cloud spend can be attributed to features/tenants. Deterministic — **no LLM at
-runtime**. See `../../../tasks/prd-cloud-bill-cur-report.md` for the full design.
+Customer CLI that configures an **AWS CUR 2.0 export** (AWS Data Exports,
+gzipped CSV) and pushes it to **Moolabs Acute** (`/api/v1/cloud-billing/import`)
+so untagged cloud spend can be attributed to features/tenants. Deterministic —
+**no LLM at runtime**. See `../../../tasks/prd-cloud-bill-cur-report.md` for the
+full design.
 
 Bundled in the Cost+Billing suite; the engineering-persona `install.sh` asks
 interactively whether to set up the CUR now — it installs this CLI and runs
@@ -67,11 +68,12 @@ from IAM.
 
 ```
 sts:GetCallerIdentity
-cur:PutReportDefinition          (create the CUR; us-east-1 only)
-cur:DescribeReportDefinitions    (discover/reuse an existing CUR)
+bcm-data-exports:CreateExport    (create the CUR 2.0 export; us-east-1 only)
+bcm-data-exports:ListExports     (discover an existing export)
+bcm-data-exports:GetExport       (inspect/reuse an existing export)
 s3:ListAllMyBuckets              (bucket pick-list)
 s3:CreateBucket                  (only if you create a new delivery bucket)
-s3:PutBucketPolicy               (let AWS billing write to the bucket)
+s3:PutBucketPolicy               (let AWS Data Exports write to the bucket)
 ```
 
 **`push` (ongoing, the cron role — read only):**
@@ -79,9 +81,6 @@ s3:PutBucketPolicy               (let AWS billing write to the bucket)
 ```
 s3:ListBucket                 (the delivery bucket)
 s3:GetObject                  (arn:aws:s3:::BUCKET/PREFIX/REPORT_NAME/*)
-cur:DescribeReportDefinitions
-ce:Get*
-organizations:Describe*, organizations:List*
 ```
 
 ## The 24–48h floor

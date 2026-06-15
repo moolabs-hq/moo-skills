@@ -1,32 +1,14 @@
 from moo_cloud_bill.cur_columns import (
     DEFAULT_COLUMN_MAP,
-    build_column_map_from_manifest,
     load_column_map,
     save_column_map,
 )
 
 
-def test_manifest_uses_physical_column_names():
-    # Verified against a real CUR manifest: `name` IS the full physical column
-    # (already snake_case + category-prefixed) — use it directly, don't re-prefix.
-    manifest = {
-        "columns": [
-            {"category": "lineItem", "name": "line_item_product_code"},
-            {"category": "lineItem", "name": "line_item_resource_id"},
-            {"category": "lineItem", "name": "line_item_unblended_cost"},
-            {"category": "product", "name": "product_region"},
-        ]
-    }
-    cmap = build_column_map_from_manifest(manifest)
-    assert cmap["service_name"] == "line_item_product_code"
-    assert cmap["resource_id"] == "line_item_resource_id"
-    assert cmap["cost"] == "line_item_unblended_cost"
-    assert cmap["region"] == "product_region"
-
-
-def test_manifest_falls_back_to_default_for_missing():
-    cmap = build_column_map_from_manifest({"columns": []})
-    assert cmap == DEFAULT_COLUMN_MAP
+def test_cur2_default_region_is_region_code():
+    # CUR 2.0 uses product_region_code (legacy used product_region).
+    assert DEFAULT_COLUMN_MAP["region"] == "product_region_code"
+    assert DEFAULT_COLUMN_MAP["cost"] == "line_item_unblended_cost"
 
 
 def test_load_column_map_merges_over_defaults(tmp_path):

@@ -40,7 +40,7 @@ def run_verify(config, api_key, *, clients=None, acute_client=None, out=print) -
         out(f"• Could not check CUR data: {aws.as_friendly_error(exc) or exc}")
         return 0
     if keys:
-        out(f"✓ CUR has data ({len(keys)} parquet file(s)) — run `moo-cloud-bill push` to send it.")
+        out(f"✓ CUR has data ({len(keys)} CSV file(s)) — run `moo-cloud-bill push` to send it.")
     else:
         out("• CUR not delivered yet (first delivery ~24-48h after creation); `push` will have data once it lands.")
     return 0

@@ -8,6 +8,7 @@ Negative cost (credits): Acute rejects cost<0 (422), so we exclude + record them
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -49,7 +50,16 @@ def day_bounds(dt: datetime) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def extract_tags(raw: dict, prefix: str) -> dict:
+def extract_tags(raw: dict, prefix: str = "resource_tags_") -> dict:
+    # CUR 2.0: a single `resource_tags` map column (JSON string in CSV).
+    rt = raw.get("resource_tags")
+    if rt:
+        try:
+            d = json.loads(rt) if isinstance(rt, str) else dict(rt)
+            return {k: v for k, v in d.items() if v not in (None, "")}
+        except (ValueError, TypeError):
+            pass
+    # Legacy fallback: per-key `resource_tags_user_*` columns.
     return {
         k[len(prefix):]: v
         for k, v in raw.items()
@@ -78,8 +88,9 @@ def _require_columns(row: dict, col: dict) -> None:
 
 
 def parse_cost(raw_value, col_name: str) -> Decimal:
-    # Null cost cell (pyarrow yields None) → zero; non-numeric → loud map error.
-    if raw_value is None:
+    # Missing cost cell → zero. CUR 2.0 CSV yields "" for a null (not None like
+    # typed Parquet did), so guard both. Any other non-numeric → loud map error.
+    if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
         return Decimal(0)
     try:
         return Decimal(str(raw_value))

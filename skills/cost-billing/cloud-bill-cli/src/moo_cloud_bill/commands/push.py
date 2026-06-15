@@ -70,12 +70,12 @@ def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushS
 
 
 def read_cur_rows(config, clients) -> list[dict]:
-    """List CUR Parquet objects under the report prefix and read all rows.
+    """List CUR 2.0 data objects (.csv.gz) under the export prefix and read all rows.
 
-    NOTE (OQ-3, memory bound): this materializes the whole CUR in memory
-    (`to_pylist()` per object). Fine for typical exports; a multi-GB monthly CUR
-    on a very large account needs streaming (`pq.ParquetFile(...).iter_batches()`)
-    + per-day chunking — tracked as PRD OQ-3.
+    NOTE (OQ-3, memory bound): this materializes the whole CUR in memory (each
+    gzipped CSV is decompressed and parsed in full). Fine for typical exports; a
+    multi-GB monthly CUR on a very large account needs streaming (line-by-line
+    gzip + per-day chunking) — tracked as PRD OQ-3.
     """
     s3 = clients["s3"]
     keys = _list_cur_object_keys(s3, config.bucket, config.prefix, config.report_name)
@@ -99,49 +99,6 @@ def run_push(config, api_key, *, clients=None, column_map, client=None, dry_run=
 
 
 def _list_cur_object_keys(s3, bucket, prefix, report_name) -> list[str]:
-    """Parquet keys for the CURRENT CUR assembly only.
-
-    CREATE_NEW_REPORT retains prior assembly folders in S3; a blind glob would read
-    stale assemblies and DOUBLE-COUNT line-items (the mapper sums by grain with no
-    row-identity dedup). The manifest's `reportKeys` lists exactly the current
-    assembly's files — the authoritative dedup handle. Glob only as a pre-first-
-    delivery fallback (single assembly, so no double-count).
-    """
-    # Legacy CUR writes one manifest PER billing period; each period's reportKeys
-    # name only that period's CURRENT assembly (stale assemblies excluded).
-    manifest_keys = aws.period_manifest_keys(s3, bucket, prefix, report_name)
-    report_keys: list[str] = []
-    found = False
-    for mkey in manifest_keys:
-        try:
-            manifest = aws.read_manifest_key(s3, bucket, mkey)
-        except Exception as exc:
-            # A real error (AccessDenied, throttle, connection) must surface —
-            # silently globbing would re-introduce the stale-assembly double-count.
-            if not aws.is_missing_manifest(exc):
-                raise
-            continue
-        found = True
-        report_keys.extend(k for k in manifest.get("reportKeys", []) if str(k).endswith(".parquet"))
-    if found:
-        return report_keys
-    # No period manifest yet (pre-first-delivery). Fall back to a glob (single assembly).
-    return _glob_parquet_keys(s3, bucket, prefix, report_name)
-
-
-def _glob_parquet_keys(s3, bucket, prefix, report_name) -> list[str]:
-    token = None
-    keys: list[str] = []
-    base = f"{prefix}/{report_name}/"
-    while True:
-        kwargs = {"Bucket": bucket, "Prefix": base}
-        if token:
-            kwargs["ContinuationToken"] = token
-        resp = s3.list_objects_v2(**kwargs)
-        for obj in resp.get("Contents", []):
-            if obj["Key"].endswith(".parquet"):
-                keys.append(obj["Key"])
-        token = resp.get("NextContinuationToken")
-        if not token:
-            break
-    return keys
+    """CUR 2.0 data files (.csv.gz) under the export prefix. OVERWRITE_REPORT keeps
+    one current file set (no stale assemblies), so a recursive glob is correct."""
+    return aws.list_data_object_keys(s3, bucket, prefix, report_name)
