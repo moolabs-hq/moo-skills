@@ -27,23 +27,32 @@ COLUMN_MAP_FILE = "cur-column-map.yaml"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="moo-cloud-bill", description="AWS CUR → Moolabs Acute ingestion.")
-    p.add_argument("--config", help="config dir (default ~/.config/moo-cloud-bill)")
-    p.add_argument("--profile", help="AWS profile")
-    p.add_argument("--acute-base", help="Acute base URL override")
-    p.add_argument("--dry-run", action="store_true", help="preview without mutating/sending")
+    # Global flags live on a parent parser added to BOTH the top level and every
+    # subcommand, so `--dry-run push` AND `push --dry-run` both work. SUPPRESS
+    # defaults mean a subparser never clobbers a value set at the top level.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", default=argparse.SUPPRESS,
+                        help="config dir (default ~/.config/moo-cloud-bill)")
+    common.add_argument("--profile", default=argparse.SUPPRESS, help="AWS profile")
+    common.add_argument("--acute-base", default=argparse.SUPPRESS, help="Acute base URL override")
+    common.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
+                        help="preview without mutating/sending")
+
+    p = argparse.ArgumentParser(
+        prog="moo-cloud-bill", description="AWS CUR → Moolabs Acute ingestion.", parents=[common]
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="capture the Moolabs API key (hidden prompt)")
-    d = sub.add_parser("detect", help="confirm AWS usage from code imports")
+    sub.add_parser("init", parents=[common], help="capture the Moolabs API key (hidden prompt)")
+    d = sub.add_parser("detect", parents=[common], help="confirm AWS usage from code imports")
     d.add_argument("repo", nargs="?", default=".")
-    sub.add_parser("configure", help="discover/reuse or create the Legacy CUR")
-    sub.add_parser("push", help="read CUR → aggregate daily → POST to Acute")
-    sub.add_parser("scan", help="write untagged-spend findings for review")
-    r = sub.add_parser("review", help="interactive findings review")
+    sub.add_parser("configure", parents=[common], help="discover/reuse or create the CUR 2.0 export")
+    sub.add_parser("push", parents=[common], help="read CUR → aggregate daily → POST to Acute")
+    sub.add_parser("scan", parents=[common], help="write untagged-spend findings for review")
+    r = sub.add_parser("review", parents=[common], help="interactive findings review")
     r.add_argument("--seed", action="store_true", help="seed approved rows immediately")
-    sub.add_parser("seed", help="POST approved findings to resource_service_map")
-    sub.add_parser("verify", help="check Acute connectivity/auth + CUR data readiness")
+    sub.add_parser("seed", parents=[common], help="POST approved findings to resource_service_map")
+    sub.add_parser("verify", parents=[common], help="check Acute connectivity/auth + CUR data readiness")
     return p
 
 
@@ -68,8 +77,15 @@ def main(argv=None) -> int:
 
 
 def _dispatch(args) -> int:
-    config_dir = Path(args.config) if args.config else default_config_dir()
-    overrides = {"aws_profile": args.profile, "acute_base": args.acute_base}
+    # Global flags use SUPPRESS defaults (so subparsers don't clobber top-level
+    # values), so they may be absent from the namespace — read them defensively.
+    config_arg = getattr(args, "config", None)
+    dry_run = getattr(args, "dry_run", False)
+    config_dir = Path(config_arg) if config_arg else default_config_dir()
+    overrides = {
+        "aws_profile": getattr(args, "profile", None),
+        "acute_base": getattr(args, "acute_base", None),
+    }
 
     if args.command == "init":
         return c_init.run_init(config_dir=config_dir)
@@ -83,7 +99,7 @@ def _dispatch(args) -> int:
         c_configure.run_configure(
             clients, ConsoleUI(), config_dir=config_dir,
             column_map_path=config_dir / COLUMN_MAP_FILE, aws_profile=cfg.aws_profile,
-            dry_run=args.dry_run,
+            dry_run=dry_run,
         )
         return 0
 
@@ -94,7 +110,7 @@ def _dispatch(args) -> int:
             return 1
         clients = aws.make_clients(profile=cfg.aws_profile, region=cfg.region)
         column_map = load_column_map(config_dir / COLUMN_MAP_FILE)
-        return c_push.run_push(cfg, key, clients=clients, column_map=column_map, dry_run=args.dry_run)
+        return c_push.run_push(cfg, key, clients=clients, column_map=column_map, dry_run=dry_run)
 
     if args.command == "scan":
         cfg = load_config(config_dir=config_dir, env=os.environ, overrides=overrides)

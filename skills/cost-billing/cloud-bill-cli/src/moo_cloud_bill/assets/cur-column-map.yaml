@@ -1,9 +1,9 @@
-# Default Legacy CUR (Parquet) column → logical-field map.
-# `configure` overwrites this with names read from the delivered CUR manifest.
+# Default CUR 2.0 (AWS Data Exports, CSV) column → logical-field map.
+# The export's SQL fixes the CSV header, so these are deterministic.
 # Operator-overridable.
 service_name: line_item_product_code
 resource_id: line_item_resource_id
-region: product_region
+region: product_region_code
 usage_type: line_item_usage_type
 cost: line_item_unblended_cost
 currency: line_item_currency_code

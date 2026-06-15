@@ -93,7 +93,15 @@ def test_missing_cost_column_raises_columnmaperror():
 
 def test_null_cost_is_treated_as_zero_not_crash():
     r = row(0)
-    r[CM["cost"]] = None  # pyarrow yields None for a null cost cell
+    r[CM["cost"]] = None  # a None cost cell (defensive — CSV usually gives "")
+    batches, _ = build_daily_batches([r], CM)
+    assert batches[0].rows[0].cost == Decimal("0")
+
+
+def test_empty_string_cost_is_treated_as_zero_not_crash():
+    # CUR 2.0 CSV yields "" (not None) for a missing cost; must not raise.
+    r = row(0)
+    r[CM["cost"]] = ""
     batches, _ = build_daily_batches([r], CM)
     assert batches[0].rows[0].cost == Decimal("0")
 
