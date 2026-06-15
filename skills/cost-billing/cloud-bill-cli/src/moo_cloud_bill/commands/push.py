@@ -107,18 +107,25 @@ def _list_cur_object_keys(s3, bucket, prefix, report_name) -> list[str]:
     assembly's files — the authoritative dedup handle. Glob only as a pre-first-
     delivery fallback (single assembly, so no double-count).
     """
-    try:
-        manifest = aws.read_manifest(s3, bucket, prefix, report_name)
-    except Exception as exc:
-        # Only "manifest not delivered yet" may fall back to the glob. A real error
-        # (AccessDenied, throttle, connection) must surface — silently globbing
-        # would re-introduce the stale-assembly double-count with no alert.
-        if not aws.is_missing_manifest(exc):
-            raise
-        manifest = None
-    report_keys = [k for k in (manifest or {}).get("reportKeys", []) if str(k).endswith(".parquet")]
-    if report_keys:
+    # Legacy CUR writes one manifest PER billing period; each period's reportKeys
+    # name only that period's CURRENT assembly (stale assemblies excluded).
+    manifest_keys = aws.period_manifest_keys(s3, bucket, prefix, report_name)
+    report_keys: list[str] = []
+    found = False
+    for mkey in manifest_keys:
+        try:
+            manifest = aws.read_manifest_key(s3, bucket, mkey)
+        except Exception as exc:
+            # A real error (AccessDenied, throttle, connection) must surface —
+            # silently globbing would re-introduce the stale-assembly double-count.
+            if not aws.is_missing_manifest(exc):
+                raise
+            continue
+        found = True
+        report_keys.extend(k for k in manifest.get("reportKeys", []) if str(k).endswith(".parquet"))
+    if found:
         return report_keys
+    # No period manifest yet (pre-first-delivery). Fall back to a glob (single assembly).
     return _glob_parquet_keys(s3, bucket, prefix, report_name)
 
 

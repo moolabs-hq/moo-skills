@@ -69,6 +69,14 @@ class FakeS3:
         self.created_buckets.append(kwargs.get("Bucket"))
         return {}
 
+    def list_objects_v2(self, **kwargs):
+        # Model one delivered billing period when a manifest is present (so
+        # read_manifest's period-folder discovery finds it); none otherwise.
+        if kwargs.get("Delimiter") and self.manifest is not None:
+            prefix = kwargs.get("Prefix", "")
+            return {"CommonPrefixes": [{"Prefix": f"{prefix}20260601-20260701/"}]}
+        return {"Contents": []}
+
     def get_object(self, Bucket, Key):  # noqa: N803
         if self.manifest is None:
             raise KeyError("no manifest")
