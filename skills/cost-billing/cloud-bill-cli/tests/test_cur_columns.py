@@ -6,13 +6,15 @@ from moo_cloud_bill.cur_columns import (
 )
 
 
-def test_manifest_maps_camelcase_to_snake():
+def test_manifest_uses_physical_column_names():
+    # Verified against a real CUR manifest: `name` IS the full physical column
+    # (already snake_case + category-prefixed) — use it directly, don't re-prefix.
     manifest = {
         "columns": [
-            {"category": "lineItem", "name": "ProductCode"},
-            {"category": "lineItem", "name": "ResourceId"},
-            {"category": "lineItem", "name": "UnblendedCost"},
-            {"category": "product", "name": "region"},
+            {"category": "lineItem", "name": "line_item_product_code"},
+            {"category": "lineItem", "name": "line_item_resource_id"},
+            {"category": "lineItem", "name": "line_item_unblended_cost"},
+            {"category": "product", "name": "product_region"},
         ]
     }
     cmap = build_column_map_from_manifest(manifest)

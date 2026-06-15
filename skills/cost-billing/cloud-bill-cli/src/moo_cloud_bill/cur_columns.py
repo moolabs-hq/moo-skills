@@ -8,7 +8,6 @@ via ``cur-column-map.yaml``.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml
@@ -56,27 +55,21 @@ def build_column_map_from_manifest(manifest: dict) -> dict[str, str]:
     return result
 
 
-def _camel_to_snake(s: str) -> str:
-    """``lineItem`` -> ``line_item``; ``UnblendedCost`` -> ``unblended_cost``."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
-
-
 def _manifest_columns(manifest: dict) -> list[str]:
     """Physical Parquet column names from a Legacy CUR manifest.
 
-    The manifest lists columns as ``{"category": "lineItem", "name": "ProductCode"}``;
-    the Parquet column is ``line_item_product_code`` (each part camel→snake, joined).
+    Verified against a real delivered manifest: each column is
+    ``{"category": "lineItem", "name": "line_item_unblended_cost"}`` — the ``name``
+    field is ALREADY the full snake_case physical column, so use it directly (do
+    NOT prepend the category, which would double the prefix).
     """
     cols = manifest.get("columns") or []
     names: list[str] = []
     for c in cols:
         if isinstance(c, dict):
             name = c.get("name")
-            if not name:
-                continue
-            cat = c.get("category")
-            physical = _camel_to_snake(name) if not cat else f"{_camel_to_snake(cat)}_{_camel_to_snake(name)}"
-            names.append(physical)
+            if name:
+                names.append(str(name).lower())
         elif isinstance(c, str):
             names.append(c.lower())
     return names

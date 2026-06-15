@@ -35,6 +35,8 @@ class FakeS3Objects:
         self.data = data
 
     def list_objects_v2(self, **kwargs):
+        if kwargs.get("Delimiter"):
+            return {"CommonPrefixes": []}  # no period folders → triggers the glob fallback
         return {"Contents": [{"Key": self.key}, {"Key": "ignore/Manifest.json"}]}
 
     def get_object(self, Bucket, Key):  # noqa: N803
@@ -44,11 +46,13 @@ class FakeS3Objects:
 
 
 class FakeS3Manifest:
-    """Serves a CUR manifest for the *-Manifest.json key and parquet for the rest."""
+    """Models the real CUR layout: a period folder, a period-level manifest, and
+    parquet objects (incl. a stale assembly the manifest's reportKeys excludes)."""
 
-    def __init__(self, manifest, objects):
+    def __init__(self, manifest, objects, period="cost/hourly/r/20260601-20260701/"):
         self.manifest = manifest
         self.objects = objects
+        self.period = period
 
     def get_object(self, Bucket, Key):  # noqa: N803
         import json
@@ -57,6 +61,8 @@ class FakeS3Manifest:
         return {"Body": _Body(self.objects[Key])}
 
     def list_objects_v2(self, **kwargs):
+        if kwargs.get("Delimiter"):
+            return {"CommonPrefixes": [{"Prefix": self.period}]}
         return {"Contents": [{"Key": k} for k in self.objects]}
 
 
@@ -152,9 +158,12 @@ def test_access_denied_on_manifest_does_not_silently_glob():
 
     class FakeS3Denied:
         def get_object(self, Bucket, Key):  # noqa: N803
-            raise _AccessDenied()
+            raise _AccessDenied()  # manifest read is denied
 
         def list_objects_v2(self, **kwargs):
+            # A period folder exists, so we attempt the manifest read (which 403s).
+            if kwargs.get("Delimiter"):
+                return {"CommonPrefixes": [{"Prefix": "cost/hourly/r/20260601-20260701/"}]}
             return {"Contents": [{"Key": "cost/hourly/r/asm1/data.parquet"}]}
 
     with pytest.raises(_AccessDenied):

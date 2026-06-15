@@ -92,11 +92,45 @@ def create_bucket(s3, bucket: str, *, region: str = "us-east-1") -> None:
         s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
 
 
-def read_manifest(s3, bucket: str, prefix: str, report_name: str) -> dict:
-    """Read the top-level Legacy CUR manifest JSON listing the report columns."""
-    key = f"{prefix}/{report_name}/{report_name}-Manifest.json"
+def list_common_prefixes(s3, bucket: str, prefix: str) -> list[str]:
+    """Immediate 'subdirectory' prefixes under ``prefix`` (S3 CommonPrefixes)."""
+    out: list[str] = []
+    token = None
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": prefix, "Delimiter": "/"}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        out.extend(cp["Prefix"] for cp in resp.get("CommonPrefixes", []))
+        token = resp.get("NextContinuationToken")
+        if not token:
+            break
+    return out
+
+
+def read_manifest_key(s3, bucket: str, key: str) -> dict:
     obj = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(_read_body(obj["Body"]))
+
+
+def period_manifest_keys(s3, bucket: str, prefix: str, report_name: str) -> list[str]:
+    """Manifest keys, one per delivered billing period. Verified against a real
+    CUR: Legacy CUR writes the manifest at the PERIOD level —
+    ``<prefix>/<report_name>/<YYYYMMDD-YYYYMMDD>/<report_name>-Manifest.json`` —
+    NOT at the report root. Each manifest's ``reportKeys`` names the CURRENT
+    assembly's parquet (so stale assemblies are excluded → no double-count)."""
+    base = f"{prefix}/{report_name}/"
+    periods = list_common_prefixes(s3, bucket, base)
+    return [f"{p}{report_name}-Manifest.json" for p in sorted(periods)]
+
+
+def read_manifest(s3, bucket: str, prefix: str, report_name: str) -> dict:
+    """Read the LATEST billing-period manifest (used for column-map autofill).
+    Raises KeyError when nothing is delivered yet (treated as missing-manifest)."""
+    keys = period_manifest_keys(s3, bucket, prefix, report_name)
+    if not keys:
+        raise KeyError("no CUR manifest delivered yet")
+    return read_manifest_key(s3, bucket, keys[-1])
 
 
 def iter_cur_rows(s3, bucket: str, key: str):
