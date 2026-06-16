@@ -113,3 +113,84 @@ def test_run_push_end_to_end_aggregates_and_posts():
     assert len(client.import_calls) == 1            # one day
     assert len(client.import_calls[0].rows) == 1    # aggregated to one grain
     assert str(client.import_calls[0].rows[0].cost) == "3.50"
+
+
+# ── list_data_object_keys: .csv.gz filter + billing-period scoping ──────────
+
+class _FakeS3Keys:
+    """list_objects_v2 over a fixed key set (single page)."""
+
+    def __init__(self, keys):
+        self._keys = keys
+
+    def list_objects_v2(self, **kwargs):
+        return {"Contents": [{"Key": k} for k in self._keys]}
+
+
+def test_keys_filter_excludes_non_csv_gz_siblings():
+    from moo_cloud_bill.aws import list_data_object_keys
+
+    s3 = _FakeS3Keys([
+        "cur2/r/data/BILLING_PERIOD=2026-06/r-00001.csv.gz",   # data → keep
+        "cur2/r/metadata/BILLING_PERIOD=2026-06/r-Metadata.gz",  # gzipped metadata → drop
+        "cur2/r/metadata/BILLING_PERIOD=2026-06/manifest.json",  # json → drop
+    ])
+    from datetime import datetime, timezone
+    keys = list_data_object_keys(s3, "b", "cur2", "r", now=datetime(2026, 6, 14, tzinfo=timezone.utc))
+    assert keys == ["cur2/r/data/BILLING_PERIOD=2026-06/r-00001.csv.gz"]
+
+
+def test_keys_scope_to_current_and_prior_period():
+    from datetime import datetime, timezone
+
+    from moo_cloud_bill.aws import list_data_object_keys
+
+    s3 = _FakeS3Keys([
+        "cur2/r/data/BILLING_PERIOD=2026-04/r-1.csv.gz",  # 2 months old → drop
+        "cur2/r/data/BILLING_PERIOD=2026-05/r-1.csv.gz",  # prior → keep
+        "cur2/r/data/BILLING_PERIOD=2026-06/r-1.csv.gz",  # current → keep
+    ])
+    keys = list_data_object_keys(s3, "b", "cur2", "r", now=datetime(2026, 6, 14, tzinfo=timezone.utc))
+    assert keys == [
+        "cur2/r/data/BILLING_PERIOD=2026-05/r-1.csv.gz",
+        "cur2/r/data/BILLING_PERIOD=2026-06/r-1.csv.gz",
+    ]
+
+
+def test_keys_january_prior_period_is_prior_december():
+    from datetime import datetime, timezone
+
+    from moo_cloud_bill.aws import list_data_object_keys
+
+    s3 = _FakeS3Keys([
+        "cur2/r/data/BILLING_PERIOD=2025-12/r-1.csv.gz",  # prior (Dec of prior year)
+        "cur2/r/data/BILLING_PERIOD=2026-01/r-1.csv.gz",  # current
+        "cur2/r/data/BILLING_PERIOD=2025-11/r-1.csv.gz",  # too old → drop
+    ])
+    keys = list_data_object_keys(s3, "b", "cur2", "r", now=datetime(2026, 1, 5, tzinfo=timezone.utc))
+    assert sorted(keys) == [
+        "cur2/r/data/BILLING_PERIOD=2025-12/r-1.csv.gz",
+        "cur2/r/data/BILLING_PERIOD=2026-01/r-1.csv.gz",
+    ]
+
+
+def test_keys_unpartitioned_layout_falls_back_to_all():
+    # Unfamiliar layout (no BILLING_PERIOD partition) → never zero the read.
+    from datetime import datetime, timezone
+
+    from moo_cloud_bill.aws import list_data_object_keys
+
+    s3 = _FakeS3Keys(["cur2/r/data.csv.gz", "cur2/r/more.csv.gz"])
+    keys = list_data_object_keys(s3, "b", "cur2", "r", now=datetime(2026, 6, 14, tzinfo=timezone.utc))
+    assert sorted(keys) == ["cur2/r/data.csv.gz", "cur2/r/more.csv.gz"]
+
+
+def test_keys_only_old_period_still_returned_never_empty():
+    # If the ONLY data is older than the window, scoping must not empty the read.
+    from datetime import datetime, timezone
+
+    from moo_cloud_bill.aws import list_data_object_keys
+
+    s3 = _FakeS3Keys(["cur2/r/data/BILLING_PERIOD=2026-01/r-1.csv.gz"])
+    keys = list_data_object_keys(s3, "b", "cur2", "r", now=datetime(2026, 6, 14, tzinfo=timezone.utc))
+    assert keys == ["cur2/r/data/BILLING_PERIOD=2026-01/r-1.csv.gz"]

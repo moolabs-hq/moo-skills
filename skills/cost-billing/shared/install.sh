@@ -1757,7 +1757,9 @@ schedule_push_cron() {
     push_bin="env PYTHONPATH=\"$cli_dir/src\" $py -m moo_cloud_bill"
   fi
   local push_cmd="$push_bin"
-  [[ -n "$aws_profile" ]] && push_cmd="$push_cmd --profile $aws_profile"
+  # Quote the profile — AWS profile names may contain spaces; an unquoted value
+  # would word-split at cron exec and pass the tail as bogus positional args.
+  [[ -n "$aws_profile" ]] && push_cmd="$push_cmd --profile \"$aws_profile\""
   push_cmd="$push_cmd push"
 
   local logdir="$HOME/.moolabs/cloud-bill"

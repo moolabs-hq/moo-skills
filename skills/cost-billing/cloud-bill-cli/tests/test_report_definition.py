@@ -45,6 +45,38 @@ def test_is_usable_export():
     assert not is_usable_export({})  # not a CUR 2.0 export
 
 
+def test_is_usable_export_rejects_nonconforming():
+    # A reused export must match what the mapper reads, or push silently
+    # under-attributes (missing region/tags) / fails later (missing required col).
+    import copy
+
+    base = build_data_export(name="r", s3_bucket="b", s3_prefix="cur2")
+
+    no_resources = copy.deepcopy(base)
+    no_resources["DataQuery"]["TableConfigurations"]["COST_AND_USAGE_REPORT"]["INCLUDE_RESOURCES"] = "FALSE"
+    assert not is_usable_export(no_resources)
+
+    no_gzip = copy.deepcopy(base)
+    no_gzip["DestinationConfigurations"]["S3Destination"]["S3OutputConfigurations"]["Compression"] = "PARQUET"
+    assert not is_usable_export(no_gzip)
+
+    not_overwrite = copy.deepcopy(base)
+    not_overwrite["DestinationConfigurations"]["S3Destination"]["S3OutputConfigurations"]["Overwrite"] = "CREATE_NEW_REPORT"
+    assert not is_usable_export(not_overwrite)
+
+    # SQL missing a column the mapper needs (e.g. the tags/region map column).
+    missing_col = copy.deepcopy(base)
+    missing_col["DataQuery"]["QueryStatement"] = "SELECT line_item_product_code, line_item_unblended_cost FROM COST_AND_USAGE_REPORT"
+    assert not is_usable_export(missing_col)
+
+    # A SUPERSET export (extra columns) is still usable.
+    superset = copy.deepcopy(base)
+    superset["DataQuery"]["QueryStatement"] = base["DataQuery"]["QueryStatement"].replace(
+        " FROM ", ", bill_payer_account_id FROM "
+    )
+    assert is_usable_export(superset)
+
+
 def test_bucket_policy_covers_both_principals():
     pol = build_data_export_bucket_policy("b", account_id="123")
     principals = pol["Statement"][0]["Principal"]["Service"]

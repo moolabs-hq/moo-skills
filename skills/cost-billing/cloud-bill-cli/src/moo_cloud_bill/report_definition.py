@@ -82,11 +82,30 @@ def build_data_export(
 
 
 def is_usable_export(export: dict) -> bool:
-    """A Data Export is reusable if it's CUR 2.0, hourly, CSV, to S3."""
-    tc = export.get("DataQuery", {}).get("TableConfigurations", {}).get(TABLE, {})
+    """Reusable only if the export matches what the mapper actually reads: CUR 2.0,
+    HOURLY, resource-level, CSV+GZIP, OVERWRITE, and a SQL that selects EVERY column
+    the mapper needs.
+
+    A looser check is unsafe: a customer's pre-existing hourly+CSV export that omits
+    ``product_region_code`` / ``resource_tags`` would be reused, then ``push`` would
+    silently under-attribute (empty region, no tags) with no error; one omitting a
+    REQUIRED column (cost / usage_start / product_code) fails loudly only later at
+    push. Better to decline reuse and create a conforming export (with confirmation).
+    An export that selects a SUPERSET of our columns still matches.
+    """
+    dq = export.get("DataQuery", {})
+    tc = dq.get("TableConfigurations", {}).get(TABLE, {})
+    qs = dq.get("QueryStatement", "")
     out = (export.get("DestinationConfigurations", {})
            .get("S3Destination", {}).get("S3OutputConfigurations", {}))
-    return tc.get("TIME_GRANULARITY") == "HOURLY" and out.get("Format") == "TEXT_OR_CSV"
+    return (
+        tc.get("TIME_GRANULARITY") == "HOURLY"
+        and tc.get("INCLUDE_RESOURCES") == "TRUE"
+        and out.get("Format") == "TEXT_OR_CSV"
+        and out.get("Compression") == "GZIP"
+        and out.get("Overwrite") == "OVERWRITE_REPORT"
+        and all(col in qs for col in EXPORT_COLUMNS)
+    )
 
 
 def build_data_export_bucket_policy(bucket: str, *, account_id: str | None = None,

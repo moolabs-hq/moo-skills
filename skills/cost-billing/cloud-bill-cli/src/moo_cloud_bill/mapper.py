@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from .cur_columns import TAGS_COLUMN
 from .errors import ColumnMapError
 from .models import CloudCostRow, ImportBatch
 
@@ -52,7 +53,7 @@ def day_bounds(dt: datetime) -> tuple[datetime, datetime]:
 
 def extract_tags(raw: dict, prefix: str = "resource_tags_") -> dict:
     # CUR 2.0: a single `resource_tags` map column (JSON string in CSV).
-    rt = raw.get("resource_tags")
+    rt = raw.get(TAGS_COLUMN)
     if rt:
         try:
             d = json.loads(rt) if isinstance(rt, str) else dict(rt)
