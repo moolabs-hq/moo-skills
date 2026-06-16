@@ -152,5 +152,42 @@ myself to confirm SC5 (no empty batch) holds independent of the contract test �
 created only by a non-negative row, so an all-credit day yields 0 batches. Verified.
 Verification: `python3 -m pytest -q` → 118 passed; `ruff check .` clean; `bash -n install.sh` clean.
 
+### Round 2 (head c4e2bab → fixes on top)
+Fresh reviewer verified all four round-1 fixes correct (substring col check sound; never-empty
+glob guard holds; cron profile quoting correct under /bin/sh; no circular import). New findings:
+- **MINOR** — `extract_tags`: valid-but-non-object JSON (`[1,2]`, `5`, `"s"`) → `d.items()`
+  raises AttributeError, escaping the `(ValueError, TypeError)` guard → crashes build_daily_batches.
+  **FIXED** mapper.py: added AttributeError to the guard (degrade to {}). +test.
+- **NIT** — `_billing_period_of` regex unanchored (`MY_BILLING_PERIOD=` false-match; over-include
+  only). **FIXED** aws.py: anchored `(?:^|/)`.
+- **NIT** — bucket policy put `aws:SourceAccount` (no wildcard) under StringLike. **FIXED**
+  report_definition.py: StringEquals (matches AWS confused-deputy doc).
+- **NIT** — FakeExports ARN index parsing brittle. **ADDRESSED** _fakes.py: guarding comment.
+
+CI status: no checks configured for this PR (verified via MCP get_check_runs: total_count=0).
+Severity this round (operator-adjusted): CRIT=0 IMP=0 MIN=1 NIT=3 → **LOW-only**.
+Low-only streak: 1 (round 1 had IMPORTANT → was 0; round 2 LOW-only → 1).
+Operator spot-check: read `extract_tags` myself and reasoned the AttributeError path
+(`json.loads("[1,2]").items()`), and re-read the `list_data_object_keys` `if scoped:` guard to
+confirm the never-empty property (challenge 3). Both verified, now pinned by tests.
+Verification: 119 passed; ruff clean.
+
+### Round 3 (head <pending> )
+(pending — re-review after round-2 fixes to confirm the second consecutive LOW-only round)
+
+## Success criteria status (after round 2)
+1 PASS · 2 PASS · 3 PASS · 4 PASS (hardened) · 5 PASS · 6 PASS (cron quoting fixed) · 7 PASS.
+## Challenge status (after round 2)
+1 handled (is_usable_export tightened) · 2 handled (.csv.gz filter) · 3 handled (fallback-safe
+scope + corrected comment; residual: real-layout validation deferred to first delivery) ·
+4 handled (JSON degrade to {}) · 5 handled (SSO warned; cron command absolute + quoted).
+
+## Remaining risks (accepted, non-blocking)
+- The CSV read path (incl. the new BILLING_PERIOD scope and `.csv.gz` filter) is validated
+  against hermetic fakes only — NOT against a real CUR 2.0 delivery (export first-delivers
+  ~24h after configure). The scope is fallback-safe (reads ALL keys on an unfamiliar layout),
+  so a wrong assumption degrades to the prior behavior, never to an empty read. Flagged in the
+  PR body; close-out gated on first real delivery.
+
 ## Final summary
 - Merge status: NOT MERGED — awaiting explicit user permission.

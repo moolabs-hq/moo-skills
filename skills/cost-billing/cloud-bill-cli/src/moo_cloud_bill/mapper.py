@@ -57,8 +57,10 @@ def extract_tags(raw: dict, prefix: str = "resource_tags_") -> dict:
     if rt:
         try:
             d = json.loads(rt) if isinstance(rt, str) else dict(rt)
+            # Valid-but-non-object JSON (a list/number/string) has no .items() →
+            # AttributeError. The guard exists to degrade tags to {}, never crash.
             return {k: v for k, v in d.items() if v not in (None, "")}
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, AttributeError):
             pass
     # Legacy fallback: per-key `resource_tags_user_*` columns.
     return {

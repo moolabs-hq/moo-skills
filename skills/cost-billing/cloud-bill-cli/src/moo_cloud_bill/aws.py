@@ -115,7 +115,8 @@ def iter_cur_rows(s3, bucket: str, key: str):
 def _billing_period_of(key: str) -> str | None:
     """The ``BILLING_PERIOD=YYYY-MM`` partition value embedded in an S3 key, or None
     when the key carries no recognizable billing-period partition."""
-    m = re.search(r"BILLING_PERIOD=(\d{4}-\d{2})", key)
+    # Anchor on `/` or start so `MY_BILLING_PERIOD=…` can't false-match.
+    m = re.search(r"(?:^|/)BILLING_PERIOD=(\d{4}-\d{2})", key)
     return m.group(1) if m else None
 
 

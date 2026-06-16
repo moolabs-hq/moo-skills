@@ -69,6 +69,22 @@ def test_tags_and_currency_carried():
     assert r.tags["user_tenant"] == "t1"
 
 
+def test_extract_tags_cur2_json_map_and_safe_degradation():
+    from moo_cloud_bill.mapper import extract_tags
+
+    # CUR 2.0: the single `resource_tags` JSON-map column is parsed.
+    assert extract_tags({"resource_tags": '{"team":"ml","env":""}'}) == {"team": "ml"}
+    # Non-object JSON (list/number/string) must degrade to {}, never raise.
+    assert extract_tags({"resource_tags": "[1, 2]"}) == {}
+    assert extract_tags({"resource_tags": "5"}) == {}
+    assert extract_tags({"resource_tags": '"juststring"'}) == {}
+    # Malformed JSON → {} (and falls through to legacy prefix scan if present).
+    assert extract_tags({"resource_tags": "{not json"}) == {}
+    assert extract_tags({"resource_tags": "{not json", "resource_tags_team": "ml"}) == {"team": "ml"}
+    # Empty/missing tags column → legacy fallback / {}.
+    assert extract_tags({"resource_tags": ""}) == {}
+
+
 def test_currency_conflict_keeps_larger_spend_regardless_of_order():
     # Acute's index excludes currency, so a same-grain currency conflict can't be
     # two rows (round-2 CRITICAL) and must not be summed (round-1 bug). Resolution:

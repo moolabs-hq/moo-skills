@@ -41,6 +41,8 @@ class FakeExports:
                             for i, e in enumerate(self.exports)]}
 
     def get_export(self, ExportArn):  # noqa: N803
+        # ARNs here are intentionally minimal (`arn:<index>`); the index is the
+        # last colon-segment. Keep that format — real ARNs have more colons.
         return {"Export": self.exports[int(ExportArn.split(":")[-1])]}
 
     def create_export(self, Export):  # noqa: N803

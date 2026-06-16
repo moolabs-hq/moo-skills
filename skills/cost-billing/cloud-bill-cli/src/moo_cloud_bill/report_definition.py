@@ -114,9 +114,12 @@ def build_data_export_bucket_policy(bucket: str, *, account_id: str | None = Non
     both the `billingreports` and `bcm-data-exports` service principals."""
     arns = [f"arn:aws:bcm-data-exports:{region}:{account_id or '*'}:export/*",
             f"arn:aws:cur:{region}:{account_id or '*'}:definition/*"]
+    # SourceArn uses StringLike (it has a `/*` wildcard); SourceAccount is a bare
+    # 12-digit id with no wildcard, so StringEquals — matching AWS's documented
+    # confused-deputy prevention pattern.
     condition: dict = {"StringLike": {"aws:SourceArn": arns}}
     if account_id:
-        condition["StringLike"]["aws:SourceAccount"] = account_id
+        condition["StringEquals"] = {"aws:SourceAccount": account_id}
     return {
         "Version": "2008-10-17",
         "Statement": [
