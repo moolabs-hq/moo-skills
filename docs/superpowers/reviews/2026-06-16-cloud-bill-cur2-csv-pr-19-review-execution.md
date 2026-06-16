@@ -172,8 +172,22 @@ Operator spot-check: read `extract_tags` myself and reasoned the AttributeError 
 confirm the never-empty property (challenge 3). Both verified, now pinned by tests.
 Verification: 119 passed; ruff clean.
 
-### Round 3 (head <pending> )
-(pending — re-review after round-2 fixes to confirm the second consecutive LOW-only round)
+### Round 3 (head 5df181a) — CONVERGED
+Fresh reviewer verified all three round-2 fixes correct + regression-free and ran a final
+completeness sweep. Confirmed findings: CRIT=0 IMP=0 MIN=2 NIT=0 → **LOW-only**.
+Both MINORs were test-coverage gaps on the round-1/2 fixes (not behavioral bugs):
+- **MINOR** — no test asserted the bucket-policy confused-deputy condition split. **FIXED**
+  test_report_definition.py: `test_bucket_policy_confused_deputy_condition_split`.
+- **MINOR** — no test for the decline-reuse → create-fresh configure branch. **FIXED**
+  test_configure.py: `test_decline_reuse_falls_through_to_create`.
+These are test-only additions (no behavior change → streak not reset). Verified: 121 passed.
+CI status: no checks configured (verified). Low-only streak: 2 → **EXIT GATE MET**.
+Operator spot-check: read `configure.py:49–66` myself — confirmed decline-reuse sets
+`reused=None` → `_create_export`, so the tightened `is_usable_export` correctly degrades to
+fresh creation (now pinned by the new test).
+
+Final test-only commit closes the two round-3 coverage MINORs; no further reviewer round is
+warranted (test-only diff over already-reviewed code; two consecutive LOW-only rounds achieved).
 
 ## Success criteria status (after round 2)
 1 PASS · 2 PASS · 3 PASS · 4 PASS (hardened) · 5 PASS · 6 PASS (cron quoting fixed) · 7 PASS.
@@ -190,4 +204,10 @@ scope + corrected comment; residual: real-layout validation deferred to first de
   PR body; close-out gated on first real delivery.
 
 ## Final summary
+- PR #19 — **ready-for-human**. 3 rounds. Confirmed: 2 IMPORTANT + 4 MINOR + 3 NIT fixed,
+  1 NIT rejected (false positive). Fix commits: c4e2bab (round 1), 5df181a (round 2),
+  + a final test-only coverage commit (round 3).
+- Tests 112 → 121 passing; ruff clean; bash -n clean; CI: no checks configured (verified).
+- All 7 success criteria PASS; all 5 challenges handled (challenge 3 residual: real-CUR-2.0
+  layout validation deferred to first delivery — read path is fallback-safe).
 - Merge status: NOT MERGED — awaiting explicit user permission.

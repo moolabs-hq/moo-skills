@@ -39,6 +39,21 @@ def test_create_path_calls_create_export(tmp_path):
     assert cl["s3"].policy_calls  # bucket policy applied (before the export create)
 
 
+def test_decline_reuse_falls_through_to_create(tmp_path):
+    # A usable export exists, but the operator declines reuse → a fresh export is
+    # created. Guards the reused-is-None branch (configure.py) the tightened
+    # is_usable_export makes more likely (fewer exports qualify for reuse).
+    cl = clients(exports=[USABLE_EXPORT], buckets=["mybucket"])
+    ui = ScriptedUI(
+        choices=[0],                 # pick existing bucket 'mybucket' in _create_export
+        confirms=[False, True],      # decline reuse; then apply-policy + create
+        answers=["cur2", "moolabs-cur2", "USD", ""],
+    )
+    cfg = run_configure(cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml")
+    assert len(cl["exports"].created) == 1   # created fresh despite a usable one existing
+    assert cfg.bucket == "mybucket"
+
+
 def test_create_new_bucket_then_create_export(tmp_path):
     cl = clients(exports=[], buckets=["existing"])
     ui = ScriptedUI(

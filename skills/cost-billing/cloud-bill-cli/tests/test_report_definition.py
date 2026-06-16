@@ -82,3 +82,14 @@ def test_bucket_policy_covers_both_principals():
     principals = pol["Statement"][0]["Principal"]["Service"]
     assert "billingreports.amazonaws.com" in principals
     assert "bcm-data-exports.amazonaws.com" in principals
+
+
+def test_bucket_policy_confused_deputy_condition_split():
+    # SourceArn (wildcard) → StringLike; SourceAccount (bare id) → StringEquals.
+    # This split is the confused-deputy contract; pin it so a refactor can't revert it.
+    cond = build_data_export_bucket_policy("b", account_id="123")["Statement"][0]["Condition"]
+    assert "aws:SourceArn" in cond["StringLike"]
+    assert cond["StringEquals"]["aws:SourceAccount"] == "123"
+    # Without an account id there is no SourceAccount clause (ARN wildcard only).
+    cond_noacct = build_data_export_bucket_policy("b")["Statement"][0]["Condition"]
+    assert "StringEquals" not in cond_noacct
