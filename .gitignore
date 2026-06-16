@@ -7,3 +7,14 @@ node_modules/
 .env
 .env.local
 dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+.venv/
+venv/
