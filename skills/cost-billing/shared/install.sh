@@ -1427,7 +1427,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   fi
   if [[ -d "$SUITE_SRC_DIR/cloud-bill-cli" ]] \
      && [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]]; then
-    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, then run 'configure')"
+    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, run 'configure', then schedule a daily 'push' via cron)"
   fi
   exit 0
 fi
@@ -1441,8 +1441,18 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "  removed $target"
     fi
   done
+  # Remove the managed daily-push cron line if present (machine-global, so do it
+  # here regardless of platform; stripping an absent marker is a harmless no-op).
+  if command -v crontab >/dev/null 2>&1; then
+    _marker="# moo-cloud-bill push (managed by install.sh)"
+    if crontab -l 2>/dev/null | grep -qF "$_marker"; then
+      crontab -l 2>/dev/null | grep -vF "$_marker" | grep -v '^[[:space:]]*$' | crontab - \
+        && echo "  removed managed 'moo-cloud-bill push' cron entry"
+    fi
+  fi
   echo ""
   echo "Uninstall complete. (customer-context/ in repo NOT touched — remove manually if desired.)"
+  echo "(moo-cloud-bill CLI itself, AWS CUR export, and ~/.config/moo-cloud-bill creds left intact — remove manually if desired.)"
   exit 0
 fi
 
@@ -1562,9 +1572,10 @@ echo ""
 
 # ── Optional: set up the AWS CUR via the moo-cloud-bill CLI ─────────────────
 # Installs the customer-run CLI (NOT an agent skill) and runs its discovery-first
-# `configure` wizard (creates/reuses the AWS Legacy CUR; mutates AWS only on the
-# engineer's explicit confirmation). Opt-in: always asks interactively (skipped
-# only when there's no TTY). Engineering/all personas only.
+# `configure` wizard (creates/reuses the AWS CUR 2.0 export; mutates AWS only on
+# the engineer's explicit confirmation), then optionally schedules a daily `push`
+# via cron. Opt-in: always asks interactively (skipped only when there's no TTY).
+# Engineering/all personas only.
 list_aws_profiles() {
   # Prefer the AWS CLI (authoritative); fall back to parsing ~/.aws files so this
   # works even if the CLI isn't installed. Portable awk (BSD + GNU), no bash 4.
@@ -1636,13 +1647,13 @@ maybe_setup_cur() {
   echo "  ── AWS account & permissions ──────────────────────────────────"
   echo "  Use the account whose bill you want to ingest (single-account v1)."
   echo "  The chosen profile / SSO role needs at SETUP time:"
-  echo "    cur:PutReportDefinition, cur:DescribeReportDefinitions,"
-  echo "    s3:ListAllMyBuckets, s3:PutBucketPolicy, sts:GetCallerIdentity"
-  echo "    (+ s3:CreateBucket if you create a new delivery bucket)"
+  echo "    bcm-data-exports:CreateExport, bcm-data-exports:ListExports,"
+  echo "    bcm-data-exports:GetExport, s3:ListAllMyBuckets, s3:PutBucketPolicy,"
+  echo "    sts:GetCallerIdentity (+ s3:CreateBucket if you create a new bucket)"
   echo "  AND the account must have 'IAM access to Billing' enabled"
   echo "  (Billing console → Account → IAM access) — without it, CUR calls 403"
   echo "  even with the right IAM policy. Ongoing 'push' needs only READ"
-  echo "  (s3:GetObject + cur:DescribeReportDefinitions)."
+  echo "  (s3:ListBucket + s3:GetObject)."
 
   # boto3 needs valid credentials before configure can call STS. Let the engineer
   # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
@@ -1702,7 +1713,73 @@ maybe_setup_cur() {
   echo "  Verifying the Acute connection…"
   "${mcb_cmd[@]}" "${profile_args[@]}" verify || echo "  (verify reported an issue — see above; re-run: moo-cloud-bill verify)"
 
-  echo "  Setup done. After the CUR delivers (~24–48h), schedule:  moo-cloud-bill push  (cron; profile persisted by configure)."
+  # Automate the ongoing push (the whole point — the CUR refreshes daily and Acute
+  # supersedes per-period, so a daily unattended push keeps attribution current).
+  schedule_push_cron "$cli_dir" "$aws_profile"
+
+  echo "  Setup done."
+}
+
+# Build a self-contained `push` command line (absolute paths, no reliance on the
+# caller's PATH/PYTHONPATH) suitable for a cron entry, and install it as a daily
+# job. The Moolabs API key is NOT inlined — `push` resolves it from the 0600
+# credentials file written by `init` (env > file), so no secret lands in crontab.
+schedule_push_cron() {
+  local cli_dir="$1" aws_profile="$2"
+
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "  (crontab not found — automate 'push' with your OS scheduler;"
+    echo "   e.g. a daily systemd timer or launchd agent running: moo-cloud-bill ${aws_profile:+--profile $aws_profile} push)"
+    return 0
+  fi
+
+  echo ""
+  echo "  ── Automate the daily push (cron) ─────────────────────────────"
+  if [[ -n "$aws_profile" ]]; then
+    # An SSO profile's short-lived token expires; cron can't `aws sso login`.
+    # Flag it honestly rather than scheduling a job that silently 401s nightly.
+    echo "  NOTE: cron runs unattended. If profile '$aws_profile' is AWS SSO, its"
+    echo "  token expires and the nightly push will fail. For unattended push use an"
+    echo "  instance role (EC2/ECS) or a non-SSO profile with long-lived/credential_process creds."
+  fi
+  printf "  Schedule a daily 'push' via cron now? [Y/n]: "
+  read -r ans
+  case "$ans" in
+    n|N|no|NO) echo "  Skipped. Schedule later: moo-cloud-bill ${aws_profile:+--profile $aws_profile} push"; return 0 ;;
+  esac
+
+  # Resolve an absolute, self-contained command — cron has a minimal PATH.
+  local push_bin
+  if command -v moo-cloud-bill >/dev/null 2>&1; then
+    push_bin="$(command -v moo-cloud-bill)"
+  else
+    local py; py="$(command -v python3 || echo /usr/bin/env python3)"
+    push_bin="env PYTHONPATH=\"$cli_dir/src\" $py -m moo_cloud_bill"
+  fi
+  local push_cmd="$push_bin"
+  # Quote the profile — AWS profile names may contain spaces; an unquoted value
+  # would word-split at cron exec and pass the tail as bogus positional args.
+  [[ -n "$aws_profile" ]] && push_cmd="$push_cmd --profile \"$aws_profile\""
+  push_cmd="$push_cmd push"
+
+  local logdir="$HOME/.moolabs/cloud-bill"
+  mkdir -p "$logdir"
+  local marker="# moo-cloud-bill push (managed by install.sh)"
+  # Daily at 06:17 local — off the top of the hour to avoid a thundering herd, and
+  # well after midnight so the prior UTC day's CUR has refreshed.
+  local schedule="17 6 * * *"
+  local line="$schedule $push_cmd >> \"$logdir/push.log\" 2>&1  $marker"
+
+  # Idempotent: strip any prior managed line first, then append — re-running the
+  # installer updates the entry in place instead of duplicating it.
+  local existing; existing="$(crontab -l 2>/dev/null | grep -vF "$marker" || true)"
+  if ! printf '%s\n%s\n' "$existing" "$line" | grep -v '^[[:space:]]*$' | crontab -; then
+    echo "  ! Could not write crontab — add this line manually via 'crontab -e':" >&2
+    echo "      $line" >&2
+    return 0
+  fi
+  echo "  ✓ Scheduled: daily 06:17 local. Log → $logdir/push.log"
+  echo "    Change the time or remove it with:  crontab -e   (find the managed marker)"
 }
 maybe_setup_cur
 echo ""

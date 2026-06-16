@@ -1,11 +1,13 @@
-"""Thin AWS SDK wrappers. boto3/pyarrow are imported lazily so the rest of the
-package (and most tests) load without them. Every wrapper takes the boto3 client
-as a parameter, so tests inject fakes and never touch real AWS.
+"""Thin AWS SDK wrappers. boto3 is imported lazily so the rest of the package
+(and most tests) load without it. Every wrapper takes the boto3 client as a
+parameter, so tests inject fakes and never touch real AWS.
 """
 from __future__ import annotations
 
 import io
 import json
+import re
+from datetime import datetime, timezone
 
 from .errors import MooCloudBillError
 
@@ -49,7 +51,8 @@ def make_clients(*, profile: str | None = None, region: str = "us-east-1") -> di
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     return {
         "sts": session.client("sts", region_name=region),
-        "cur": session.client("cur", region_name="us-east-1"),
+        # CUR 2.0 / Data Exports — us-east-1 only.
+        "exports": session.client("bcm-data-exports", region_name="us-east-1"),
         "s3": session.client("s3", region_name=region),
     }
 
@@ -58,21 +61,27 @@ def get_account_id(sts) -> str:
     return sts.get_caller_identity()["Account"]
 
 
-def describe_report_definitions(cur) -> list[dict]:
-    """All CUR report definitions, following NextToken pagination."""
-    defs: list[dict] = []
+def list_data_exports(exports) -> list[dict]:
+    """All CUR 2.0 data export references (ExportArn/ExportName/...), paginated."""
+    out: list[dict] = []
     token = None
     while True:
-        resp = cur.describe_report_definitions(**({"NextToken": token} if token else {}))
-        defs.extend(resp.get("ReportDefinitions", []))
+        resp = exports.list_exports(**({"NextToken": token} if token else {}))
+        out.extend(resp.get("Exports", []))
         token = resp.get("NextToken")
         if not token:
             break
-    return defs
+    return out
 
 
-def put_report_definition(cur, report_def: dict) -> dict:
-    return cur.put_report_definition(ReportDefinition=report_def)
+def get_export(exports, export_arn: str) -> dict:
+    """Full Export definition for one ARN."""
+    return exports.get_export(ExportArn=export_arn).get("Export", {})
+
+
+def create_data_export(exports, export_def: dict) -> str:
+    """Create a CUR 2.0 data export; returns the ExportArn."""
+    return exports.create_export(Export=export_def).get("ExportArn", "")
 
 
 def list_bucket_names(s3) -> list[str]:
@@ -92,32 +101,69 @@ def create_bucket(s3, bucket: str, *, region: str = "us-east-1") -> None:
         s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
 
 
-def read_manifest(s3, bucket: str, prefix: str, report_name: str) -> dict:
-    """Read the top-level Legacy CUR manifest JSON listing the report columns."""
-    key = f"{prefix}/{report_name}/{report_name}-Manifest.json"
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    return json.loads(_read_body(obj["Body"]))
-
-
 def iter_cur_rows(s3, bucket: str, key: str):
-    """Yield CUR Parquet rows (dicts) from one S3 object. Lazy pyarrow import."""
-    import pyarrow.parquet as pq
+    """Yield CUR 2.0 rows (dicts keyed by the CSV header) from one gzipped-CSV
+    S3 object."""
+    import csv
+    import gzip
 
     obj = s3.get_object(Bucket=bucket, Key=key)
-    table = pq.read_table(io.BytesIO(_read_body(obj["Body"])))
-    yield from table.to_pylist()
+    text = gzip.decompress(_read_body(obj["Body"])).decode("utf-8")
+    yield from csv.DictReader(io.StringIO(text))
+
+
+def _billing_period_of(key: str) -> str | None:
+    """The ``BILLING_PERIOD=YYYY-MM`` partition value embedded in an S3 key, or None
+    when the key carries no recognizable billing-period partition."""
+    # Anchor on `/` or start so `MY_BILLING_PERIOD=…` can't false-match.
+    m = re.search(r"(?:^|/)BILLING_PERIOD=(\d{4}-\d{2})", key)
+    return m.group(1) if m else None
+
+
+def _recent_billing_periods(now: datetime) -> set[str]:
+    """Current + prior calendar month as ``YYYY-MM`` (prior catches late deliveries
+    and runs right after a month boundary)."""
+    cur = f"{now.year:04d}-{now.month:02d}"
+    prev = f"{now.year - 1:04d}-12" if now.month == 1 else f"{now.year:04d}-{now.month - 1:02d}"
+    return {cur, prev}
+
+
+def list_data_object_keys(s3, bucket: str, prefix: str, report_name: str, *, now=None) -> list[str]:
+    """Current CUR 2.0 data files (``.csv.gz``) under the export prefix.
+
+    OVERWRITE_REPORT keeps one current file set *within* a billing period, but AWS
+    Data Exports retains PRIOR months under their own ``BILLING_PERIOD=YYYY-MM``
+    partitions — it does not delete them. Re-reading every month forever is wasteful
+    (Acute supersedes per period, so it is not wrong — just O(months) of redundant
+    GETs and POSTs that grow with the account's age). When every data key carries a
+    recognizable billing-period partition we scope to the current + prior month; if
+    the layout is unfamiliar OR scoping would drop everything, we fall back to ALL
+    keys — we never zero the read on an S3 layout we have not seen.
+    """
+    base = f"{prefix}/{report_name}/"
+    all_keys: list[str] = []
+    token = None
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": base}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            # CUR 2.0 (CSV+GZIP) data files are `.csv.gz`; a stricter suffix than
+            # `.gz` keeps any gzipped manifest/metadata sibling out of the reader.
+            if obj["Key"].endswith(".csv.gz"):
+                all_keys.append(obj["Key"])
+        token = resp.get("NextContinuationToken")
+        if not token:
+            break
+
+    if all_keys and all(_billing_period_of(k) is not None for k in all_keys):
+        recent = _recent_billing_periods(now or datetime.now(timezone.utc))
+        scoped = [k for k in all_keys if _billing_period_of(k) in recent]
+        if scoped:  # never return empty when there IS data
+            return scoped
+    return all_keys
 
 
 def _read_body(body) -> bytes:
     return body.read()
-
-
-def is_missing_manifest(exc: Exception) -> bool:
-    """True iff exc means 'CUR manifest not delivered yet' (vs a real error like
-    AccessDenied / throttle / connection failure, which must NOT be swallowed).
-    """
-    if isinstance(exc, (KeyError, FileNotFoundError)):
-        return True
-    resp = getattr(exc, "response", None)
-    code = resp.get("Error", {}).get("Code") if isinstance(resp, dict) else None
-    return code in ("NoSuchKey", "404", "NotFound")

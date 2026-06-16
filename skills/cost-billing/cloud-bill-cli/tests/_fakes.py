@@ -1,8 +1,6 @@
 """Hermetic fakes — no boto3/httpx/network in tests."""
 from __future__ import annotations
 
-import json
-
 from moo_cloud_bill.acute_client import Result
 
 
@@ -23,14 +21,6 @@ class RecordingAcuteClient:
         return Result(self.status, {})
 
 
-class _Body:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    def read(self):
-        return self._data
-
-
 class FakeSTS:
     def __init__(self, account="123456789012"):
         self.account = account
@@ -39,23 +29,30 @@ class FakeSTS:
         return {"Account": self.account}
 
 
-class FakeCUR:
-    def __init__(self, report_definitions=None):
-        self.report_definitions = report_definitions or []
-        self.put_calls: list = []
+class FakeExports:
+    """CUR 2.0 / bcm-data-exports fake. `exports` is a list of full Export dicts."""
 
-    def describe_report_definitions(self, **kwargs):
-        return {"ReportDefinitions": self.report_definitions}
+    def __init__(self, exports=None):
+        self.exports = exports or []
+        self.created: list = []
 
-    def put_report_definition(self, ReportDefinition):  # noqa: N803 (boto3 arg name)
-        self.put_calls.append(ReportDefinition)
-        return {}
+    def list_exports(self, **kwargs):
+        return {"Exports": [{"ExportArn": f"arn:{i}", "ExportName": e.get("Name")}
+                            for i, e in enumerate(self.exports)]}
+
+    def get_export(self, ExportArn):  # noqa: N803
+        # ARNs here are intentionally minimal (`arn:<index>`); the index is the
+        # last colon-segment. Keep that format — real ARNs have more colons.
+        return {"Export": self.exports[int(ExportArn.split(":")[-1])]}
+
+    def create_export(self, Export):  # noqa: N803
+        self.created.append(Export)
+        return {"ExportArn": "arn:new"}
 
 
 class FakeS3:
-    def __init__(self, buckets=None, manifest=None):
+    def __init__(self, buckets=None):
         self.buckets = buckets or []
-        self.manifest = manifest
         self.policy_calls: list = []
         self.created_buckets: list = []
 
@@ -69,15 +66,10 @@ class FakeS3:
         self.created_buckets.append(kwargs.get("Bucket"))
         return {}
 
-    def get_object(self, Bucket, Key):  # noqa: N803
-        if self.manifest is None:
-            raise KeyError("no manifest")
-        return {"Body": _Body(json.dumps(self.manifest).encode())}
 
-
-def clients(*, account="123456789012", report_definitions=None, buckets=None, manifest=None):
+def clients(*, account="123456789012", exports=None, buckets=None):
     return {
         "sts": FakeSTS(account),
-        "cur": FakeCUR(report_definitions),
-        "s3": FakeS3(buckets=buckets, manifest=manifest),
+        "exports": FakeExports(exports),
+        "s3": FakeS3(buckets=buckets),
     }

@@ -5,20 +5,23 @@ build-backend = "hatchling.build"
 [project]
 name = "moo-cloud-bill"
 version = "0.1.0"
-description = "Customer CLI: configure an AWS Legacy CUR and push it to Moolabs Acute for cost attribution."
+description = "Customer CLI: configure an AWS CUR 2.0 (Data Exports) and push it to Moolabs Acute for cost attribution."
 requires-python = ">=3.11"
-# boto3/pyarrow/httpx/pyyaml are the tool's real runtime deps (used from Phase 2+).
+# boto3/httpx/pyyaml are the tool's real runtime deps (used from Phase 2+). CUR 2.0
+# data files are gzipped CSV, read with the stdlib (csv+gzip) — no pyarrow.
 # Phase 1 code (init/detect/config/credentials) imports only the stdlib, so the
 # test suite runs without these installed (pythonpath=src; nothing here imports them).
 dependencies = [
     "boto3>=1.34",
-    "pyarrow>=15",
     "httpx>=0.27",
     "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+# pydantic is NOT a runtime dep (the CLI uses dataclasses); it's dev-only so the
+# Acute contract test (tests/test_acute_contract.py) can validate our request
+# bodies against a verbatim copy of Acute's server schema. Skipped if absent.
+dev = ["pytest>=8", "ruff>=0.5", "pydantic>=2"]
 
 [project.scripts]
 moo-cloud-bill = "moo_cloud_bill.cli:main"

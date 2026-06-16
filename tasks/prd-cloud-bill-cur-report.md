@@ -1,5 +1,26 @@
 # PRD: AWS CUR → Acute ingestion CLI (customer self-serve)
 
+> **⚠️ Update (2026-06-15) — pivoted to CUR 2.0 + CSV. This reverses Decision 6.**
+> The implementation now uses **CUR 2.0 / AWS Data Exports** (`bcm-data-exports:CreateExport`),
+> **not** Legacy CUR (`cur:PutReportDefinition`). The body below documents the original
+> Legacy-CUR design and is retained for history; where it conflicts with this block, this block wins.
+> Concretely changed:
+> - **API:** `bcm-data-exports` (`CreateExport`/`ListExports`/`GetExport`) over a SQL `QueryStatement`
+>   on the `COST_AND_USAGE_REPORT` table — not `cur:PutReportDefinition`/`DescribeReportDefinitions`.
+> - **Format:** `TEXT_OR_CSV` + `GZIP` (read with stdlib `csv`+`gzip`; **pyarrow dropped**) — not Parquet.
+> - **Overwrite:** `OVERWRITE_REPORT` → one current file set, so the read path is a recursive glob of
+>   `.csv.gz` with **no manifest read and no stale-assembly dedup** (that whole bug class is designed out).
+> - **Columns:** region is `product_region_code` (was `product_region`); tags come from the single
+>   `resource_tags` **map** column (JSON in CSV), not per-key `resource_tags_user_*` columns. The column
+>   map is now deterministic from the export SQL — no manifest auto-fill (OQ-2 moot).
+> - **IAM (configure):** `bcm-data-exports:CreateExport`/`ListExports`/`GetExport` + `s3:*` as before.
+>   `cur:*`, `ce:*`, `organizations:*` are no longer used by any command.
+> - **Gain:** CUR 2.0 unlocks `INCLUDE_IAM_PRINCIPAL_DATA` for Bedrock IAM-principal attribution
+>   (the tradeoff OQ-5 called out under Legacy).
+> - **Validation gap:** the CSV read path is validated against hermetic fakes only; it is **NOT yet
+>   validated against a real CUR 2.0 delivery** (export takes ~24h to first-deliver). The exact CSV
+>   serialization of the `resource_tags` map is assumed to be JSON and parsed defensively.
+>
 > **One-line:** A small, deterministic **customer-installed CLI package** (`moo-cloud-bill`, name TBD — OQ-9) that (1) **discovers or sets up an AWS Legacy CUR via the AWS SDK** — reusing an existing CUR when present, else creating one after explicit confirmation (`configure`), (2) on a schedule **reads the delivered CUR, aggregates hourly lines to a daily grain, and POSTs daily batches to Acute's `/api/v1/cloud-billing/import` with `Authorization: Bearer`** (`push`), and (3) surfaces untagged spend and seeds Acute's `resource_service_map` so previously-untracked spend becomes attributable (`scan`/`review`/`seed`). The Moolabs API key (generated in the Moolabs UI) is captured once via a hidden prompt (`init`). **No agent/LLM at runtime.** Acute already does attribution after import — **this PRD changes no moo-acute code.**
 >
 > **Packaging:** CLI tool / pip-installable package, run by the customer (`configure` once, `push` via cron). NOT an agent skill. **Scope: AWS only** — GCP/Azure ship as separate tools later.

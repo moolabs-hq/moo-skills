@@ -18,9 +18,8 @@ def _cfg(**kw):
 
 
 class _S3NoData:
-    def get_object(self, Bucket, Key):  # noqa: N803 — manifest read → missing
-        raise KeyError("no manifest")
-
+    # CUR 2.0 verify globs the export prefix; an empty Contents means "not
+    # delivered yet" (no manifest, no get_object).
     def list_objects_v2(self, **kwargs):
         return {"Contents": []}
 
