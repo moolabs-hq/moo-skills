@@ -18,7 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+# pydantic is NOT a runtime dep (the CLI uses dataclasses); it's dev-only so the
+# Acute contract test (tests/test_acute_contract.py) can validate our request
+# bodies against a verbatim copy of Acute's server schema. Skipped if absent.
+dev = ["pytest>=8", "ruff>=0.5", "pydantic>=2"]
 
 [project.scripts]
 moo-cloud-bill = "moo_cloud_bill.cli:main"
