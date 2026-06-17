@@ -69,8 +69,12 @@ def push_batches(batches, credits, client, *, dry_run=False, out=print) -> PushS
     return summary
 
 
-def read_cur_rows(config, clients) -> list[dict]:
+def read_cur_rows(config, clients, *, out=print) -> list[dict]:
     """List CUR 2.0 data objects (.csv.gz) under the export prefix and read all rows.
+
+    Always logs the object count so a scheduled run leaves a clear trail in
+    CloudWatch — "0 objects" (not delivered yet) reads differently from "ran but
+    found nothing", which an empty log can't distinguish.
 
     NOTE (OQ-3, memory bound): this materializes the whole CUR in memory (each
     gzipped CSV is decompressed and parsed in full). Fine for typical exports; a
@@ -79,6 +83,12 @@ def read_cur_rows(config, clients) -> list[dict]:
     """
     s3 = clients["s3"]
     keys = _list_cur_object_keys(s3, config.bucket, config.prefix, config.report_name)
+    where = f"{config.prefix}/{config.report_name}/"
+    if not keys:
+        out(f"No CUR data delivered yet (0 objects under {where}). Nothing to push — "
+            f"AWS first-delivers a new export ~24-48h after creation.")
+        return []
+    out(f"Found {len(keys)} CUR object(s) under {where}.")
     raw_rows: list[dict] = []
     for key in keys:
         raw_rows.extend(aws.iter_cur_rows(s3, config.bucket, key))
@@ -88,13 +98,22 @@ def read_cur_rows(config, clients) -> list[dict]:
 def run_push(config, api_key, *, clients=None, column_map, client=None, dry_run=False, out=print) -> int:
     """Read CUR objects from S3 → aggregate → push. ``clients``/``client`` injectable for tests."""
     clients = clients or aws.make_clients(profile=config.aws_profile, region=config.region)
-    raw_rows = read_cur_rows(config, clients)
+    raw_rows = read_cur_rows(config, clients, out=out)
 
     batches, credits = build_daily_batches(
         raw_rows, column_map, reporting_currency=config.reporting_currency, cloud_provider="aws"
     )
+    if raw_rows:
+        out(f"Read {len(raw_rows)} CUR row(s) → {len(batches)} daily batch(es); "
+            f"{len(credits)} excluded line(s).")
     client = client or AcuteClient(config.acute_base, api_key)
     summary = push_batches(batches, credits, client, dry_run=dry_run, out=out)
+    # One grep-able summary line per run — present even when there was nothing to do.
+    if dry_run:
+        out(f"[dry-run] {len(batches)} day(s) would be posted; no changes made.")
+    else:
+        out(f"Push complete: posted {summary.ok} day(s), {summary.failed} failed, "
+            f"{summary.skipped_credits} credit line(s) skipped.")
     return summary.exit_code
 
 
