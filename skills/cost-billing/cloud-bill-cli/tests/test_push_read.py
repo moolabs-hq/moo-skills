@@ -115,6 +115,43 @@ def test_run_push_end_to_end_aggregates_and_posts():
     assert str(client.import_calls[0].rows[0].cost) == "3.50"
 
 
+class _EmptyS3:
+    def list_objects_v2(self, **kwargs):
+        return {"Contents": []}
+
+
+def test_no_data_run_leaves_a_clear_log_trail():
+    # The observability fix: a scheduled run with no delivered CUR must NOT be
+    # silent — it logs "not delivered yet" + a final summary, and still exits 0.
+    out = []
+    client = RecordingAcuteClient()
+    rc = run_push(_config(), "k", clients={"s3": _EmptyS3()}, column_map=CM, client=client, out=out.append)
+    assert rc == 0
+    assert client.import_calls == []
+    text = "\n".join(out)
+    assert "No CUR data delivered yet (0 objects under cost/hourly/r/)" in text
+    assert "Push complete: posted 0 day(s), 0 failed" in text
+
+
+def test_push_logs_object_count_and_summary():
+    out = []
+    s3 = FakeS3Objects("cost/hourly/r/data.csv.gz", _csv_gz_bytes(_rows()))
+    run_push(_config(), "k", clients={"s3": s3}, column_map=CM, client=RecordingAcuteClient(), out=out.append)
+    text = "\n".join(out)
+    assert "Found 1 CUR object(s) under cost/hourly/r/." in text
+    assert "Read 2 CUR row(s) → 1 daily batch(es); 0 excluded line(s)." in text
+    assert "Push complete: posted 1 day(s), 0 failed" in text
+
+
+def test_dry_run_summary_says_would_post():
+    out = []
+    s3 = FakeS3Objects("cost/hourly/r/data.csv.gz", _csv_gz_bytes(_rows()))
+    run_push(_config(), "k", clients={"s3": s3}, column_map=CM,
+             client=RecordingAcuteClient(), dry_run=True, out=out.append)
+    text = "\n".join(out)
+    assert "[dry-run] 1 day(s) would be posted; no changes made." in text
+
+
 # ── list_data_object_keys: .csv.gz filter + billing-period scoping ──────────
 
 class _FakeS3Keys:
