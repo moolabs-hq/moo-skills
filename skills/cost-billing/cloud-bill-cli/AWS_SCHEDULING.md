@@ -25,6 +25,26 @@ You'll do this once. After it's running, the only ongoing artifact is the daily 
 
 ---
 
+## Automated path (recommended)
+
+The steps below are also wrapped in a guided script that runs the AWS CLI for you —
+it checks prerequisites, prints a plan, **reuses anything that already exists**, and
+**asks before every single create** (answer `q` to stop at any point):
+
+```bash
+# from the cloud-bill-cli directory:
+bash scripts/aws-fargate-setup.sh --dry-run   # print every command, change nothing
+bash scripts/aws-fargate-setup.sh             # run it, confirming each step
+```
+
+It reads your bucket/prefix/report/acute-base from `moo-cloud-bill configure`, your
+API key from the `init` credentials file, and offers your default VPC's subnets +
+security group. `install.sh` offers to run it for you too. The manual steps below are
+the reference for what that script does (and the path if you prefer to run each command
+yourself).
+
+---
+
 ## 0. Prerequisites
 
 - `aws` CLI v2, authenticated to the account whose CUR you ingest, with permission to

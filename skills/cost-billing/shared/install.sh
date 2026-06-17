@@ -1766,15 +1766,16 @@ choose_push_schedule() {
   echo "  ── Automate the daily push ────────────────────────────────────"
   echo "  Where should the daily 'push' run?"
   echo "    1) AWS — ECS Fargate, scheduled (RECOMMENDED). Runs in your account via an"
-  echo "       IAM role: no laptop, no SSO expiry. You follow a short runbook of AWS CLI"
-  echo "       steps that YOU run — nothing is created in your account without your say-so."
+  echo "       IAM role (no laptop, no SSO expiry). A guided setup runs the AWS CLI for"
+  echo "       you: checks prerequisites, shows a PLAN, REUSES what exists, and asks"
+  echo "       before EACH create — nothing happens without your yes (or --dry-run first)."
   echo "    2) This machine — cron. DEV/TEST ONLY: runs only while this box is on + authed."
   echo "    3) Skip — set it up later."
   local choice=""
   while [[ -z "$choice" ]]; do
     read -r -p "  Choice [1-3]: " choice
     case "$choice" in
-      1) _print_aws_schedule_pointer "$runbook"; return 0 ;;
+      1) _run_aws_fargate_setup "$cli_dir" "$aws_profile"; return 0 ;;
       2) schedule_push_cron "$cli_dir" "$aws_profile"; return 0 ;;
       3) echo "  Skipped. AWS runbook: $runbook   (or re-run install to choose cron)."; return 0 ;;
       *) echo "  Pick 1, 2, or 3."; choice="" ;;
@@ -1782,22 +1783,47 @@ choose_push_schedule() {
   done
 }
 
-_print_aws_schedule_pointer() {
-  local runbook="$1"
+# Offer to RUN the guided AWS Fargate provisioner (scripts/aws-fargate-setup.sh).
+# The script itself discloses a plan and confirms before EACH AWS mutation, so this
+# wrapper just explains, offers a dry-run, and hands off (or prints alternatives).
+_run_aws_fargate_setup() {
+  local cli_dir="$1" aws_profile="$2"
+  local script="$cli_dir/scripts/aws-fargate-setup.sh"
+  local runbook="$cli_dir/AWS_SCHEDULING.md"
   echo ""
-  echo "  AWS Fargate scheduling is a one-time, customer-run setup. Full runbook:"
-  echo "    $runbook"
-  echo "  You run each AWS CLI command yourself; it covers: store the API key in"
-  echo "  Secrets Manager → build+push the image to ECR → create least-privilege IAM"
-  echo "  roles → register the Fargate task → verify with one run → create the daily"
-  echo "  EventBridge schedule. The task authenticates with an IAM role (no SSO expiry)."
-  if [[ -f "$runbook" ]] && command -v open >/dev/null 2>&1; then
-    printf "  Open the runbook now? [y/N]: "; read -r a
-    case "$a" in y|Y|yes|YES) open "$runbook" 2>/dev/null || true ;; esac
-  elif [[ -f "$runbook" ]] && command -v xdg-open >/dev/null 2>&1; then
-    printf "  Open the runbook now? [y/N]: "; read -r a
-    case "$a" in y|Y|yes|YES) xdg-open "$runbook" 2>/dev/null || true ;; esac
+  if [[ ! -f "$script" ]]; then
+    echo "  Guided setup script not found at:"
+    echo "    $script"
+    echo "  Follow the manual runbook instead: $runbook"
+    return 0
   fi
+  echo "  Guided AWS Fargate setup. It will:"
+  echo "    • check prerequisites (aws CLI, docker) and offer to install missing ones,"
+  echo "    • show a PLAN (Secrets Manager secret, ECR image, 3 IAM roles, ECS task +"
+  echo "      cluster, EventBridge schedule),"
+  echo "    • REUSE anything that already exists and ASK before EACH create."
+  echo ""
+  echo "    y) Run it now (you confirm each step)"
+  echo "    d) Dry-run first (print every command, change nothing)"
+  echo "    n) Not now — show alternatives"
+  local a; read -r -p "  Run the AWS Fargate setup? [y/d/N]: " a
+  case "$a" in
+    y|Y|yes|YES)
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script"; else bash "$script"; fi ;;
+    d|D|dry|dry-run)
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script" --dry-run; else bash "$script" --dry-run; fi
+      echo ""
+      printf "  Now run it for real? [y/N]: "; read -r a2
+      case "$a2" in y|Y|yes|YES)
+        if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script"; else bash "$script"; fi ;;
+      *) echo "  Left as a dry-run. Run later: bash \"$script\"" ;; esac ;;
+    *)
+      echo "  No problem — nothing was changed. Alternatives:"
+      echo "    • Preview the plan anytime:  bash \"$script\" --dry-run"
+      echo "    • Run it later:              bash \"$script\""
+      echo "    • Do it by hand:             $runbook"
+      ;;
+  esac
 }
 
 # Build a self-contained `push` command line (absolute paths, no reliance on the

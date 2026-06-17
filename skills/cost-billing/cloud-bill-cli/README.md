@@ -47,8 +47,11 @@ Fargate scheduled task** driven by EventBridge Scheduler: it runs in your accoun
 an **IAM role** (no SSO expiry), reads config from env (`MCB_*`) and the API key from
 Secrets Manager, and is fully containerized (`Dockerfile` included).
 
-→ **Full runbook: [`AWS_SCHEDULING.md`](./AWS_SCHEDULING.md)** — customer-run AWS CLI
-steps (you run each command; nothing is created in your account without your action).
+→ **Guided setup: [`scripts/aws-fargate-setup.sh`](./scripts/aws-fargate-setup.sh)** —
+runs the AWS CLI for you, but shows a plan, reuses what exists, and asks before EACH
+create (`--dry-run` to preview). `install.sh` offers to run it.
+→ **Manual reference: [`AWS_SCHEDULING.md`](./AWS_SCHEDULING.md)** — the same steps as
+commands you run yourself.
 
 Local cron is supported for **dev/test only**:
 
