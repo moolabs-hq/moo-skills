@@ -54,6 +54,18 @@ integration:
   sdk_key_read_pattern: |
     boto3.client("secretsmanager", region_name="us-east-1") \
         .get_secret_value(SecretId="prod/moolabs/sdk-api-key")["SecretString"]
+  # Engineer-confirmed tenancy field + source (Q15c). shape echoed from 02-cpo;
+  # the codemod binds tenant_id_field to the envelope's customer_id slot.
+  multi_tenant:
+    shape: shared-db
+    tenant_id_field: "request.state.tenant_id"
+    tenant_id_source: middleware       # AuthMiddleware sets it from the JWT claim
+  # Engineer-captured environments + per-env SDK-key location (Q15d).
+  environments:
+    - id: prod
+      sdk_key_location: { secret_id: "prod/moolabs/sdk-api-key" }
+    - id: staging
+      sdk_key_location: { secret_id: "staging/moolabs/sdk-api-key" }
   sdk_package_install:
     python:
       strategy: latest-tag

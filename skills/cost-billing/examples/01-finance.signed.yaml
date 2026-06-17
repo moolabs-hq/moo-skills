@@ -69,9 +69,10 @@ deployment:
       primary: true
     - id: euw1
       key_prefix: "sk_euw1_"
-  environments:
-    - name: prod
-    - name: staging
-  multi_tenant:
-    shape: shared-db
-    tenant_id_source: "request.state.tenant_id (set by AuthMiddleware)"
+  # Finance records ONLY the commercial tenancy fact (post-2026-06-17 split).
+  # The tenancy SHAPE is the CPO stage (02-cpo > multi_tenant.shape); the
+  # tenant_id field/source + the environments list are the engineer stage
+  # (04-final). See shared/v1-decisions-log.md → Bootstrap-chain ownership splits.
+  tenant_commercial:
+    is_multi_tenant: true
+    billed_per_tenant: true

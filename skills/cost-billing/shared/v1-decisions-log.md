@@ -81,6 +81,38 @@ These came from §6.4a (three-role review gaps surfaced 2026-05-19) and §6.4b (
 
 ---
 
+## Bootstrap-chain ownership splits (who answers which question)
+
+The chain stages map to **who actually holds the knowledge**: finance/CFO owns the
+commercial + regulatory posture; the CPO owns product & data-architecture; the
+engineer owns the real code. When a question asks one stage for knowledge another
+stage owns, it gets moved. The guiding test: *does the human being asked actually
+know the answer, or are they guessing about someone else's domain?*
+
+### 2026-06-08 — sensitive-data three-way split (regime → category → field path)
+Surfaced by a dogfood run (`docs/dogfood-moo-arc-2026-06-08.md`): finance was being
+asked to enumerate PII/PHI **field paths**, which it cannot author.
+- **regime** (which laws bind us) → **finance** (`01-finance > compliance.regimes`)
+- **categories** (which data classes the product handles) → **CPO** (`02-cpo > sensitive_data.categories`)
+- **field paths/regex** (where that data lives in the handlers) → **engineer** (`04-final > pii_field_blocklist`)
+
+### 2026-06-17 — tenancy + environments split (commercial → shape → field/source/envs)
+Same class of bug, spotted in the tenancy questions: finance Q9/Q10 asked the CFO for
+the multi-tenancy **shape** and the **tenant_id field name "in your data model"** — the
+exact data-model/field-name knowledge the 2026-06-08 note says finance lacks. Q8 asked
+finance for the **environments** to instrument (a deploy/code fact). Split, mirroring the
+sensitive-data move:
+- **commercial fact** (is multi-tenant + billed per tenant) → **finance** (`01-finance > deployment.tenant_commercial`)
+- **tenancy shape** (single / shared-db / isolated-db / workspace-based) → **CPO** (`02-cpo > multi_tenant.shape`)
+- **tenant_id field + request source** (concrete code access path + JWT/subdomain/header/body) → **engineer** (`04-final > multi_tenant.tenant_id_field/source`)
+- **environments + per-env SDK-key location** → **engineer** (`04-final > environments`)
+
+Downstream consumers were unaffected: `instrument/` + `discovery/` read the tenant
+binding via code-scan (`attribution-bindings.yaml`) and read `04-final`, not `01-finance`,
+so only the capture stage + schemas + handoff + examples changed — no consumer repoint.
+
+---
+
 ## What's still open after v1
 
 These remain open and should drive HLD agenda:

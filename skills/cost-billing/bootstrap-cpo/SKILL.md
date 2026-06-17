@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-cpo
 description: >-
-  Stage 2 of 4 in the Cost+Billing bootstrap chain. Runs on the CPO's machine only. Reads the finance-stage signed YAML as mandatory input. Interactively asks 8-10 questions about org-level product context — company name + product/vertical names (multi-product split if any), product documentation source(s) (folders, URLs, MCP-accessible collections, multiple sources OK), top features customer-enumerated, internal-only / not-billable callouts, sensitive-data categories the product handles (PII/PHI policy — product-domain knowledge, informed by finance's compliance regimes; the engineer later translates to field paths), end-user terminology, billable-output terminology, unique customer concepts the framework doesn't model. NEVER assumes. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff (checks for hallucinated features vs finance assumptions). Exports a signed YAML the CPO emails/Slacks/Drives to the team-product PM. Triggers on "CPO bootstrap", "product strategy bootstrap", "stage 2 bootstrap", "cost-billing CPO stage".
+  Stage 2 of 4 in the Cost+Billing bootstrap chain. Runs on the CPO's machine only. Reads the finance-stage signed YAML as mandatory input. Interactively asks 9-11 questions about org-level product context — company name + product/vertical names (multi-product split if any), product documentation source(s) (folders, URLs, MCP-accessible collections, multiple sources OK), top features customer-enumerated, internal-only / not-billable callouts, sensitive-data categories the product handles (PII/PHI policy — product-domain knowledge, informed by finance's compliance regimes; the engineer later translates to field paths), end-user terminology, the multi-tenancy SHAPE (single / shared-db / isolated-db / workspace-based — product & data-architecture knowledge informed by finance's commercial tenancy fact; the engineer later confirms the tenant_id field/source), billable-output terminology, unique customer concepts the framework doesn't model. NEVER assumes. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff (checks for hallucinated features vs finance assumptions). Exports a signed YAML the CPO emails/Slacks/Drives to the team-product PM. Triggers on "CPO bootstrap", "product strategy bootstrap", "stage 2 bootstrap", "cost-billing CPO stage".
 license: MIT
 metadata:
   author: Moolabs
@@ -90,6 +90,18 @@ Refuse-to-run if:
 
 ### Q6 — End-user terminology
 > "What do **YOU call your customer's customer**? Examples: 'user', 'agent', 'developer', 'tenant', 'workspace', 'organization', 'subject'. This term flows through every codemod insert and review surface; pick what feels right to you."
+
+### Q6b — Multi-tenancy shape (product / data architecture)
+> "Finance recorded the commercial tenancy fact: `<is_multi_tenant / billed_per_tenant from 01-finance>`. Now the ARCHITECTURE — how are tenants isolated in your product? Pick:
+> - Single-tenant (one customer's data per deployment)
+> - Multi-tenant, shared DB (a `tenant_id`-style column scopes rows)
+> - Multi-tenant, isolated DB (a separate DB / schema per tenant)
+> - Workspace-based (multiple workspaces per account)
+> - Other (describe)
+>
+> The codemod uses tenant identity for attribution. You do NOT need the code's field name — the team engineer (Stage 4) confirms the exact tenant_id field + request source against the real handlers."
+
+(Why this is a CPO question, not finance: the tenancy SHAPE is product / data-architecture knowledge — the CFO owns whether we BILL per tenant (commercial fact), but only the product owner knows shared-db vs isolated-db vs workspace-based. The field name + request source are the engineer's. Same regime→category→path-style split — shape moved from finance 2026-06-17, mirroring the 2026-06-08 sensitive-data move.)
 
 ### Q7 — Billable-output terminology
 > "What do you call **a single billable output**? Examples: 'completion', 'generation', 'response', 'render', 'transcript', 'analysis', 'run'. (Finance gave a high-level answer in Q3 of their stage; confirm or refine here at the product-strategy level. You can also pick PER-product if multi-product: meter's billable output is X, acute's is Y, etc.)"

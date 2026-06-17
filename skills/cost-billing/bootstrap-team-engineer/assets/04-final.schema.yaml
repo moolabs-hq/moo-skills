@@ -136,8 +136,35 @@ properties:
           List of service slugs that USE the shared_config_path when
           env_loader_granularity is hybrid. Services not in this list are
           scanned per-service.
-      # NOTE: regions, environments, multi_tenant come from finance — engineer only references
-      # them. Codemod reads them from 01-finance via the input_chain hash check.
+      # Tenancy/deployment ownership (post-2026-06-17 split):
+      #   - regions                     ← finance (01-finance > deployment.regions)
+      #   - tenant_commercial           ← finance (01-finance > deployment.tenant_commercial)
+      #   - multi_tenant.shape          ← CPO (02-cpo > multi_tenant.shape)
+      #   - multi_tenant.tenant_id_field / tenant_id_source  ← engineer (HERE)
+      #   - environments                ← engineer (HERE)
+      # The codemod reads tenant_id_field/source + environments from THIS doc
+      # (04-final), and shape/regions from the upstream stage YAMLs via input_chain.
+      multi_tenant:
+        type: object
+        # The engineer confirms the concrete field + request source against the real
+        # handlers (Q15c). Single-tenant deployments may omit both.
+        properties:
+          shape:
+            type: string
+            enum: [single, shared-db, isolated-db, workspace-based, other]
+            description: Echoed from 02-cpo > multi_tenant.shape (the engineer does not re-decide it).
+          tenant_id_field: { type: string }    # e.g. request.state.tenant_id
+          tenant_id_source: { type: string, enum: [jwt-claim, subdomain, header, body, middleware, none, other] }
+      environments:
+        type: array
+        description: Engineer-captured (Q15d) — which envs to instrument + each one's SDK-key location.
+        items:
+          type: object
+          required: [id]
+          properties:
+            id: { type: string }
+            sdk_key_location: { type: object }
+            llm_provider: { type: string }
 
       sdk_package_install:
         type: object
