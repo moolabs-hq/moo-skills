@@ -72,8 +72,24 @@ def load_config(
         aws_profile=data.get("aws_profile"),
     )
 
+    # Env config (12-factor) so a Fargate/Lambda container needs NO config file —
+    # the task definition supplies every field via env; the secret stays out (it
+    # comes from Secrets Manager → MOOLABS_API_KEY, handled in credentials.py).
+    # `MCB_*` covers the whole Config; bare ACUTE_BASE/AWS_PROFILE kept for back-compat.
     env_over = {}
-    if env.get("ACUTE_BASE"):
+    mcb_map = {
+        "MCB_BUCKET": "bucket",
+        "MCB_PREFIX": "prefix",
+        "MCB_REPORT_NAME": "report_name",
+        "MCB_REGION": "region",
+        "MCB_ACUTE_BASE": "acute_base",
+        "MCB_REPORTING_CURRENCY": "reporting_currency",
+        "MCB_AWS_PROFILE": "aws_profile",
+    }
+    for env_key, field in mcb_map.items():
+        if env.get(env_key):
+            env_over[field] = env[env_key]
+    if env.get("ACUTE_BASE"):  # back-compat (pre-MCB_ name)
         env_over["acute_base"] = env["ACUTE_BASE"]
     if env.get("AWS_PROFILE"):
         env_over["aws_profile"] = env["AWS_PROFILE"]

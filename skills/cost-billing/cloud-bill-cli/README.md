@@ -28,8 +28,10 @@ moo-cloud-bill configure            # --dry-run to preview without mutating
 # (optional) confirm Acute is reachable + your key works (and whether the CUR has data yet):
 moo-cloud-bill verify
 
-# 3. After AWS delivers the first CUR (~24–48h), push it on a schedule:
-moo-cloud-bill push                 # --dry-run to preview the batches
+# 3. After AWS delivers the first CUR (~24–48h), push it on a schedule.
+#    RECOMMENDED: run it ON AWS (ECS Fargate) — see AWS_SCHEDULING.md. The task
+#    uses an IAM role, so it never fails on an expired laptop/SSO token.
+moo-cloud-bill push                 # --dry-run to preview the batches (manual run)
 
 # 4. Attribute untagged spend:
 moo-cloud-bill scan                 # writes untagged-findings.yaml
@@ -37,19 +39,31 @@ moo-cloud-bill review               # interactive decisions (or edit the YAML)
 moo-cloud-bill seed                 # POST approved (decision=map) mappings
 ```
 
-## Credentials (cron-safe)
+## Scheduling the daily push
 
-`init` stores the key `chmod 600` at `~/.config/moo-cloud-bill/credentials`.
-Because `push` runs non-interactively under cron, the key is resolved by
-precedence **env `MOOLABS_API_KEY` > credentials file > Secrets Manager/SSM** —
-it never prompts at run time. The key is never a CLI arg, never written to
-`moo-cloud-bill.toml`, never logged unmasked.
+**Run it on AWS, not your laptop.** A laptop cron only fires when the machine is on,
+awake, and authenticated — and SSO tokens expire. The recommended setup is an **ECS
+Fargate scheduled task** driven by EventBridge Scheduler: it runs in your account under
+an **IAM role** (no SSO expiry), reads config from env (`MCB_*`) and the API key from
+Secrets Manager, and is fully containerized (`Dockerfile` included).
 
-Cron example:
+→ **Full runbook: [`AWS_SCHEDULING.md`](./AWS_SCHEDULING.md)** — customer-run AWS CLI
+steps (you run each command; nothing is created in your account without your action).
+
+Local cron is supported for **dev/test only**:
 
 ```cron
 0 6 * * *  set -a; . ~/.config/moo-cloud-bill/credentials; set +a; moo-cloud-bill push
 ```
+
+## Credentials (run-safe)
+
+`init` stores the key `chmod 600` at `~/.config/moo-cloud-bill/credentials`.
+Because `push` runs non-interactively (cron or Fargate), the key is resolved by
+precedence **env `MOOLABS_API_KEY` > credentials file** — it never prompts at run
+time. On Fargate, `MOOLABS_API_KEY` is injected from **Secrets Manager** by the task
+definition. The key is never a CLI arg, never written to `moo-cloud-bill.toml`, never
+logged unmasked.
 
 ## Which AWS account / SSO role to use
 
