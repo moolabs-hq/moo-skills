@@ -1,7 +1,7 @@
 ---
 name: cost-billing-bootstrap-finance
 description: >-
-  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks ~10 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes only (SOC2/HIPAA/GDPR/FedRAMP — the sensitive-data-category enumeration now lives at the CPO stage and field-path translation at the engineer stage), region(s) the customer routes to, environments to instrument, and multi-tenant shape (tenant model + tenant_id source). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
+  Stage 1 of 4 in the Cost+Billing bootstrap chain. Runs on the FINANCE/CFO's machine ONLY. Interactively asks ~8 questions about the contractual/regulatory surface — pricing model TYPE + sub-aspects (subscription/usage/hybrid/credit-wallet/enterprise + which apply), pricing source of truth (where the model lives authoritatively + freshness status), billable units in the CFO's own words, fair-usage thresholds + overages + bundling + per-customer custom pricing, compliance regimes only (SOC2/HIPAA/GDPR/FedRAMP — the sensitive-data-category enumeration lives at the CPO stage and field-path translation at the engineer stage), region(s) the customer routes to, and the commercial tenancy fact (is the product multi-tenant + is billing per-tenant — the tenancy SHAPE moved to the CPO stage and the tenant_id field/source + environments to the engineer stage). NEVER assumes — every default surfaces as a question. ONE question at a time. Skill R reviews the AI-synthesized draft BEFORE human signoff. Exports a signed YAML the CFO emails/Slacks/Drives to the CPO. Triggers on "finance bootstrap", "CFO bootstrap", "cost-billing finance stage", "stage 1 bootstrap", "pricing model questionnaire".
 license: MIT
 metadata:
   author: Moolabs
@@ -132,23 +132,28 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 ### Q7 — Region(s)
 > "Which Moolabs region(s) does this customer route through? `sk_use1_*` (US East 1), `sk_apse1_*` (Asia-Pacific SE 1), `sk_euw1_*` (EU West 1), other? Multi-region with primary + failover, or single-region?"
 
-### Q8 — Environments
-> "How many environments are we instrumenting? Dev only? Dev + staging + prod? Per-environment quirks (different API keys, different LLM providers in test vs prod)?"
+### Q8 — Tenancy (commercial fact only)
+> "Is the product multi-tenant — multiple of YOUR customers' organizations sharing the deployment — and do you bill / attribute spend PER tenant? Pick one:
+> - Single-tenant (one customer's data per deployment)
+> - Multi-tenant, billed/attributed per tenant
+> - Multi-tenant, NOT billed per tenant (shared cost)"
 
-### Q9 — Multi-tenant shape
-> "Are your end-users isolated by tenant? Pick:
-> - Single-tenant (one customer's data only)
-> - Multi-tenant on the same DB with `tenant_id` column
-> - Multi-tenant with separate DBs per tenant
-> - Workspace-based (multiple workspaces per account)
-> - Other (describe)
+> NOTE — that commercial fact (are users isolated by tenant, do we bill per tenant)
+> is ALL finance captures about tenancy. The *technical* tenancy details have MOVED
+> OUT of finance (2026-06-17), mirroring the 2026-06-08 sensitive-data split, because
+> finance neither knows the product's data model nor the code's field names:
+> - the **CPO stage** records the multi-tenancy SHAPE (single / shared-db / isolated-db
+>   / workspace-based — product & data-architecture knowledge), and
+> - the **engineer stage** confirms the tenant_id FIELD NAME + request SOURCE
+>   (JWT claim / subdomain / header / body) against the real handlers.
 >
-> The codemod uses tenant identity for attribution — you decide the shape here so the engineer can wire it correctly."
+> (Downstream the codemod binds whatever field the engineer confirms to the envelope's
+> `customer_id` slot — we don't track 'tenant' as a separate envelope field, since that
+> name collides with the Moolabs-internal term for 'the Moolabs customer'.)
 
-### Q10 — Tenant_id field + source
-> "What's the field name that identifies a tenant in YOUR data model? Examples: `tenant_id`, `workspace_id`, `account_id`, `org_id`. And where does it come from on a request — JWT claim, subdomain, header, request body? (You can defer the exact technical source to the engineer if you're not sure — but the FIELD NAME is yours to set.)
->
-> **Note**: whatever name you pick, downstream the codemod binds it to the envelope's `customer_id` slot — we don't track 'tenant' as a separate envelope field (that name collides with the Moolabs-internal term for 'the Moolabs customer'). Your field name stays your field name in source code; the wire-format envelope just has `customer_id`."
+> ENVIRONMENTS likewise moved to the engineer stage (2026-06-17): how many
+> environments to instrument and each one's SDK-key location is deployment/code
+> knowledge the engineer has, not a finance commitment.
 
 ---
 
@@ -158,7 +163,7 @@ Reference structure — you ask these one at a time. Each can spawn 1-2 follow-u
 Verify no stale `.moolabs/chain/` (or confirm `--refresh` / `--resume` intent).
 
 ### Phase 2 — Interactive Q&A
-Ask Q1 → Q10 one at a time. Save each answer to `.moolabs/chain/01-finance.draft.yaml`.
+Ask Q1 → Q8 one at a time. Save each answer to `.moolabs/chain/01-finance.draft.yaml`.
 
 ### Phase 3 — AI synthesizes draft
 Once all questions answered, generate the full structured `01-finance.draft.yaml` with the schema in `assets/01-finance.schema.yaml`.
@@ -168,8 +173,8 @@ Invoke `/cost-billing-adversarial-review --phase post-bootstrap-finance --target
 - **Pricing-model contradiction** — does Q1 (type) actually fit what Q3 (units) describe? Customers often pick "Hybrid" then list pure-subscription units (no usage components).
 - **Source-of-truth ambiguity** — multiple authoritative sources without conflict-resolution rule.
 - **Regime selected with no downstream owner** — a regime in Q6 (HIPAA/GDPR/PCI/CCPA) must be carried to the CPO stage so the CPO enumerates the sensitive-data categories it implies. Finance does NOT enumerate categories or field paths (that's CPO + engineer); flag only that the regime is recorded for handoff.
-- **Multi-tenant shape + tenant_id field gap** — Q9 says multi-tenant but Q10 left blank.
-- **Region + environment combinatorial blind spot** — multi-region + multi-env without explicit per-env region mapping.
+- **Per-tenant billing recorded with no downstream owner** — if Q8 says multi-tenant + billed per tenant, that commercial fact MUST be carried to the CPO (which records the tenancy shape) and the engineer (which confirms the tenant_id field + source). Finance does NOT capture shape or field name; flag only that the commercial fact is recorded for handoff.
+- **Multi-region without a primary/failover designation** — multi-region selected but no primary + failover ordering. (Per-environment mapping is no longer a finance concern — environments moved to the engineer stage.)
 
 ### Phase 5 — Human reviews R findings + draft
 Show the customer:
@@ -267,11 +272,13 @@ compliance:
 
 deployment:
   regions: []
-  environments: []
-  multi_tenant:
-    shape: single | shared-db | isolated-db | workspace-based | other
-    tenant_id_field: ""
-    tenant_id_source_hint: ""      # engineer will confirm in Stage 4
+  # Finance records ONLY the commercial tenancy fact. The tenancy SHAPE is the
+  # CPO stage (02-cpo.yaml > multi_tenant.shape), and the tenant_id FIELD/SOURCE
+  # plus the ENVIRONMENTS list are the engineer stage (04-final). Finance neither
+  # knows the data model nor the code's field names — same split as compliance.
+  tenant_commercial:
+    is_multi_tenant: true | false
+    billed_per_tenant: true | false
 ```
 
 ---

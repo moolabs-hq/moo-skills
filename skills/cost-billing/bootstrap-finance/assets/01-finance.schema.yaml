@@ -121,7 +121,12 @@ properties:
 
   deployment:
     type: object
-    required: [regions, environments, multi_tenant]
+    # Finance owns region(s) + the COMMERCIAL tenancy fact only. The tenancy SHAPE
+    # is captured at the CPO stage (02-cpo > multi_tenant.shape); the tenant_id
+    # FIELD/SOURCE and the ENVIRONMENTS list at the engineer stage (04-final).
+    # Finance neither knows the data model nor the code's field names (same
+    # rationale as the compliance regime↔category↔field-path split).
+    required: [regions, tenant_commercial]
     properties:
       regions:
         type: array
@@ -132,20 +137,9 @@ properties:
             id: { type: string, enum: [use1, apse1, euw1, other] }
             key_prefix: { type: string }
             primary: { type: boolean }
-      environments:
-        type: array
-        items:
-          type: object
-          properties:
-            id: { type: string }
-            sdk_key_location: { type: object }
-            llm_provider: { type: string }
-      multi_tenant:
+      tenant_commercial:
         type: object
-        required: [shape]
+        required: [is_multi_tenant]
         properties:
-          shape:
-            type: string
-            enum: [single, shared-db, isolated-db, workspace-based, other]
-          tenant_id_field: { type: string }
-          tenant_id_source_hint: { type: string }
+          is_multi_tenant: { type: boolean }
+          billed_per_tenant: { type: boolean }

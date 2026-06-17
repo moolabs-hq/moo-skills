@@ -102,6 +102,19 @@ properties:
         type: array
         items: { type: string }   # only if HIPAA in finance regimes; guarded more strictly
 
+  # Q6b — multi-tenancy SHAPE (product / data-architecture knowledge). Finance
+  # recorded only the commercial fact (01-finance > deployment.tenant_commercial);
+  # the engineer (Stage 4, 04-final > multi_tenant.tenant_id_field/source) confirms
+  # the exact field + request source against the real handlers.
+  multi_tenant:
+    type: object
+    required: [shape]
+    properties:
+      shape:
+        type: string
+        enum: [single, shared-db, isolated-db, workspace-based, other]
+      notes: { type: string }
+
   terminology:
     type: object
     properties:

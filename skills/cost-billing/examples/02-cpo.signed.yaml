@@ -44,6 +44,12 @@ products:
       - feature_id: triage
         label: "Inbound ticket triage + auto-response"
 
+# Q6b — multi-tenancy SHAPE (product/data-architecture). Informed by finance's
+# commercial fact (01-finance > deployment.tenant_commercial); the engineer
+# confirms the concrete tenant_id field/source in 04-final.
+multi_tenant:
+  shape: shared-db
+
 terminology:
   end_user: "shopper"          # customer's preferred term
   billable_output: "completion"
