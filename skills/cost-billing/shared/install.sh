@@ -1427,7 +1427,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   fi
   if [[ -d "$SUITE_SRC_DIR/cloud-bill-cli" ]] \
      && [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]]; then
-    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, run 'configure', then schedule a daily 'push' via cron)"
+    echo "[dry-run] would prompt to set up the AWS CUR (install moo-cloud-bill, run 'configure', then choose where to schedule the daily 'push' — AWS Fargate runbook [recommended] or local cron)"
   fi
   exit 0
 fi
@@ -1620,12 +1620,46 @@ maybe_setup_cur() {
     return 0
   fi
   echo "─── AWS Cost & Usage Report setup ──────────────────────────────────"
-  echo "moo-cloud-bill configures your AWS CUR and pushes it to Acute (needs AWS creds)."
-  printf "Configure the CUR now (installs the CLI, then runs its discovery-first wizard)? [y/N]: "
+  echo "  Before doing anything, here is EXACTLY what this step would do in your"
+  echo "  AWS account — and how. Nothing happens until you say yes."
+  echo ""
+  echo "  HOW: it pip-installs the moo-cloud-bill CLI into this environment, then runs"
+  echo "  its 'configure' wizard under an AWS profile YOU pick (your own SSO/creds)."
+  echo "  The wizard is discovery-first: it reuses an existing export when it can and"
+  echo "  asks you again before EACH change — it creates nothing without your 'yes'."
+  echo ""
+  echo "  READ-ONLY first (no changes to your account):"
+  echo "    • list your CUR 2.0 Data Exports        [bcm-data-exports:List/GetExport]"
+  echo "    • list your S3 buckets                  [s3:ListAllMyBuckets]"
+  echo "    • read your account id                  [sts:GetCallerIdentity]"
+  echo ""
+  echo "  WRITES — only if you confirm in the wizard AND no usable export exists:"
+  echo "    • (optional) create an S3 delivery bucket you name   [s3:CreateBucket]"
+  echo "    • apply a bucket policy so AWS can write the CUR      [s3:PutBucketPolicy]"
+  echo "    • create a CUR 2.0 export in us-east-1               [bcm-data-exports:CreateExport]"
+  echo "  Then it captures your Moolabs API key locally (chmod 600) and runs a"
+  echo "  read-only Acute 'verify'. No AWS resource is created without a second yes."
+  echo ""
+  echo "  PRECONDITION: the account needs 'IAM access to Billing' enabled (Billing"
+  echo "  console → Account → IAM access), else CUR API calls 403. Ongoing 'push'"
+  echo "  needs only READ (s3:ListBucket + s3:GetObject)."
+  echo ""
+  printf "  Proceed with the CUR setup wizard now? [y/N]: "
   read -r reply
   case "$reply" in
     y|Y|yes|YES) ;;
-    *) echo "Skipped. Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"; return 0 ;;
+    *)
+      echo ""
+      echo "  No problem — nothing was changed in your AWS account. Alternatives:"
+      echo "    • Preview it without touching AWS:"
+      echo "        pip install \"$cli_dir\" && moo-cloud-bill configure --dry-run"
+      echo "    • Do it yourself later, step by step:"
+      echo "        pip install \"$cli_dir\" && moo-cloud-bill configure"
+      echo "    • Set up the CUR + scheduling entirely by hand (you run each AWS CLI"
+      echo "      command): $cli_dir/AWS_SCHEDULING.md  +  $cli_dir/README.md"
+      echo "    • Re-run this installer anytime to come back to this step."
+      return 0
+      ;;
   esac
 
   # Prefer pip into the active env so the command is immediately invocable here.
@@ -1644,16 +1678,9 @@ maybe_setup_cur() {
     return 0
   fi
 
-  echo "  ── AWS account & permissions ──────────────────────────────────"
+  echo "  ── AWS account & profile ──────────────────────────────────────"
   echo "  Use the account whose bill you want to ingest (single-account v1)."
-  echo "  The chosen profile / SSO role needs at SETUP time:"
-  echo "    bcm-data-exports:CreateExport, bcm-data-exports:ListExports,"
-  echo "    bcm-data-exports:GetExport, s3:ListAllMyBuckets, s3:PutBucketPolicy,"
-  echo "    sts:GetCallerIdentity (+ s3:CreateBucket if you create a new bucket)"
-  echo "  AND the account must have 'IAM access to Billing' enabled"
-  echo "  (Billing console → Account → IAM access) — without it, CUR calls 403"
-  echo "  even with the right IAM policy. Ongoing 'push' needs only READ"
-  echo "  (s3:ListBucket + s3:GetObject)."
+  echo "  (Permissions + the 'IAM access to Billing' precondition were listed above.)"
 
   # boto3 needs valid credentials before configure can call STS. Let the engineer
   # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
@@ -1714,10 +1741,63 @@ maybe_setup_cur() {
   "${mcb_cmd[@]}" "${profile_args[@]}" verify || echo "  (verify reported an issue — see above; re-run: moo-cloud-bill verify)"
 
   # Automate the ongoing push (the whole point — the CUR refreshes daily and Acute
-  # supersedes per-period, so a daily unattended push keeps attribution current).
-  schedule_push_cron "$cli_dir" "$aws_profile"
+  # supersedes per-period, so a daily push keeps attribution current). Ask WHERE it
+  # should run; the AWS path is recommended and is a customer-run runbook (we never
+  # provision AWS for you).
+  choose_push_schedule "$cli_dir" "$aws_profile"
 
   echo "  Setup done."
+}
+
+# Ask where the daily push should run. AWS Fargate (recommended) points to the
+# customer-run runbook — we do NOT create AWS resources here. Local cron stays as a
+# dev/test convenience. The whole point of preferring AWS: an IAM role replaces SSO,
+# so the job never fails on an expired laptop token.
+choose_push_schedule() {
+  local cli_dir="$1" aws_profile="$2"
+  local runbook="$cli_dir/AWS_SCHEDULING.md"
+
+  if [[ ! -t 0 ]]; then
+    echo "  Schedule the push later — recommended: AWS Fargate (runbook: $runbook)."
+    return 0
+  fi
+
+  echo ""
+  echo "  ── Automate the daily push ────────────────────────────────────"
+  echo "  Where should the daily 'push' run?"
+  echo "    1) AWS — ECS Fargate, scheduled (RECOMMENDED). Runs in your account via an"
+  echo "       IAM role: no laptop, no SSO expiry. You follow a short runbook of AWS CLI"
+  echo "       steps that YOU run — nothing is created in your account without your say-so."
+  echo "    2) This machine — cron. DEV/TEST ONLY: runs only while this box is on + authed."
+  echo "    3) Skip — set it up later."
+  local choice=""
+  while [[ -z "$choice" ]]; do
+    read -r -p "  Choice [1-3]: " choice
+    case "$choice" in
+      1) _print_aws_schedule_pointer "$runbook"; return 0 ;;
+      2) schedule_push_cron "$cli_dir" "$aws_profile"; return 0 ;;
+      3) echo "  Skipped. AWS runbook: $runbook   (or re-run install to choose cron)."; return 0 ;;
+      *) echo "  Pick 1, 2, or 3."; choice="" ;;
+    esac
+  done
+}
+
+_print_aws_schedule_pointer() {
+  local runbook="$1"
+  echo ""
+  echo "  AWS Fargate scheduling is a one-time, customer-run setup. Full runbook:"
+  echo "    $runbook"
+  echo "  You run each AWS CLI command yourself; it covers: store the API key in"
+  echo "  Secrets Manager → build+push the image to ECR → create least-privilege IAM"
+  echo "  roles → register the Fargate task → verify with one run → create the daily"
+  echo "  EventBridge schedule. The task authenticates with an IAM role (no SSO expiry)."
+  if [[ -f "$runbook" ]] && command -v open >/dev/null 2>&1; then
+    printf "  Open the runbook now? [y/N]: "; read -r a
+    case "$a" in y|Y|yes|YES) open "$runbook" 2>/dev/null || true ;; esac
+  elif [[ -f "$runbook" ]] && command -v xdg-open >/dev/null 2>&1; then
+    printf "  Open the runbook now? [y/N]: "; read -r a
+    case "$a" in y|Y|yes|YES) xdg-open "$runbook" 2>/dev/null || true ;; esac
+  fi
 }
 
 # Build a self-contained `push` command line (absolute paths, no reliance on the
