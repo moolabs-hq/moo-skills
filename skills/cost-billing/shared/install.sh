@@ -1620,12 +1620,46 @@ maybe_setup_cur() {
     return 0
   fi
   echo "─── AWS Cost & Usage Report setup ──────────────────────────────────"
-  echo "moo-cloud-bill configures your AWS CUR and pushes it to Acute (needs AWS creds)."
-  printf "Configure the CUR now (installs the CLI, then runs its discovery-first wizard)? [y/N]: "
+  echo "  Before doing anything, here is EXACTLY what this step would do in your"
+  echo "  AWS account — and how. Nothing happens until you say yes."
+  echo ""
+  echo "  HOW: it pip-installs the moo-cloud-bill CLI into this environment, then runs"
+  echo "  its 'configure' wizard under an AWS profile YOU pick (your own SSO/creds)."
+  echo "  The wizard is discovery-first: it reuses an existing export when it can and"
+  echo "  asks you again before EACH change — it creates nothing without your 'yes'."
+  echo ""
+  echo "  READ-ONLY first (no changes to your account):"
+  echo "    • list your CUR 2.0 Data Exports        [bcm-data-exports:List/GetExport]"
+  echo "    • list your S3 buckets                  [s3:ListAllMyBuckets]"
+  echo "    • read your account id                  [sts:GetCallerIdentity]"
+  echo ""
+  echo "  WRITES — only if you confirm in the wizard AND no usable export exists:"
+  echo "    • (optional) create an S3 delivery bucket you name   [s3:CreateBucket]"
+  echo "    • apply a bucket policy so AWS can write the CUR      [s3:PutBucketPolicy]"
+  echo "    • create a CUR 2.0 export in us-east-1               [bcm-data-exports:CreateExport]"
+  echo "  Then it captures your Moolabs API key locally (chmod 600) and runs a"
+  echo "  read-only Acute 'verify'. No AWS resource is created without a second yes."
+  echo ""
+  echo "  PRECONDITION: the account needs 'IAM access to Billing' enabled (Billing"
+  echo "  console → Account → IAM access), else CUR API calls 403. Ongoing 'push'"
+  echo "  needs only READ (s3:ListBucket + s3:GetObject)."
+  echo ""
+  printf "  Proceed with the CUR setup wizard now? [y/N]: "
   read -r reply
   case "$reply" in
     y|Y|yes|YES) ;;
-    *) echo "Skipped. Later:  pip install \"$cli_dir\" && moo-cloud-bill configure"; return 0 ;;
+    *)
+      echo ""
+      echo "  No problem — nothing was changed in your AWS account. Alternatives:"
+      echo "    • Preview it without touching AWS:"
+      echo "        pip install \"$cli_dir\" && moo-cloud-bill configure --dry-run"
+      echo "    • Do it yourself later, step by step:"
+      echo "        pip install \"$cli_dir\" && moo-cloud-bill configure"
+      echo "    • Set up the CUR + scheduling entirely by hand (you run each AWS CLI"
+      echo "      command): $cli_dir/AWS_SCHEDULING.md  +  $cli_dir/README.md"
+      echo "    • Re-run this installer anytime to come back to this step."
+      return 0
+      ;;
   esac
 
   # Prefer pip into the active env so the command is immediately invocable here.
@@ -1644,16 +1678,9 @@ maybe_setup_cur() {
     return 0
   fi
 
-  echo "  ── AWS account & permissions ──────────────────────────────────"
+  echo "  ── AWS account & profile ──────────────────────────────────────"
   echo "  Use the account whose bill you want to ingest (single-account v1)."
-  echo "  The chosen profile / SSO role needs at SETUP time:"
-  echo "    bcm-data-exports:CreateExport, bcm-data-exports:ListExports,"
-  echo "    bcm-data-exports:GetExport, s3:ListAllMyBuckets, s3:PutBucketPolicy,"
-  echo "    sts:GetCallerIdentity (+ s3:CreateBucket if you create a new bucket)"
-  echo "  AND the account must have 'IAM access to Billing' enabled"
-  echo "  (Billing console → Account → IAM access) — without it, CUR calls 403"
-  echo "  even with the right IAM policy. Ongoing 'push' needs only READ"
-  echo "  (s3:ListBucket + s3:GetObject)."
+  echo "  (Permissions + the 'IAM access to Billing' precondition were listed above.)"
 
   # boto3 needs valid credentials before configure can call STS. Let the engineer
   # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
