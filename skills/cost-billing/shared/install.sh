@@ -172,6 +172,8 @@ NO_BOOTSTRAP_CTA=0
 NO_PRUNE=0
 PACKAGE_MODE=0
 PACKAGE_DIR=""
+PLUGIN_ZIP_MODE=0
+PLUGIN_ZIP_DIR=""
 MCP_NAMES=()
 MCP_TARGET=""
 MCP_CONFIG_PATH=""
@@ -196,6 +198,8 @@ while [[ $# -gt 0 ]]; do
     --no-prune) NO_PRUNE=1; shift ;;
     --package) PACKAGE_MODE=1; shift ;;
     --package-dir) PACKAGE_DIR="$2"; shift 2 ;;
+    --plugin-zip) PLUGIN_ZIP_MODE=1; shift ;;
+    --plugin-zip-dir) PLUGIN_ZIP_DIR="$2"; shift 2 ;;
     --mcp)
       # Repeatable: --mcp outline --mcp notion. Also supports CSV: --mcp outline,notion
       IFS=',' read -ra _mcp_list <<< "$2"
@@ -854,17 +858,21 @@ EOF
 
   if [[ ${#_DETECTED[@]} -gt 1 ]]; then
     echo ""
-    echo "Detected ${#_DETECTED[@]} agent platforms on this machine: ${_DETECTED[*]}"
-    echo "Installing to each (override with --platform NAME for a single target)."
+    if [[ $PACKAGE_MODE -eq 0 && $PLUGIN_ZIP_MODE -eq 0 ]]; then
+      echo "Detected ${#_DETECTED[@]} agent platforms on this machine: ${_DETECTED[*]}"
+      echo "Installing to each (override with --platform NAME for a single target)."
+    fi
 
     # Run prompts ONCE at the top so per-platform recursions inherit the answers
     # via explicit flags instead of re-prompting per platform.
     if [[ $UNINSTALL -eq 0 ]]; then
-      if [[ $PACKAGE_MODE -eq 1 && -z "$PERSONA" ]]; then PERSONA="all"; fi
+      if [[ ($PACKAGE_MODE -eq 1 || $PLUGIN_ZIP_MODE -eq 1) && -z "$PERSONA" ]]; then PERSONA="all"; fi
       prompt_persona
-      prompt_repo
-      if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
-        prompt_handoff
+      if [[ $PACKAGE_MODE -eq 0 && $PLUGIN_ZIP_MODE -eq 0 ]]; then
+        prompt_repo
+        if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
+          prompt_handoff
+        fi
       fi
     fi
 
@@ -886,6 +894,13 @@ EOF
     if ! _arg_in --no-handoff-prompt "${_ORIG_ARGS[@]+"${_ORIG_ARGS[@]}"}"; then
       _FWD+=("--no-handoff-prompt")
     fi
+    # --package / --plugin-zip are platform-agnostic: skip the full fan-out and
+    # delegate to one child, which will call the relevant builder and exit.
+    if [[ $PACKAGE_MODE -eq 1 || $PLUGIN_ZIP_MODE -eq 1 ]]; then
+      declare -a _PLAT_FWD_PKG=("${_FWD[@]+"${_FWD[@]}"}")
+      "$0" --platform "${_DETECTED[0]}" "${_PLAT_FWD_PKG[@]+"${_PLAT_FWD_PKG[@]}"}"; exit $?
+    fi
+
     # Codegraph init is per-repo, not per-platform: run it on the first child
     # only. Forward --skip-codegraph to every child *after* the first.
     declare -a _FAILED=()
@@ -929,16 +944,18 @@ fi
 
 if [[ $UNINSTALL -eq 0 ]]; then
   # For --package, default to 'all' if no persona specified (typical: package everything for distribution).
-  if [[ $PACKAGE_MODE -eq 1 && -z "$PERSONA" ]]; then
+  if [[ ($PACKAGE_MODE -eq 1 || $PLUGIN_ZIP_MODE -eq 1) && -z "$PERSONA" ]]; then
     PERSONA="all"
-    echo "Note: --package defaulting to --persona all (override with --persona <name>)"
+    echo "Note: --package/--plugin-zip defaulting to --persona all (override with --persona <name>)"
   fi
   prompt_persona
-  prompt_repo
-  # Only personas that PRODUCE handoff docs need the prompt — finance / cpo /
-  # team-product / all. Engineer is last in the chain; doesn't hand off further.
-  if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
-    prompt_handoff
+  if [[ $PACKAGE_MODE -eq 0 && $PLUGIN_ZIP_MODE -eq 0 ]]; then
+    prompt_repo
+    # Only personas that PRODUCE handoff docs need the prompt — finance / cpo /
+    # team-product / all. Engineer is last in the chain; doesn't hand off further.
+    if [[ "$PERSONA" == "finance" || "$PERSONA" == "product" || "$PERSONA" == "cpo" || "$PERSONA" == "team-product" || "$PERSONA" == "all" ]]; then
+      prompt_handoff
+    fi
   fi
 fi
 
@@ -1126,9 +1143,134 @@ CHATGPT DESKTOP:
 EOF
 }
 
-# Dispatch BEFORE the local-install path so --package short-circuits early.
+# ──────────────────────────────────────────────────────────────────────
+# --plugin-zip mode: produce a single self-contained plugin zip suitable
+# for the Claude app "Upload local plugin" dialog. Unlike --package (which
+# creates one zip per skill for Claude Projects), this bundles all skills
+# under a shared plugin.json so the whole suite installs in one upload.
+# ──────────────────────────────────────────────────────────────────────
+
+build_plugin_zip() {
+  if ! command -v zip >/dev/null 2>&1; then
+    echo "ERROR: 'zip' not on PATH. Install with: brew install zip / apt install zip" >&2
+    exit 1
+  fi
+
+  local dist="${PLUGIN_ZIP_DIR:-${SUITE_SRC_DIR}/../dist}"
+  dist="$(mkdir -p "$dist" && cd "$dist" && pwd)"
+  local staging="$dist/_plugin_staging"
+  local out_zip="$dist/cost-billing-plugin.zip"
+
+  rm -rf "$staging" && mkdir -p "$staging"
+  rm -f "$out_zip"
+
+  echo ""
+  echo "─── Building Claude-app plugin zip ────────────────────────────"
+  echo "Source : $SUITE_SRC_DIR"
+  echo "Output : $out_zip"
+  echo "Persona: $PERSONA"
+  echo ""
+
+  local shared_handoff="$SUITE_SRC_DIR/shared/chain-handoff.md"
+  local shared_principles="$SUITE_SRC_DIR/shared/operating-principles.md"
+  local skills_added=()
+
+  for skill in "${SUITE_SKILLS[@]}"; do
+    [[ "$skill" == "cost-billing-shared" ]] && continue
+    local skill_name="${skill#cost-billing-}"
+    local src="$SUITE_SRC_DIR/$skill_name"
+    if [[ ! -d "$src" || ! -f "$src/SKILL.md" ]]; then
+      echo "  SKIP $skill" >&2
+      continue
+    fi
+
+    # Claude app expects skills under skills/ subdirectory (mirrors repo layout).
+    rsync -a \
+      --exclude='.pytest_cache' --exclude='__pycache__' \
+      --exclude='.ruff_cache'   --exclude='*.pyc' \
+      --exclude='.git'          --exclude='.DS_Store' \
+      "$src/" "$staging/skills/$skill_name/"
+
+    # Bundle shared docs so the plugin is self-contained (same as --package).
+    mkdir -p "$staging/skills/$skill_name/references"
+    [[ -f "$shared_principles" ]] && \
+      cp "$shared_principles" "$staging/skills/$skill_name/references/operating-principles.md"
+    case "$skill" in
+      cost-billing-bootstrap-finance|cost-billing-bootstrap-cpo|cost-billing-bootstrap-team-product|cost-billing-bootstrap-team-engineer)
+        [[ -f "$shared_handoff" ]] && \
+          cp "$shared_handoff" "$staging/skills/$skill_name/references/chain-handoff.md" ;;
+    esac
+
+    skills_added+=("./skills/$skill_name")
+    echo "  staged: $skill_name"
+  done
+
+  if [[ ${#skills_added[@]} -eq 0 ]]; then
+    echo "ERROR: no skills staged — nothing to zip." >&2
+    rm -rf "$staging"
+    exit 1
+  fi
+
+  # Generate .claude-plugin/plugin.json — the path the Claude app requires.
+  mkdir -p "$staging/.claude-plugin"
+  local skills_json=""
+  local first=1
+  for s in "${skills_added[@]}"; do
+    [[ $first -eq 0 ]] && skills_json+=","$'\n'
+    skills_json+="    \"$s\""
+    first=0
+  done
+
+  cat > "$staging/.claude-plugin/plugin.json" <<EOF
+{
+  "name": "cost-billing",
+  "version": "1.0.0",
+  "description": "Cost-billing suite — four-stage chain: finance bootstrap → CPO → team-product → engineering. Covers cloud cost attribution, tagging governance, spend discovery, and signed handoff between chain personas.",
+  "author": {
+    "name": "Moolabs",
+    "email": "kritivasrocks@gmail.com"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["cost-billing", "finance", "cloud-costs", "billing", "aws", "tagging"],
+  "skills": [
+$skills_json
+  ]
+}
+EOF
+
+  # Zip with skills/ and .claude-plugin/ at root (mirrors repo layout).
+  ( cd "$staging" && zip -rq "$out_zip" . \
+      -x ".DS_Store" -x "*/.DS_Store" \
+      -x "__pycache__/*" -x "*/__pycache__/*" \
+      -x ".git/*" -x "*/.git/*" ) || {
+    echo "ERROR: zip failed" >&2; rm -rf "$staging"; exit 1
+  }
+
+  rm -rf "$staging"
+
+  local size; size=$(du -h "$out_zip" | awk '{print $1}')
+  echo ""
+  echo "✓ Plugin zip ready: $out_zip ($size, ${#skills_added[@]} skills)"
+  echo ""
+  cat <<'INSTRUCTIONS'
+═══════════════════════════════════════════════════════════════════
+ INSTALL IN CLAUDE APP
+═══════════════════════════════════════════════════════════════════
+  1. Open Claude app → Settings → Plugins
+  2. "Upload local plugin" → Browse files → select cost-billing-plugin.zip
+  3. Confirm install — all cost-billing skills load in one step.
+═══════════════════════════════════════════════════════════════════
+INSTRUCTIONS
+}
+
+# Dispatch BEFORE the local-install path so --package/--plugin-zip short-circuit early.
 if [[ $PACKAGE_MODE -eq 1 ]]; then
   package_skills
+  exit 0
+fi
+
+if [[ $PLUGIN_ZIP_MODE -eq 1 ]]; then
+  build_plugin_zip
   exit 0
 fi
 

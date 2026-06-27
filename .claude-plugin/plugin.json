@@ -1,7 +1,7 @@
 {
   "name": "moo-skills",
-  "version": "0.2.2",
-  "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow (requirements → HLD → contracts → BE/FE), testing blueprints (frontend unit, backend unit, backend API), feature-flag patterns, and reviewer/sparring-partner/architect personas.",
+  "version": "0.3.0",
+  "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow (requirements → HLD → contracts → BE/FE), testing blueprints (frontend unit, backend unit, backend API), feature-flag patterns, reviewer/sparring-partner/architect personas, and the cost-billing suite (finance bootstrap → CPO → team-product → engineering chain).",
   "author": {
     "name": "Moolabs",
     "email": "kritivasrocks@gmail.com"
@@ -37,6 +37,16 @@
     "./skills/persona-senior-engineer",
     "./skills/persona-sparring-partner",
     "./skills/persona-system-design-reviewer",
-    "./skills/testing-qa-persona"
+    "./skills/testing-qa-persona",
+    "./skills/cost-billing/adversarial-review",
+    "./skills/cost-billing/bootstrap-cpo",
+    "./skills/cost-billing/bootstrap-finance",
+    "./skills/cost-billing/bootstrap-team-engineer",
+    "./skills/cost-billing/bootstrap-team-product",
+    "./skills/cost-billing/cloud-bill",
+    "./skills/cost-billing/discovery",
+    "./skills/cost-billing/drift-lint",
+    "./skills/cost-billing/instrument",
+    "./skills/cost-billing/signoff"
   ]
 }
