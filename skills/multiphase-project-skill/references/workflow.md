@@ -68,6 +68,15 @@ python3 scripts/state_manager.py add-work 01-foundation w3-ci \
 python3 scripts/state_manager.py set-phase-status 01-foundation decomposed
 ```
 
+**Before setting phase to `decomposed`**, run the phase decompose checklist from `references/phase-decompose-checklist.md`. Answer each of the 6 items (or mark N/A with one-line justification) in the phase's work notes. This gate catches planning gaps that would otherwise surface as CRITICAL findings in the adversarial review:
+
+1. **Idempotency mechanisms** — name the mechanism and layer for every "idempotent" work item
+2. **UI-BFF endpoint contract** — list every HTTP endpoint the UI calls; map each to a backend work item
+3. **Fail-closed state reachability** — for each named error state, write the code path that reaches it
+4. **Cross-layer type consistency** — for string enums crossing layers, name the canonical form and verify all layers
+5. **Data field query semantics** — for each new column, specify: filtered, sorted, projected, or aggregated
+6. **Test scope per work item** — list the test cases (one line each) this work item requires
+
 ### 2b. Groom phase — generate the PRD
 
 ```bash

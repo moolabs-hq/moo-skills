@@ -2,6 +2,18 @@
 
 Two stages in this orchestrator are open-ended loops. Each has a precise exit condition. Apply them strictly — sloppy stop conditions are how phases get marked done while still broken.
 
+## Stop condition 0 — Phase decompose planning gate
+
+Before invoking `/ralph-loop` for any phase, verify that the phase decompose checklist has been completed (see `references/phase-decompose-checklist.md`). This gate must be satisfied before the phase advances from `decomposed` to `groomed`.
+
+The checklist answers must be recorded in the phase's work notes or PRD preamble. Unmarked items — even if N/A — mean the gate is not satisfied.
+
+**Why this is a stop condition, not a guideline:** The six checklist items correspond to the six CRITICAL and IMPORTANT finding categories that consistently surface during adversarial review. A phase that enters `/ralph-loop` without answering these items will produce the same bugs on every project. The checklist doesn't replace review — it eliminates preventable findings so review time focuses on genuinely hard problems.
+
+**If you cannot answer an item:** that is itself a signal. A work item whose idempotency mechanism you cannot name is underspecified — break it down further before proceeding.
+
+---
+
 ## Stop condition A — `/ralph-loop` development
 
 ### Mechanism
