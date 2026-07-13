@@ -700,6 +700,194 @@ class DiscoveryContractTests(unittest.TestCase):
                 self.assertEqual(resolver["state"], "proposed")
                 self.assertEqual(resolver["expression"], "auth.customer_id")
 
+    def test_resolver_rejects_overwritten_verified_auth_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    auth.customer_id = '00000000-0000-0000-0000-000000000000'\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+                "    return {'customer': str(customer)}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_rejects_verified_auth_field_overwritten_on_one_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(replace, auth=Depends(verify_jwt)):\n"
+                "    if replace:\n"
+                "        auth.customer_id = '00000000-0000-0000-0000-000000000000'\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+                "    return {'customer': str(customer)}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_rejects_verified_auth_field_overwritten_through_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    claims = auth\n"
+                "    claims.customer_id = '00000000-0000-0000-0000-000000000000'\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+                "    return {'customer': str(customer)}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_rejects_alias_created_after_verified_field_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    auth.customer_id = '00000000-0000-0000-0000-000000000000'\n"
+                "    claims = auth\n"
+                "    return uuid.UUID(claims.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+                "    return {'customer': str(customer)}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_preserves_trust_after_unrelated_auth_field_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    auth.display_name = 'masked'\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+                "    return {'customer': str(customer)}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "proposed",
+            )
+
+    @staticmethod
+    def _verified_auth_mutation_source(mutation: str) -> str:
+        return (
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def resolve_customer(auth=Depends(verify_jwt)):\n"
+            f"    {mutation}\n"
+            "    return uuid.UUID(auth.customer_id)\n"
+            "@app.get('/orders')\n"
+            "def orders(user=Depends(require_auth), customer=Depends(resolve_customer)):\n"
+            "    return {'customer': str(customer)}\n"
+        )
+
+    def test_resolver_rejects_verified_auth_field_overwritten_with_setattr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                self._verified_auth_mutation_source(
+                    "setattr(auth, 'customer_id', "
+                    "'00000000-0000-0000-0000-000000000000')"
+                ),
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_rejects_verified_auth_field_removed_with_delattr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                self._verified_auth_mutation_source(
+                    "delattr(auth, 'customer_id')"
+                ),
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
     def test_resolver_conservatively_merges_raw_and_trusted_python_branches(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

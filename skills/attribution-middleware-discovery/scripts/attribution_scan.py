@@ -2369,9 +2369,11 @@ def _resolver_and_async(
         ):
             state: dict[str, Any] = {
                 "trusted_roots": set(),
+                "trusted_root_aliases": {},
                 "raw_variables": {},
                 "verified_variables": {},
                 "verified_contexts": {},
+                "tainted_contexts": set(),
                 "aliases": {},
                 "resolver_candidates": {},
             }
@@ -2384,6 +2386,7 @@ def _resolver_and_async(
                         _dotted_name(default.args[0])
                     ):
                         state["trusted_roots"].add(argument.arg)
+                        state["trusted_root_aliases"][argument.arg] = argument.arg
 
             def clone(current: dict[str, Any]) -> dict[str, Any]:
                 return {
@@ -2400,10 +2403,14 @@ def _resolver_and_async(
                     merged[key].intersection_update(
                         *(path_state[key] for path_state in reachable[1:])
                     )
+                merged["tainted_contexts"].update(
+                    *(path_state["tainted_contexts"] for path_state in reachable[1:])
+                )
                 for key in (
                     "raw_variables",
                     "verified_variables",
                     "verified_contexts",
+                    "trusted_root_aliases",
                     "aliases",
                     "resolver_candidates",
                 ):
@@ -2414,13 +2421,78 @@ def _resolver_and_async(
                     }
                 return merged
 
+            def equivalent_trusted_contexts(
+                expression: str,
+                root_aliases: dict[str, str],
+            ) -> set[str]:
+                root_name, separator, suffix = expression.partition(".")
+                canonical_root = root_aliases.get(root_name)
+                if not separator or canonical_root is None:
+                    return {expression}
+                return {
+                    f"{alias}.{suffix}"
+                    for alias, canonical in root_aliases.items()
+                    if canonical == canonical_root
+                }
+
+            def trusted_context_expression(
+                expression: str,
+                root_aliases: dict[str, str],
+            ) -> bool:
+                root_name, separator, suffix = expression.partition(".")
+                return bool(
+                    separator
+                    and root_name in root_aliases
+                    and re.search(r"(?:customer|tenant|account)", suffix, re.I)
+                )
+
+            def taint_context(
+                expression: str,
+                current: dict[str, Any],
+                root_aliases: dict[str, str],
+            ) -> None:
+                equivalent_contexts = equivalent_trusted_contexts(
+                    expression,
+                    root_aliases,
+                )
+                current["tainted_contexts"].update(equivalent_contexts)
+                for equivalent_context in equivalent_contexts:
+                    current["verified_contexts"].pop(equivalent_context, None)
+                    current["resolver_candidates"].pop(equivalent_context, None)
+
             def record_calls(root: ast.AST | None, current: dict[str, Any]) -> None:
                 if root is None:
                     return
                 for call in (child for child in ast.walk(root) if isinstance(child, ast.Call)):
+                    call_name = _call_name(call.func)
+                    if (
+                        call_name
+                        in {
+                            "setattr",
+                            "builtins.setattr",
+                            "delattr",
+                            "builtins.delattr",
+                            "object.__setattr__",
+                        }
+                        and len(call.args) >= 2
+                        and isinstance(call.args[1], ast.Constant)
+                        and isinstance(call.args[1].value, str)
+                    ):
+                        mutated_root = _dotted_name(call.args[0])
+                        mutated_expression = f"{mutated_root}.{call.args[1].value}"
+                        if trusted_context_expression(
+                            mutated_expression,
+                            current["trusted_root_aliases"],
+                        ):
+                            taint_context(
+                                mutated_expression,
+                                current,
+                                current["trusted_root_aliases"],
+                            )
+                        continue
                     if not call.args:
                         continue
-                    validator = _call_name(call.func)
+                    validator = call_name
                     argument = call.args[0]
                     if isinstance(argument, ast.Name):
                         provenance = current["aliases"].get(argument.id)
@@ -2434,8 +2506,9 @@ def _resolver_and_async(
                                 current["verified_contexts"].get(expression),
                             )
                             if context_pattern.fullmatch(expression)
+                            and expression not in current["tainted_contexts"]
                             and (
-                                root_name in current["trusted_roots"]
+                                root_name in current["trusted_root_aliases"]
                                 or expression in current["verified_contexts"]
                             )
                             else None
@@ -2474,8 +2547,9 @@ def _resolver_and_async(
                 raw_before = dict(current["raw_variables"])
                 verified_before = dict(current["verified_variables"])
                 aliases_before = dict(current["aliases"])
-                trusted_roots_before = set(current["trusted_roots"])
                 verified_contexts_before = dict(current["verified_contexts"])
+                tainted_contexts_before = set(current["tainted_contexts"])
+                trusted_root_aliases_before = dict(current["trusted_root_aliases"])
                 evaluated: list[
                     tuple[
                         ast.AST,
@@ -2511,8 +2585,11 @@ def _resolver_and_async(
                     )
                     root_name = expression.split(".", 1)[0]
                     if provenance is None and context_pattern.fullmatch(expression) and (
-                        root_name in trusted_roots_before
-                        or expression in verified_contexts_before
+                        expression not in tainted_contexts_before
+                        and (
+                            root_name in trusted_root_aliases_before
+                            or expression in verified_contexts_before
+                        )
                     ):
                         provenance = (
                             "trusted",
@@ -2542,6 +2619,13 @@ def _resolver_and_async(
                         current["verified_variables"].pop(target_name, None)
                         current["aliases"].pop(target_name, None)
                         current["trusted_roots"].discard(target_name)
+                        current["trusted_root_aliases"].pop(target_name, None)
+                        current["tainted_contexts"] = {
+                            expression
+                            for expression in current["tainted_contexts"]
+                            if expression != target_name
+                            and not expression.startswith(f"{target_name}.")
+                        }
                         current["resolver_candidates"] = {
                             expression: candidate
                             for expression, candidate in current["resolver_candidates"].items()
@@ -2549,9 +2633,21 @@ def _resolver_and_async(
                             and not expression.startswith(f"{target_name}.")
                         }
                     context_expression = _dotted_name(target)
-                    if context_pattern.fullmatch(context_expression):
-                        current["verified_contexts"].pop(context_expression, None)
-                        current["resolver_candidates"].pop(context_expression, None)
+                    equivalent_contexts = equivalent_trusted_contexts(
+                        context_expression,
+                        trusted_root_aliases_before,
+                    )
+                    if context_pattern.fullmatch(
+                        context_expression
+                    ) or trusted_context_expression(
+                        context_expression,
+                        trusted_root_aliases_before,
+                    ):
+                        taint_context(
+                            context_expression,
+                            current,
+                            trusted_root_aliases_before,
+                        )
                     if value is None:
                         continue
 
@@ -2565,14 +2661,46 @@ def _resolver_and_async(
                         else inherited_verified_source
                     )
                     if (
-                        context_pattern.fullmatch(context_expression)
+                        (
+                            context_pattern.fullmatch(context_expression)
+                            or trusted_context_expression(
+                                context_expression,
+                                trusted_root_aliases_before,
+                            )
+                        )
                         and context_source_line is not None
                     ):
-                        current["verified_contexts"][context_expression] = context_source_line
+                        for equivalent_context in equivalent_contexts:
+                            current["tainted_contexts"].discard(equivalent_context)
+                            current["verified_contexts"][
+                                equivalent_context
+                            ] = context_source_line
                     if isinstance(value, ast.Call) and _trusted_identity_provider_name(
                         _call_name(value.func)
                     ):
                         current["trusted_roots"].update(target_names)
+                        for target_name in target_names:
+                            current["trusted_root_aliases"][target_name] = target_name
+                    elif (
+                        isinstance(value, ast.Name)
+                        and value.id in trusted_root_aliases_before
+                    ):
+                        canonical_root = trusted_root_aliases_before[value.id]
+                        for target_name in target_names:
+                            current["trusted_roots"].add(target_name)
+                            current["trusted_root_aliases"][target_name] = canonical_root
+                            inherited_taints = set()
+                            for tainted_expression in current["tainted_contexts"]:
+                                tainted_root, separator, suffix = (
+                                    tainted_expression.partition(".")
+                                )
+                                if (
+                                    separator
+                                    and trusted_root_aliases_before.get(tainted_root)
+                                    == canonical_root
+                                ):
+                                    inherited_taints.add(f"{target_name}.{suffix}")
+                            current["tainted_contexts"].update(inherited_taints)
                     if direct_raw_source:
                         for target_name in target_names:
                             current["raw_variables"][target_name] = value.lineno
@@ -2585,11 +2713,19 @@ def _resolver_and_async(
 
             def clear_target(target: ast.AST, current: dict[str, Any]) -> None:
                 for child, _ in _assignment_bindings(ast.AnnAssign(target, None, None, 1)):
+                    root_aliases_before = dict(current["trusted_root_aliases"])
                     if isinstance(child, ast.Name):
                         current["raw_variables"].pop(child.id, None)
                         current["verified_variables"].pop(child.id, None)
                         current["aliases"].pop(child.id, None)
                         current["trusted_roots"].discard(child.id)
+                        current["trusted_root_aliases"].pop(child.id, None)
+                        current["tainted_contexts"] = {
+                            expression
+                            for expression in current["tainted_contexts"]
+                            if expression != child.id
+                            and not expression.startswith(f"{child.id}.")
+                        }
                         current["resolver_candidates"] = {
                             expression: candidate
                             for expression, candidate in current["resolver_candidates"].items()
@@ -2597,9 +2733,17 @@ def _resolver_and_async(
                             and not expression.startswith(f"{child.id}.")
                         }
                     context_expression = _dotted_name(child)
-                    if context_pattern.fullmatch(context_expression):
-                        current["verified_contexts"].pop(context_expression, None)
-                        current["resolver_candidates"].pop(context_expression, None)
+                    if context_pattern.fullmatch(
+                        context_expression
+                    ) or trusted_context_expression(
+                        context_expression,
+                        root_aliases_before,
+                    ):
+                        taint_context(
+                            context_expression,
+                            current,
+                            root_aliases_before,
+                        )
 
             def process_statements(
                 statements: list[ast.stmt],
