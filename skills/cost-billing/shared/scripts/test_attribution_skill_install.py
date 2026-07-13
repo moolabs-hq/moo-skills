@@ -194,7 +194,10 @@ class AttributionSkillInstallTests(unittest.TestCase):
             shutil.copytree(attribution_root / "fixtures" / "drift", customer_repo)
             (customer_repo / "service" / "app.py").write_text(
                 "from fastapi import Depends, FastAPI\n"
+                "from starlette.middleware.authentication import "
+                "AuthenticationMiddleware\n"
                 "app = FastAPI()\n"
+                "app.add_middleware(AuthenticationMiddleware, backend=backend)\n"
                 "app.add_middleware(AttributionMiddleware)\n"
                 "@app.get('/orders')\n"
                 "def orders(claims=Depends(verify_jwt)):\n"

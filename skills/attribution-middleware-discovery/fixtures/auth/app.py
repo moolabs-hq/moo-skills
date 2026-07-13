@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, FastAPI
+from starlette.middleware.authentication import AuthenticationMiddleware
 
 app = FastAPI()
-app.add_middleware(AuthenticationMiddleware)  # noqa: F821
+app.add_middleware(AuthenticationMiddleware)
 
 @app.get("/global")
 def global_route():

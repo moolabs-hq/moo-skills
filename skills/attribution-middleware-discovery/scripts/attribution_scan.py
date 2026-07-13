@@ -133,7 +133,10 @@ def _route(
     path_template, confidence = _path_value(raw_path)
     stable_path = path_template if path_template is not None else f"dynamic:{raw_path.strip()}"
     route_id = hashlib.sha256(
-        f"{service_path}|{framework}|{method}|{stable_path}|{evidence['file']}".encode()
+        (
+            f"{service_path}|{framework}|{method}|{stable_path}|"
+            f"{evidence['file']}|{receiver or '<unattached>'}"
+        ).encode()
     ).hexdigest()[:16]
     slug_source = path_template or f"unresolved-{route_id}"
     slug = re.sub(r"[^a-z0-9]+", "-", slug_source.strip("/").replace("{", "").replace("}", "").lower()).strip("-")
@@ -228,18 +231,20 @@ def _python_route_methods(
 
 
 def _auth_name(value: str) -> bool:
-    leaf = value.rsplit(".", 1)[-1]
-    return bool(re.search(
-        r"(?:authentication|authenticate|authorization|auth)(?:_?middleware)?|"
-        r"require_?auth|verify_?(?:jwt|token)|current_?user",
-        leaf,
-        re.I,
-    ))
+    return value in {
+        "AuthenticationMiddleware",
+        "starlette.middleware.authentication.AuthenticationMiddleware",
+    }
 
 
 def _attribution_name(value: str) -> bool:
     leaf = value.rsplit(".", 1)[-1]
-    return bool(re.search(r"(?:attribution|moolabs).*(?:middleware|context)|(?:middleware|context).*(?:attribution|moolabs)", leaf, re.I))
+    return leaf in {
+        "AttributionMiddleware",
+        "MoolabsAttributionMiddleware",
+        "attribution_middleware",
+        "moolabs_attribution_middleware",
+    }
 
 
 def _has_auth_dependency(node: ast.AST) -> bool:
@@ -348,6 +353,13 @@ def _prefixed_raw_path(prefix: str | None, raw_path: str) -> str:
     if prefix is None or path is None:
         return raw_path if prefix == "" else "<dynamic>"
     return json.dumps((prefix.rstrip("/") + "/" + path.lstrip("/")) or "/")
+
+
+def _compose_path_prefix(parent: str | None, child: str | None) -> str | None:
+    if parent is None or child is None:
+        return None
+    parts = [part.strip("/") for part in (parent, child) if part.strip("/")]
+    return f"/{'/'.join(parts)}" if parts else ""
 
 
 def _balanced_call_text(text: str, open_parenthesis: int) -> str:
@@ -816,38 +828,95 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
     def static_starlette_routes(
         path: Path,
         node: ast.AST,
+        prefix: str | None = "",
         seen: frozenset[tuple[Path, str, str, tuple[int, int]]] = frozenset(),
-    ) -> tuple[list[ast.Call], bool]:
+    ) -> tuple[
+        list[tuple[ast.Call, str | None]],
+        list[tuple[ast.Call, str | None, bool]],
+        bool,
+        bool,
+    ]:
         if isinstance(node, ast.Constant) and node.value is None:
-            return [], False
+            return [], [], False, True
         if isinstance(node, ast.Name):
             binding = static_value(path, node.id, node)
             if binding is None or binding[0] in seen or binding[1] is None:
-                return [], True
+                return [], [], True, False
             return static_starlette_routes(
                 path,
                 binding[1],
+                prefix,
                 seen | {binding[0]},
             )
         if isinstance(node, ast.Call):
             constructor = canonical(path, _dotted_name(node.func), node)
-            return ([node], False) if constructor == "starlette.routing.Route" else ([], True)
+            if constructor == "starlette.routing.Route":
+                return [(node, prefix)], [], False, True
+            if constructor == "starlette.routing.Mount":
+                prefix_node = _call_argument(node, 0, "path")
+                mount_prefix = (
+                    _path_value(_literal_source(prefix_node))[0]
+                    if prefix_node is not None
+                    else None
+                )
+                effective_prefix = _compose_path_prefix(prefix, mount_prefix)
+                routes_node = _call_argument(node, 2, "routes")
+                if routes_node is None:
+                    route_calls = []
+                    nested_mounts = []
+                    unknown_routes = True
+                    routes_static = False
+                else:
+                    (
+                        route_calls,
+                        nested_mounts,
+                        unknown_routes,
+                        routes_static,
+                    ) = static_starlette_routes(
+                        path,
+                        routes_node,
+                        effective_prefix,
+                        seen,
+                    )
+                mount_static = mount_prefix is not None and routes_static
+                return (
+                    route_calls,
+                    [(node, effective_prefix, mount_static), *nested_mounts],
+                    unknown_routes,
+                    mount_static,
+                )
+            return [], [], True, False
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            routes: list[ast.Call] = []
-            unresolved = False
+            routes: list[tuple[ast.Call, str | None]] = []
+            mounts: list[tuple[ast.Call, str | None, bool]] = []
+            unknown_routes = False
+            fully_static = True
             for item in node.elts:
                 value = item.value if isinstance(item, ast.Starred) else item
-                item_routes, item_unresolved = static_starlette_routes(
+                (
+                    item_routes,
+                    item_mounts,
+                    item_unknown_routes,
+                    item_static,
+                ) = static_starlette_routes(
                     path,
                     value,
+                    prefix,
                     seen,
                 )
                 routes.extend(item_routes)
-                unresolved = unresolved or item_unresolved
-            return routes, unresolved
-        return [], True
+                mounts.extend(item_mounts)
+                unknown_routes = unknown_routes or item_unknown_routes
+                fully_static = fully_static and item_static
+            return routes, mounts, unknown_routes, fully_static
+        return [], [], True, False
 
-    starlette_route_receivers: dict[int, set[str]] = {}
+    starlette_route_surfaces: dict[int, set[tuple[str, str | None]]] = {}
+    starlette_managed_route_calls: set[int] = set()
+    starlette_constructor_mounts: dict[
+        Path,
+        list[tuple[str, ast.Call, str | None, bool]],
+    ] = {}
     starlette_unknown_routes: dict[Path, list[tuple[str, ast.AST]]] = {}
     attribution_receivers: set[str] = set()
     global_auth_roots: set[str] = set()
@@ -871,7 +940,22 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                 if constructor == "Starlette":
                     routes_node = _call_argument(value, 1, "routes")
                     if routes_node is not None:
-                        route_calls, unresolved = static_starlette_routes(
+                        for child in ast.walk(routes_node):
+                            if not isinstance(child, ast.Call):
+                                continue
+                            child_constructor = canonical(
+                                path,
+                                _dotted_name(child.func),
+                                child,
+                            )
+                            if child_constructor == "starlette.routing.Route":
+                                starlette_managed_route_calls.add(id(child))
+                        (
+                            route_calls,
+                            constructor_mounts,
+                            unknown_routes,
+                            _,
+                        ) = static_starlette_routes(
                             path,
                             routes_node,
                         )
@@ -879,12 +963,29 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                             if not isinstance(target, ast.Name):
                                 continue
                             receiver = canonical(path, target.id, target)
-                            for route_call in route_calls:
-                                starlette_route_receivers.setdefault(
+                            for route_call, route_prefix in route_calls:
+                                starlette_managed_route_calls.add(id(route_call))
+                                starlette_route_surfaces.setdefault(
                                     id(route_call),
                                     set(),
-                                ).add(receiver)
-                            if unresolved:
+                                ).add((receiver, route_prefix))
+                            for (
+                                mount_call,
+                                mount_prefix,
+                                mount_static,
+                            ) in constructor_mounts:
+                                starlette_constructor_mounts.setdefault(
+                                    path,
+                                    [],
+                                ).append(
+                                    (
+                                        receiver,
+                                        mount_call,
+                                        mount_prefix,
+                                        mount_static,
+                                    )
+                                )
+                            if unknown_routes:
                                 starlette_unknown_routes.setdefault(path, []).append(
                                     (receiver, routes_node)
                                 )
@@ -918,7 +1019,11 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             if parent not in receivers:
                 continue
             if node.func.attr == "add_middleware" and node.args:
-                middleware_name = _dotted_name(node.args[0])
+                middleware_name = canonical(
+                    path,
+                    _dotted_name(node.args[0]),
+                    node.args[0],
+                )
                 if _auth_name(middleware_name):
                     global_auth_roots.add(parent)
                 if _attribution_name(middleware_name):
@@ -992,7 +1097,9 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
         "attribution_covered": {receiver for receiver in receivers if inherited(receiver, attribution_receivers)},
         "global_auth": {receiver for receiver in receivers if inherited(receiver, global_auth_roots)},
         "authenticated_routers": authenticated_routers,
-        "starlette_route_receivers": starlette_route_receivers,
+        "starlette_route_surfaces": starlette_route_surfaces,
+        "starlette_managed_route_calls": starlette_managed_route_calls,
+        "starlette_constructor_mounts": starlette_constructor_mounts,
         "starlette_unknown_routes": starlette_unknown_routes,
     }
 
@@ -1062,7 +1169,10 @@ def _scan_python(
         if receiver not in receivers:
             continue
         if node.func.attr == "add_middleware" and node.args:
-            middleware_name = _dotted_name(node.args[0])
+            middleware_name = canonical(
+                _dotted_name(node.args[0]),
+                node.args[0],
+            )
             if _auth_name(middleware_name):
                 global_auth.add(receiver)
             if _attribution_name(middleware_name):
@@ -1180,17 +1290,30 @@ def _scan_python(
                 continue
             path_node = _call_argument(node, 0, "path")
             raw_path = _literal_source(path_node) if path_node is not None else "<dynamic>"
-            route_receivers: list[str | None] = sorted(
-                service_context["starlette_route_receivers"].get(id(node), set())
-            ) or [None]
-            for receiver in route_receivers:
+            route_surfaces = sorted(
+                service_context["starlette_route_surfaces"].get(id(node), set()),
+                key=lambda item: (item[0], item[1] is None, item[1] or ""),
+            )
+            if (
+                not route_surfaces
+                and id(node) in service_context["starlette_managed_route_calls"]
+            ):
+                continue
+            route_surfaces = route_surfaces or [(None, "")]
+            for receiver, route_prefix in route_surfaces:
                 auth_scope = (
                     "global"
                     if receiver is not None and receiver in global_auth
                     else "unknown"
                 )
                 prefixed_path = (
-                    _prefixed_raw_path(prefixes.get(receiver, ""), raw_path)
+                    _prefixed_raw_path(
+                        _compose_path_prefix(
+                            prefixes.get(receiver, ""),
+                            route_prefix,
+                        ),
+                        raw_path,
+                    )
                     if receiver is not None
                     else raw_path
                 )
@@ -1206,6 +1329,25 @@ def _scan_python(
                         receiver is not None and receiver in attribution_covered,
                     ))
     if service_context is not None:
+        for (
+            receiver,
+            mount_call,
+            mount_prefix,
+            mount_static,
+        ) in service_context["starlette_constructor_mounts"].get(path, []):
+            effective_prefix = _compose_path_prefix(
+                prefixes.get(receiver, ""),
+                mount_prefix,
+            )
+            mounts.append(_mount(
+                "starlette",
+                "<inline-routes>",
+                json.dumps(effective_prefix)
+                if effective_prefix is not None
+                else "<dynamic>",
+                _location(repo, path, mount_call.lineno),
+                mount_static and effective_prefix is not None,
+            ))
         for receiver, routes_node in service_context[
             "starlette_unknown_routes"
         ].get(path, []):
@@ -3708,7 +3850,17 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             }
         route_keys: set[tuple[Any, ...]] = set()
         unique_routes: list[dict[str, Any]] = []
-        for route in sorted(routes, key=lambda item: (item["framework"], str(item["method"]), str(item["path_template"]), item["evidence"]["file"], item["evidence"]["line"])):
+        for route in sorted(
+            routes,
+            key=lambda item: (
+                item["framework"],
+                str(item["method"]),
+                str(item["path_template"]),
+                str(item.get("_receiver")),
+                item["evidence"]["file"],
+                item["evidence"]["line"],
+            ),
+        ):
             if (
                 route["framework"] == "chi"
                 and not route.get("_middleware_covered")
@@ -3719,7 +3871,14 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
                 ) in go_attributed_call_targets
             ):
                 route["_middleware_covered"] = True
-            key = (route["framework"], route["method"], route["path_template"], route["evidence"]["file"], route["evidence"]["line"])
+            key = (
+                route["framework"],
+                route["method"],
+                route["path_template"],
+                route.get("_receiver"),
+                route["evidence"]["file"],
+                route["evidence"]["line"],
+            )
             if key not in route_keys:
                 route_keys.add(key)
                 unique_routes.append(route)

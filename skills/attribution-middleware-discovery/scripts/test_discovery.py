@@ -346,9 +346,12 @@ class DiscoveryContractTests(unittest.TestCase):
             app.write_text(
                 "import uuid\n"
                 "from fastapi import Depends, FastAPI\n"
+                "from starlette.middleware.authentication import "
+                "AuthenticationMiddleware\n"
                 "app = FastAPI()\n"
+                "app.add_middleware(AuthenticationMiddleware)\n"
                 "@app.middleware('http')\n"
-                "async def attribution_context(request, call_next):\n"
+                "async def attribution_middleware(request, call_next):\n"
                 "    return await call_next(request)\n"
                 "def resolver(auth=Depends(verify_jwt)):\n"
                 "    return uuid.UUID(auth.customer_id)\n"
@@ -1470,7 +1473,7 @@ class DiscoveryContractTests(unittest.TestCase):
                         )
                         for route in service["routes"]
                     ],
-                    [("/api/orders", "global", "high")],
+                    [("/api/orders", "unknown", "high")],
                 )
                 self.assertEqual(
                     [
@@ -1700,6 +1703,115 @@ class DiscoveryContractTests(unittest.TestCase):
             {finding["code"] for finding in service["findings"]},
         )
 
+    def test_shared_starlette_route_preserves_each_receiver_trust_surface(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "starlette\n",
+                encoding="utf-8",
+            )
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from moolabs.middleware import AttributionMiddleware\n"
+                "from starlette.applications import Starlette\n"
+                "from starlette.middleware.authentication import "
+                "AuthenticationMiddleware\n"
+                "from starlette.routing import Route\n"
+                "def orders(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID'))\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+                "shared_route = Route('/orders', orders, methods=['GET'])\n"
+                "private = Starlette(routes=[shared_route])\n"
+                "private.add_middleware(AuthenticationMiddleware, backend=backend)\n"
+                "private.add_middleware(AttributionMiddleware)\n"
+                "public = Starlette(routes=[shared_route])\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            output = repo / ".moolabs" / "attribution" / "map.json"
+            output.parent.mkdir(parents=True)
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            signoff = output.with_name("signoff.json")
+            created = subprocess.run(
+                [
+                    sys.executable,
+                    str(SIGNOFF),
+                    "create",
+                    str(output),
+                    "--repo",
+                    str(repo),
+                    "--output",
+                    str(signoff),
+                    "--operator",
+                    "A. Engineer",
+                    "--codegen-model",
+                    "scanner-codegen",
+                    "--reviewer-model",
+                    "independent-reviewer",
+                    "--review-evidence",
+                    "review://shared-starlette-route",
+                    "--review-verdict",
+                    "clean",
+                    "--findings-resolved",
+                    "1",
+                    "--findings-rejected-as-false-positive",
+                    "0",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            with self.subTest("surfaces"):
+                self.assertEqual(
+                    sorted(route["auth_scope"] for route in service["routes"]),
+                    ["global", "unknown"],
+                )
+                self.assertEqual(
+                    {route["path_template"] for route in service["routes"]},
+                    {"/orders"},
+                )
+            with self.subTest("stable-identities"):
+                self.assertEqual(
+                    len({route["route_id"] for route in service["routes"]}),
+                    2,
+                )
+            with self.subTest("coverage"):
+                self.assertEqual(
+                    result["discovery_projection"]["routes_statically_covered"],
+                    1,
+                )
+                self.assertIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+            with self.subTest("signoff"):
+                self.assertEqual(created.returncode, 2, created.stderr)
+                self.assertIn("unsafe or unresolved", created.stderr)
+                self.assertFalse(signoff.exists())
+
     def test_starlette_dynamic_routes_and_mounts_remain_explicitly_unknown(self):
         cases = {
             "dynamic-route-collection": (
@@ -1755,6 +1867,120 @@ class DiscoveryContractTests(unittest.TestCase):
                         "mount_unresolved",
                         {finding["code"] for finding in service["findings"]},
                     )
+                self.assertNotIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+
+    def test_starlette_constructor_mounts_compose_without_ghost_routes(self):
+        cases = {
+            "inline": (
+                "app = Starlette(routes=[\n"
+                "    Mount('/api', routes=[\n"
+                "        Route('/orders', orders, methods=['GET'])])])\n",
+                "/api/orders",
+                ["/api"],
+            ),
+            "nested-aliases": (
+                "orders_route = HTTPRoute('/orders', orders, methods=['GET'])\n"
+                "v1_routes = MountedRoutes('/v1', routes=[orders_route])\n"
+                "api_routes = MountedRoutes('/api', routes=[v1_routes])\n"
+                "app = Starlette(routes=[api_routes])\n",
+                "/api/v1/orders",
+                ["/api", "/api/v1"],
+            ),
+        }
+        for name, (composition, expected_path, expected_mounts) in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "from moolabs.middleware import AttributionMiddleware\n"
+                    "from starlette.applications import Starlette\n"
+                    "from starlette.middleware.authentication import "
+                    "AuthenticationMiddleware\n"
+                    "from starlette.routing import Mount, Route\n"
+                    "from starlette.routing import Mount as MountedRoutes\n"
+                    "from starlette.routing import Route as HTTPRoute\n"
+                    "def orders(request): return response\n"
+                    f"{composition}"
+                    "app.add_middleware(AuthenticationMiddleware, backend=backend)\n"
+                    "app.add_middleware(AttributionMiddleware)\n",
+                    requirements="starlette\n",
+                )
+
+                self.assertEqual(
+                    [
+                        (
+                            route["method"],
+                            route["path_template"],
+                            route["auth_scope"],
+                            route["confidence"],
+                        )
+                        for route in service["routes"]
+                    ],
+                    [("GET", expected_path, "global", "high")],
+                )
+                self.assertEqual(
+                    sorted(mount["prefix"] for mount in service["mounts"]),
+                    expected_mounts,
+                )
+                self.assertTrue(
+                    all(mount["confidence"] == "high" for mount in service["mounts"])
+                )
+                self.assertNotIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+
+    def test_dynamic_starlette_constructor_mounts_are_single_unresolved_surfaces(self):
+        cases = {
+            "dynamic-prefix": (
+                "Mount(load_prefix(), routes=[\n"
+                "    Route('/orders', orders, methods=['GET'])])",
+                "GET",
+            ),
+            "dynamic-routes": (
+                "Mount('/api', routes=build_routes())",
+                None,
+            ),
+        }
+        for name, (mount_expression, expected_method) in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "from moolabs.middleware import AttributionMiddleware\n"
+                    "from starlette.applications import Starlette\n"
+                    "from starlette.middleware.authentication import "
+                    "AuthenticationMiddleware\n"
+                    "from starlette.routing import Mount, Route\n"
+                    "def orders(request): return response\n"
+                    f"app = Starlette(routes=[{mount_expression}])\n"
+                    "app.add_middleware(AuthenticationMiddleware, backend=backend)\n"
+                    "app.add_middleware(AttributionMiddleware)\n",
+                    requirements="starlette\n",
+                )
+
+                self.assertEqual(
+                    [
+                        (
+                            route["method"],
+                            route["path_template"],
+                            route["auth_scope"],
+                            route["confidence"],
+                        )
+                        for route in service["routes"]
+                    ],
+                    [(expected_method, None, "global", "low")],
+                )
+                self.assertEqual(
+                    [
+                        (mount["prefix"], mount["confidence"])
+                        for mount in service["mounts"]
+                    ],
+                    [(None, "low")],
+                )
+                self.assertIn(
+                    "mount_unresolved",
+                    {finding["code"] for finding in service["findings"]},
+                )
                 self.assertNotIn(
                     "middleware_missing",
                     {finding["code"] for finding in service["findings"]},
@@ -1828,7 +2054,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "@other.get('/other')\n"
                 "def other_route(): return {}\n"
                 "@other.middleware('http')\n"
-                "async def attribution_context(request, call_next):\n"
+                "async def attribution_middleware(request, call_next):\n"
                 "    return await call_next(request)\n",
                 encoding="utf-8",
             )
@@ -1883,6 +2109,115 @@ class DiscoveryContractTests(unittest.TestCase):
             result = self._load(output)
             self.assertFalse(result["services"][0]["middleware_detected"])
             self.assertEqual(result["services"][0]["routes"][0]["auth_scope"], "unknown")
+
+    def test_middleware_name_lookalikes_remain_untrusted_and_unsignable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "fastapi\nstarlette\n",
+                encoding="utf-8",
+            )
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "app = FastAPI(dependencies=[Depends(resolve_customer)])\n"
+                "app.add_middleware(NoAuthMiddleware)\n"
+                "app.add_middleware(MoolabsLoggingContextMiddleware)\n"
+                "@app.get('/public')\n"
+                "def public(): return {}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            output = repo / ".moolabs" / "attribution" / "map.json"
+            output.parent.mkdir(parents=True)
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            signoff = output.with_name("signoff.json")
+            created = subprocess.run(
+                [
+                    sys.executable,
+                    str(SIGNOFF),
+                    "create",
+                    str(output),
+                    "--repo",
+                    str(repo),
+                    "--output",
+                    str(signoff),
+                    "--operator",
+                    "A. Engineer",
+                    "--codegen-model",
+                    "scanner-codegen",
+                    "--reviewer-model",
+                    "independent-reviewer",
+                    "--review-evidence",
+                    "review://lookalike-middleware",
+                    "--review-verdict",
+                    "clean",
+                    "--findings-resolved",
+                    "0",
+                    "--findings-rejected-as-false-positive",
+                    "0",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            with self.subTest("auth"):
+                self.assertEqual(service["routes"][0]["auth_scope"], "unknown")
+            with self.subTest("attribution"):
+                self.assertFalse(service["middleware_detected"])
+                self.assertIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+            with self.subTest("signoff"):
+                self.assertEqual(created.returncode, 2, created.stderr)
+                self.assertIn("unsafe or unresolved", created.stderr)
+                self.assertFalse(signoff.exists())
+
+    def test_explicit_middleware_import_aliases_preserve_trust_and_coverage(self):
+        service = self._discover_python_source(
+            "from fastapi import FastAPI\n"
+            "from moolabs.middleware import AttributionMiddleware as "
+            "AttributionAlias\n"
+            "from starlette.middleware.authentication import "
+            "AuthenticationMiddleware as AuthAlias\n"
+            "app = FastAPI()\n"
+            "app.add_middleware(AuthAlias, backend=backend)\n"
+            "app.add_middleware(AttributionAlias)\n"
+            "@app.get('/private')\n"
+            "def private(): return {}\n",
+            requirements="fastapi\nstarlette\n",
+        )
+
+        self.assertEqual(service["routes"][0]["auth_scope"], "global")
+        self.assertTrue(service["middleware_detected"])
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
 
     def test_js_comments_are_lexically_ignored_and_multiline_calls_keep_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2284,7 +2619,15 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             routes = self._load(output)["services"][0]["routes"]
             scopes = {route["path_template"]: route.get("auth_scope") for route in routes}
-            self.assertEqual(scopes, {"/global": "global", "/handler": "handler", "/router": "router", "/unknown": "global"})
+            self.assertEqual(
+                scopes,
+                {
+                    "/global": "global",
+                    "/handler": "global",
+                    "/router": "unknown",
+                    "/unknown": "global",
+                },
+            )
 
     def test_reports_feature_slug_collisions_for_engineer_review(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2438,7 +2781,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 (SKILL / "SKILL.md").read_text(encoding="utf-8"),
             )
 
-    def test_fastapi_auth_covers_handlers_annotated_add_route_and_router_mount(self):
+    def test_custom_fastapi_auth_names_do_not_prove_route_authentication(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
@@ -2447,13 +2790,13 @@ class DiscoveryContractTests(unittest.TestCase):
                 "from fastapi import APIRouter, Depends, FastAPI\n"
                 "app = FastAPI()\n"
                 "router = APIRouter()\n"
-                "def added(user=Depends(require_auth)): return {}\n"
+                "def added(user=Depends(get_current_user)): return {}\n"
                 "app.add_api_route('/added', added, methods=['GET'])\n"
                 "app.include_router(router, prefix='/v1', dependencies=[Depends(require_auth)])\n"
                 "@router.get('/router')\n"
                 "def nested(): return {}\n"
                 "@app.get('/handler')\n"
-                "def handler(user=Depends(require_auth)): return {}\n"
+                "def handler(user=Depends(verify_jwt)): return {}\n"
                 "@app.get('/annotated')\n"
                 "def annotated(user: Annotated[object, Depends(require_auth)]): return {}\n",
                 encoding="utf-8",
@@ -2469,10 +2812,10 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(
                 scopes,
                 {
-                    "/added": "handler",
-                    "/annotated": "handler",
-                    "/handler": "handler",
-                    "/v1/router": "router",
+                    "/added": "unknown",
+                    "/annotated": "unknown",
+                    "/handler": "unknown",
+                    "/v1/router": "unknown",
                 },
             )
 
