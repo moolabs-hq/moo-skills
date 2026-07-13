@@ -792,11 +792,75 @@ def _scan_python(
     return routes, bool(attribution_receivers), mounts
 
 
-def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
+JS_SOURCE_SUFFIXES = {".js", ".jsx", ".mjs", ".ts", ".tsx"}
+JS_RECEIVER_DECLARATION_PATTERN = re.compile(
+    r"(?:\b(?:const|let|var)\s+)?\b(\w+)\s*=\s*"
+    r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
+)
+JS_EXPORTED_RECEIVER_PATTERN = re.compile(
+    r"\bexport\s+(?:const|let|var)\s+(\w+)\s*=\s*"
+    r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
+)
+
+
+def _js_receiver_framework(constructor: str) -> str:
+    return "hono" if "Hono" in constructor else "express"
+
+
+def _js_imported_route_receivers(files: list[Path]) -> dict[Path, dict[str, str]]:
+    source_files = [path for path in files if path.suffix.lower() in JS_SOURCE_SUFFIXES]
+    exported: dict[Path, dict[str, str]] = {}
+    for path in source_files:
+        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
+        for match in JS_EXPORTED_RECEIVER_PATTERN.finditer(code):
+            if _outside_js_string(code, match.start()):
+                exported.setdefault(path.resolve(), {})[match.group(1)] = (
+                    _js_receiver_framework(match.group(2))
+                )
+
+    imported: dict[Path, dict[str, str]] = {}
+    import_pattern = re.compile(
+        r"\bimport\s*\{([^}]+)\}\s*from\s*['\"](\.[^'\"]+)['\"]",
+        re.S,
+    )
+    for path in source_files:
+        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
+        for match in import_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            module = (path.parent / match.group(2)).resolve()
+            candidates = [module]
+            if module.suffix.lower() not in JS_SOURCE_SUFFIXES:
+                candidates.extend(Path(f"{module}{suffix}") for suffix in JS_SOURCE_SUFFIXES)
+                candidates.extend(module / f"index{suffix}" for suffix in JS_SOURCE_SUFFIXES)
+            source_exports = next(
+                (exported[candidate] for candidate in candidates if candidate in exported),
+                None,
+            )
+            if source_exports is None:
+                continue
+            for binding in match.group(1).split(","):
+                parts = re.split(r"\s+as\s+", binding.strip(), maxsplit=1)
+                exported_name = parts[0].removeprefix("type ").strip()
+                local_name = parts[-1].strip()
+                framework = source_exports.get(exported_name)
+                if framework is not None:
+                    imported.setdefault(path, {})[local_name] = framework
+    return imported
+
+
+def _scan_js(
+    repo: Path,
+    service_path: str,
+    path: Path,
+    text: str,
+    imported_receivers: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     code = _without_js_comments(text)
-    route_receivers: set[str] = set()
+    receiver_frameworks = dict(imported_receivers or {})
+    route_receivers: set[str] = set(receiver_frameworks)
     declared_receivers: set[str] = set()
     parents: dict[str, list[tuple[str, str | None]]] = {}
     unsupported_receivers = set(
@@ -812,15 +876,12 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
     )
     attribution_receivers = {match.group(1) for match in attribution_pattern.finditer(code) if _outside_js_string(code, match.start())}
     auth_receivers = {match.group(1) for match in auth_pattern.finditer(code) if _outside_js_string(code, match.start())}
-    app_declaration = re.compile(
-        r"(?:\b(?:const|let|var)\s+)?\b(\w+)\s*=\s*"
-        r"(?:express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
-    )
-    for match in app_declaration.finditer(code):
+    for match in JS_RECEIVER_DECLARATION_PATTERN.finditer(code):
         if not _outside_js_string(code, match.start()):
             continue
         route_receivers.add(match.group(1))
         declared_receivers.add(match.group(1))
+        receiver_frameworks[match.group(1)] = _js_receiver_framework(match.group(2))
     mount_pattern = re.compile(
         r"\b(\w+)\.(use|route)\s*\(\s*([^,\)]+)\s*,\s*(\w+)\s*\)",
         re.S,
@@ -865,7 +926,7 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*\(\s*([^,\)]+)",
         re.I | re.S,
     )
-    framework = "hono" if re.search(r"\bHono\b", code) else "express"
+    default_framework = "hono" if re.search(r"\bHono\b", code) else "express"
     for match in pattern.finditer(code):
         if not _outside_js_string(code, match.start()):
             continue
@@ -879,7 +940,8 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         handler_auth = bool(re.search(r"\b(?:require[_-]?auth|authenticate\w*|verify(?:jwt|token)|withAuth)\b", arguments, re.I))
         scope = "handler" if handler_auth else "global" if receiver in auth_receivers else "unknown"
         routes.append(_route(
-            service_path, framework, match.group(2).upper(),
+            service_path, receiver_frameworks.get(receiver, default_framework),
+            match.group(2).upper(),
             _prefixed_raw_path(effective_prefix(receiver), match.group(3).strip()),
             _location(repo, path, line), scope, receiver,
             receiver in attribution_receivers,
@@ -903,23 +965,67 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
     return routes, bool(attribution_receivers), mounts
 
 
+GO_ATTRIBUTION_PATTERN = re.compile(
+    r"\b(\w+)\.Use\s*\([^\)]*?(?:Attribution\w*Middleware|Moolabs\w*Middleware|Middleware\w*Attribution)",
+    re.I | re.S,
+)
+
+
+def _go_function_blocks(code: str) -> list[tuple[int, int, str, set[str]]]:
+    blocks: list[tuple[int, int, str, set[str]]] = []
+    pattern = re.compile(
+        r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(([^)]*)\)[^{]*\{",
+        re.S,
+    )
+    for match in pattern.finditer(code):
+        router_parameters = set(
+            re.findall(r"\b(\w+)\s+(?:chi\.Router|\*chi\.Mux)\b", match.group(2))
+        )
+        blocks.append((
+            match.start(),
+            _balanced_block_end(code, match.end() - 1),
+            match.group(1),
+            router_parameters,
+        ))
+    return blocks
+
+
+def _go_attributed_call_targets(text: str) -> set[str]:
+    code = _without_js_comments(text)
+    blocks = _go_function_blocks(code)
+    targets: set[str] = set()
+    for middleware in GO_ATTRIBUTION_PATTERN.finditer(code):
+        containing = [
+            block for block in blocks if block[0] <= middleware.start() < block[1]
+        ]
+        if not containing:
+            continue
+        block = min(containing, key=lambda item: item[1] - item[0])
+        receiver = re.escape(middleware.group(1))
+        call_pattern = re.compile(
+            rf"(?<![\w.])([A-Za-z_]\w*)\s*\(\s*{receiver}\s*\)"
+        )
+        targets.update(
+            call.group(1)
+            for call in call_pattern.finditer(code, middleware.end(), block[1])
+        )
+    return targets
+
+
 def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     code = _without_js_comments(text)
-    attribution_pattern = re.compile(
-        r"\b(\w+)\.Use\s*\([^\)]*?(?:Attribution\w*Middleware|Moolabs\w*Middleware|Middleware\w*Attribution)",
-        re.I | re.S,
-    )
     auth_pattern = re.compile(
         r"\b(\w+)\.Use\s*\([^\)]*?(?:Auth\w*|Authenticate\w*|Verify(?:JWT|Token))",
         re.I | re.S,
     )
-    attribution_receivers = {match.group(1) for match in attribution_pattern.finditer(code) if _outside_js_string(code, match.start())}
+    attribution_receivers = {match.group(1) for match in GO_ATTRIBUTION_PATTERN.finditer(code) if _outside_js_string(code, match.start())}
     auth_receivers = {match.group(1) for match in auth_pattern.finditer(code) if _outside_js_string(code, match.start())}
     framework = "chi" if "github.com/go-chi/chi" in code or re.search(r"\bchi\.\w+", code) else "net-http"
     chi_receivers = set(re.findall(r"\b(\w+)\s*(?::=|=)\s*chi\.NewRouter\s*\(", code))
     chi_receivers.update(re.findall(r"\b(\w+)\s+(?:chi\.Router|\*chi\.Mux)\b", code))
+    function_blocks = _go_function_blocks(code)
     parents: dict[str, list[tuple[str, str | None]]] = {}
     mount_pattern = re.compile(
         r"\b(\w+)\.Mount\s*\(\s*([^,\)]+)(?:\s*,\s*([\w.]+))?",
@@ -1027,13 +1133,23 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
             if containing
             else effective_prefix(receiver)
         )
-        routes.append(_route(
+        route = _route(
             service_path, framework, method.upper(),
             _prefixed_raw_path(route_prefix, raw_path.strip()),
             _location(repo, path, number),
             "global" if receiver in auth_receivers else "unknown", receiver,
             receiver in attribution_receivers,
-        ))
+        )
+        containing_function = [
+            block for block in function_blocks
+            if block[0] <= match.start() < block[1] and receiver in block[3]
+        ]
+        if containing_function:
+            route["_go_function"] = min(
+                containing_function,
+                key=lambda item: item[1] - item[0],
+            )[2]
+        routes.append(route)
     return routes, bool(attribution_receivers), mounts
 
 
@@ -1172,60 +1288,111 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
                     if default.args and _auth_name(_dotted_name(default.args[0])):
                         trusted_roots.add(argument.arg)
             aliases: dict[str, tuple[str, str]] = {}
-            for node in ast.walk(function):
+            scoped_nodes: list[ast.AST] = list(function.body)
+            events: list[ast.Assign | ast.AnnAssign | ast.Call] = []
+            parents: dict[int, ast.AST] = {}
+            while scoped_nodes:
+                node = scoped_nodes.pop()
                 if id(node) in dead_nodes:
                     continue
-                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
                     continue
-                value = node.value
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                target_names = [target.id for target in targets if isinstance(target, ast.Name)]
-                expression = _dotted_name(value)
-                if raw_pattern.search(expression):
-                    for target_name in target_names:
-                        raw_variables[target_name] = node.lineno
-                verified_source_line = _verified_identity_source_line(
-                    value,
-                    text,
-                    raw_pattern,
-                    raw_variables,
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call)):
+                    events.append(node)
+                for child in ast.iter_child_nodes(node):
+                    parents[id(child)] = node
+                    scoped_nodes.append(child)
+
+            def event_order(
+                node: ast.Assign | ast.AnnAssign | ast.Call,
+            ) -> tuple[int, int, int, int]:
+                if isinstance(node, ast.Call):
+                    ancestor = parents.get(id(node))
+                    while ancestor is not None and not isinstance(
+                        ancestor,
+                        (ast.Assign, ast.AnnAssign),
+                    ):
+                        ancestor = parents.get(id(ancestor))
+                    if isinstance(ancestor, (ast.Assign, ast.AnnAssign)):
+                        return (
+                            ancestor.lineno,
+                            ancestor.col_offset,
+                            0,
+                            node.col_offset,
+                        )
+                return (
+                    node.lineno,
+                    node.col_offset,
+                    1 if isinstance(node, (ast.Assign, ast.AnnAssign)) else 0,
+                    node.col_offset,
                 )
-                if verified_source_line is not None:
-                    verified_variables.update(target_names)
-                for target in targets:
-                    context_expression = _dotted_name(target)
-                    if not context_pattern.fullmatch(context_expression):
-                        continue
-                    if verified_source_line is not None or (
+
+            events.sort(key=event_order)
+
+            for node in events:
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    value = node.value
+                    targets = (
+                        node.targets if isinstance(node, ast.Assign) else [node.target]
+                    )
+                    target_names = [
+                        target.id for target in targets if isinstance(target, ast.Name)
+                    ]
+                    expression = _dotted_name(value)
+                    verified_source_line = _verified_identity_source_line(
+                        value,
+                        text,
+                        raw_pattern,
+                        raw_variables,
+                    )
+                    direct_raw_source = bool(
+                        verified_source_line is None and raw_pattern.search(expression)
+                    )
+                    inherited_verified = bool(
                         isinstance(value, ast.Name)
                         and value.id in verified_variables
-                    ):
-                        verified_contexts.add(context_expression)
-                if not target_names:
+                    )
+                    inherited_provenance = (
+                        aliases.get(value.id) if isinstance(value, ast.Name) else None
+                    )
+                    root = expression.split(".", 1)[0]
+                    trusted_context = bool(
+                        context_pattern.fullmatch(expression)
+                        and (root in trusted_roots or expression in verified_contexts)
+                    )
+
+                    for target_name in target_names:
+                        raw_variables.pop(target_name, None)
+                        verified_variables.discard(target_name)
+                        aliases.pop(target_name, None)
+                        trusted_roots.discard(target_name)
+                    for target in targets:
+                        context_expression = _dotted_name(target)
+                        if not context_pattern.fullmatch(context_expression):
+                            continue
+                        verified_contexts.discard(context_expression)
+                        if verified_source_line is not None or inherited_verified:
+                            verified_contexts.add(context_expression)
+
+                    if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
+                        trusted_roots.update(target_names)
+                    if direct_raw_source:
+                        for target_name in target_names:
+                            raw_variables[target_name] = node.lineno
+                    if verified_source_line is not None:
+                        verified_variables.update(target_names)
+
+                    provenance = inherited_provenance
+                    if provenance is None and trusted_context:
+                        provenance = ("trusted", expression)
+                    elif provenance is None and direct_raw_source:
+                        provenance = ("raw", expression)
+                    if provenance is not None:
+                        for target_name in target_names:
+                            aliases[target_name] = provenance
                     continue
-                if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
-                    trusted_roots.update(target_names)
-                    continue
-                root = expression.split(".", 1)[0]
-                trusted_context = bool(
-                    context_pattern.fullmatch(expression)
-                    and (root in trusted_roots or expression in verified_contexts)
-                )
-                raw_source = bool(raw_pattern.search(expression))
-                if isinstance(value, ast.Name) and value.id in aliases:
-                    provenance = aliases[value.id]
-                elif trusted_context:
-                    provenance = ("trusted", expression)
-                elif raw_source:
-                    provenance = ("raw", expression)
-                else:
-                    continue
-                for target_name in target_names:
-                    aliases[target_name] = provenance
-            for node in ast.walk(function):
-                if id(node) in dead_nodes:
-                    continue
-                if not isinstance(node, ast.Call) or not node.args:
+
+                if not node.args:
                     continue
                 validator = _call_name(node.func)
                 argument = node.args[0]
@@ -1413,10 +1580,17 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         service_path = profile.path
         files = list(iter_runtime_files(repo, service_path))
         python_context = _python_service_context(repo, service_path, files)
+        js_imported_receivers = _js_imported_route_receivers(files)
+        go_attributed_call_targets = set().union(*(
+            _go_attributed_call_targets(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+            for path in files
+            if path.suffix == ".go"
+        ))
         routes: list[dict[str, Any]] = []
         mounts: list[dict[str, Any]] = []
         middleware = False
-        go_middleware_files: set[str] = set()
         for path in files:
             text = path.read_text(encoding="utf-8", errors="replace")
             if path.suffix == ".py" and profile.frameworks_detected and not (
@@ -1434,12 +1608,16 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             ):
                 detected, present, detected_mounts = [], False, []
             else:
-                detected, present, detected_mounts = _scan_js(repo, service_path, path, text)
+                detected, present, detected_mounts = _scan_js(
+                    repo,
+                    service_path,
+                    path,
+                    text,
+                    js_imported_receivers.get(path),
+                )
             routes.extend(detected)
             mounts.extend(detected_mounts)
             middleware = middleware or present
-            if path.suffix == ".go" and present:
-                go_middleware_files.add(path.relative_to(repo).as_posix())
         resolver, findings, async_hops = _resolver_and_async(repo, files)
         findings.extend(_python_parse_findings(repo, files))
         unresolved_mount_targets = {
@@ -1462,30 +1640,21 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         route_keys: set[tuple[Any, ...]] = set()
         unique_routes: list[dict[str, Any]] = []
         for route in sorted(routes, key=lambda item: (item["framework"], str(item["method"]), str(item["path_template"]), item["evidence"]["file"], item["evidence"]["line"])):
+            if (
+                route["framework"] == "chi"
+                and not route.get("_middleware_covered")
+                and route.get("_go_function") in go_attributed_call_targets
+            ):
+                route["_middleware_covered"] = True
             key = (route["framework"], route["method"], route["path_template"], route["evidence"]["file"], route["evidence"]["line"])
             if key not in route_keys:
                 route_keys.add(key)
                 unique_routes.append(route)
         covered_routes = sum(bool(route.get("_middleware_covered")) for route in unique_routes)
-        unresolved_go_coverage = [
-            route for route in unique_routes
-            if route["framework"] == "chi"
-            and not route.get("_middleware_covered")
-            and go_middleware_files
-            and route["evidence"]["file"] not in go_middleware_files
-        ]
         known_uncovered_routes = [
             route for route in unique_routes
             if not route.get("_middleware_covered")
-            and route not in unresolved_go_coverage
         ]
-        if unresolved_go_coverage:
-            findings.append({
-                "code": "middleware_coverage_unresolved",
-                "severity": "info",
-                "message": "cross-file Go router coverage requires call-flow confirmation",
-                "evidence": unresolved_go_coverage[0]["evidence"],
-            })
         if known_uncovered_routes:
             findings.append({"code": "middleware_missing", "severity": "warning", "message": "one or more route receivers have no static attribution middleware registration", "evidence": None})
         slugs: dict[str, list[dict[str, Any]]] = {}
@@ -1516,6 +1685,7 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         for route in unique_routes:
             route.pop("_receiver", None)
             route.pop("_middleware_covered", None)
+            route.pop("_go_function", None)
         service = {"service_path": service_path or ".", "frameworks": sorted(profile.frameworks_detected),
                    "ingress_state": ingress_state, "middleware_detected": middleware,
                    "routes": unique_routes, "mounts": unique_mounts, "resolver": resolver,

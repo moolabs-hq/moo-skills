@@ -1363,9 +1363,82 @@ class DiscoveryContractTests(unittest.TestCase):
             service = result["services"][0]
             codes = {item["code"] for item in service["findings"]}
             self.assertNotIn("middleware_missing", codes)
-            self.assertIn("middleware_coverage_unresolved", codes)
-            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 0)
+            self.assertNotIn("middleware_coverage_unresolved", codes)
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
+            self.assertEqual(result["discovery_projection"]["routes_unknown"], 0)
+
+    def test_unrelated_split_file_chi_router_stays_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "admin.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func admin() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Use(AttributionMiddleware)\n"
+                "  registerAdmin(r)\n"
+                "}\n"
+                "func registerAdmin(r chi.Router) { r.Get(\"/admin\", adminHandler) }\n",
+                encoding="utf-8",
+            )
+            (repo / "public.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func public() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Get(\"/public\", publicHandler)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertTrue(
+                any(item["code"] == "middleware_missing" for item in service["findings"])
+            )
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
             self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_imported_exported_express_receiver_preserves_route_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}', encoding="utf-8"
+            )
+            (repo / "app.ts").write_text(
+                "export const app = express();\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import { app } from './app';\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                [
+                    (
+                        route["framework"],
+                        route["method"],
+                        route["path_template"],
+                        route["evidence"],
+                    )
+                    for route in routes
+                ],
+                [("express", "GET", "/orders", {"file": "routes.ts", "line": 2})],
+            )
 
     def test_inline_verified_header_binding_is_trusted_resolver_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1402,6 +1475,37 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(
                 service["resolver"]["expression"],
                 "request.state.customer_id",
+            )
+
+    def test_raw_context_overwrite_revokes_verified_resolver_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def poisoned(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID')\n"
+                "    )\n"
+                "    request.state.customer_id = request.headers.get('X-Customer-ID'); uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+            self.assertTrue(
+                any(
+                    item["code"] == "raw_identity_header"
+                    and item["evidence"]["line"] == 8
+                    for item in service["findings"]
+                )
             )
 
     def test_client_component_fetch_is_not_a_trusted_async_boundary(self):
