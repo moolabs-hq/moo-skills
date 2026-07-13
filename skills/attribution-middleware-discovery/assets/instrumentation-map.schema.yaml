@@ -115,16 +115,44 @@
       }
     },
     "resolver": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["state", "identity_kind", "expression", "template", "evidence"],
-      "properties": {
-        "state": {"enum": ["proposed", "unresolved"]},
-        "identity_kind": {"type": ["string", "null"], "enum": ["moolabs_uuid", "external_key_crosswalk", null]},
-        "expression": {"type": ["string", "null"]},
-        "template": {"type": ["string", "null"]},
-        "evidence": {"oneOf": [{"$ref": "#/$defs/location"}, {"type": "null"}]}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "proposed"},
+            "identity_kind": {"enum": ["moolabs_uuid", "external_key_crosswalk"]},
+            "expression": {"type": "string", "minLength": 1},
+            "template": {"type": "string", "minLength": 1},
+            "evidence": {"$ref": "#/$defs/location"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "unresolved"},
+            "identity_kind": {"const": null},
+            "expression": {"const": null},
+            "template": {"const": null},
+            "evidence": {"const": null}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "not-required"},
+            "identity_kind": {"const": null},
+            "expression": {"const": null},
+            "template": {"const": null},
+            "evidence": {"const": null}
+          }
+        }
+      ]
     },
     "asyncHop": {
       "type": "object",
@@ -140,6 +168,37 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["service_path", "frameworks", "ingress_state", "middleware_detected", "routes", "mounts", "resolver", "async_hops", "findings"],
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": ["ingress_state"],
+            "properties": {
+              "ingress_state": {"const": "no-middleware-inherits-thread-id"}
+            }
+          },
+          "then": {
+            "properties": {
+              "frameworks": {"const": []},
+              "middleware_detected": {"const": false},
+              "routes": {"const": []},
+              "mounts": {"const": []},
+              "resolver": {
+                "type": "object",
+                "properties": {"state": {"const": "not-required"}}
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "resolver": {
+                "type": "object",
+                "properties": {"state": {"enum": ["proposed", "unresolved"]}}
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "service_path": {"type": "string"},
         "frameworks": {"type": "array", "items": {"type": "string"}},

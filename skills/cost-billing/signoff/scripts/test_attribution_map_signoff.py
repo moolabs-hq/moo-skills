@@ -116,6 +116,7 @@ class AttributionMapSignoffTests(unittest.TestCase):
         *,
         findings: list[dict] | None = None,
         resolver_state: str = "proposed",
+        ingress_state: str = "http-ingress",
     ) -> dict:
         resolver = {
             "state": resolver_state,
@@ -133,7 +134,7 @@ class AttributionMapSignoffTests(unittest.TestCase):
         return {
             "service_path": ".",
             "frameworks": ["fastapi"],
-            "ingress_state": "http-ingress",
+            "ingress_state": ingress_state,
             "middleware_detected": True,
             "routes": [],
             "mounts": [],
@@ -202,6 +203,108 @@ class AttributionMapSignoffTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unsafe or unresolved"):
             self._build()
+
+    def test_worker_only_service_with_not_required_resolver_is_signable(self) -> None:
+        worker = self._service(
+            resolver_state="not-required",
+            ingress_state="no-middleware-inherits-thread-id",
+        )
+        worker["frameworks"] = []
+        worker["middleware_detected"] = False
+        self._write_map(
+            services=[worker]
+        )
+
+        signoff = self._build()
+
+        self.assertTrue(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_worker_only_service_with_http_shape_is_rejected(self) -> None:
+        for field, value in (
+            ("frameworks", ["fastapi"]),
+            ("middleware_detected", True),
+            (
+                "routes",
+                [
+                    {
+                        "route_id": "route-1",
+                        "framework": "fastapi",
+                        "method": "GET",
+                        "path_template": "/orders",
+                        "confidence": "high",
+                        "auth_scope": "global",
+                        "evidence": {"file": "app.py", "line": 1},
+                        "feature_proposal": {
+                            "slug": "orders",
+                            "confidence": "high",
+                            "requires_engineer_signoff": True,
+                        },
+                    }
+                ],
+            ),
+            (
+                "mounts",
+                [
+                    {
+                        "framework": "fastapi",
+                        "target": "api",
+                        "prefix": "/api",
+                        "confidence": "high",
+                        "evidence": {"file": "app.py", "line": 1},
+                    }
+                ],
+            ),
+        ):
+            worker = self._service(
+                resolver_state="not-required",
+                ingress_state="no-middleware-inherits-thread-id",
+            )
+            worker["frameworks"] = []
+            worker["middleware_detected"] = False
+            worker[field] = value
+            self._write_map(services=[worker])
+
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "worker-only"
+            ):
+                self._build()
+
+    def test_not_required_resolver_cannot_hide_unresolved_http_ingress(self) -> None:
+        self._write_map(services=[self._service(resolver_state="not-required")])
+
+        with self.assertRaisesRegex(ValueError, "resolver"):
+            self._build()
+
+    def test_unsupported_ingress_requires_an_exact_reviewed_resolver_edit(self) -> None:
+        unsupported = self._finding("resolver_provenance_unsupported", "info")
+        unresolved = self._service(
+            findings=[unsupported],
+            resolver_state="unresolved",
+        )
+        unresolved["frameworks"] = ["express"]
+        self._write_map(services=[unresolved])
+
+        with self.assertRaisesRegex(ValueError, "unresolved-resolver"):
+            self._build(
+                review_verdict="clean-with-accepted-risks",
+                accepted_risks=["Resolver provenance remains unresolved."],
+            )
+
+        reviewed = self._service(findings=[unsupported])
+        reviewed["frameworks"] = ["express"]
+        reviewed["resolver"] = {
+            "state": "proposed",
+            "identity_kind": "moolabs_uuid",
+            "expression": "req.auth.customerId",
+            "template": "reject empty values and validate before binding attribution context",
+            "evidence": {"file": "app.ts", "line": 12},
+        }
+        self._write_map(services=[reviewed])
+
+        signoff = self._build(findings_resolved=1)
+
+        self.assertEqual(signoff["artifact"]["sha256"], self._map_bytes_digest())
+        self.assertTrue(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
     def test_build_rejects_raw_identity_header_even_if_severity_is_downgraded(
         self,
@@ -304,6 +407,8 @@ class AttributionMapSignoffTests(unittest.TestCase):
         ) + REFERENCE_PATH.read_text(encoding="utf-8")
         self.assertIn("missing or blocked review", documented_contract)
         self.assertIn("accepted-risk list and review counts", documented_contract)
+        self.assertIn("Ingress `unresolved` resolvers cannot be accepted", documented_contract)
+        self.assertIn("exact edited map bytes", documented_contract)
 
     def test_schema_declares_attribution_map_stage_and_artifact(self) -> None:
         schema = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))

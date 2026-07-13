@@ -154,6 +154,73 @@ class DiscoveryContractTests(unittest.TestCase):
             worker = next(service for service in result["services"] if service["service_path"] == "worker")
             self.assertEqual(worker["ingress_state"], "no-middleware-inherits-thread-id")
             self.assertEqual(worker["routes"], [])
+            self.assertEqual(
+                worker["resolver"],
+                {
+                    "state": "not-required",
+                    "identity_kind": None,
+                    "expression": None,
+                    "template": None,
+                    "evidence": None,
+                },
+            )
+
+    def test_schema_restricts_not_required_resolvers_to_worker_ingress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            _copy_fixture("mixed", repo)
+            output = repo / "map.yaml"
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            worker = next(
+                service
+                for service in result["services"]
+                if service["service_path"] == "worker"
+            )
+            worker["resolver"]["expression"] = "claims.customer_id"
+            with self.assertRaises(SCAN_MODULE.DiscoveryError):
+                SCAN_MODULE.validate_map(result)
+
+            worker["resolver"]["expression"] = None
+            for field, value in (
+                ("frameworks", ["fastapi"]),
+                ("middleware_detected", True),
+                (
+                    "mounts",
+                    [
+                        {
+                            "framework": "fastapi",
+                            "target": "api",
+                            "prefix": "/api",
+                            "confidence": "high",
+                            "evidence": {"file": "worker/tasks.py", "line": 1},
+                        }
+                    ],
+                ),
+            ):
+                original = worker[field]
+                worker[field] = value
+                with self.subTest(field=field), self.assertRaises(
+                    SCAN_MODULE.DiscoveryError
+                ):
+                    SCAN_MODULE.validate_map(result)
+                worker[field] = original
+
+            ingress = next(
+                service
+                for service in result["services"]
+                if service["ingress_state"] == "http-ingress"
+            )
+            ingress["resolver"] = {
+                "state": "not-required",
+                "identity_kind": None,
+                "expression": None,
+                "template": None,
+                "evidence": None,
+            }
+            with self.assertRaises(SCAN_MODULE.DiscoveryError):
+                SCAN_MODULE.validate_map(result)
 
     def test_excludes_generated_source_filenames(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -285,7 +352,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "    return await call_next(request)\n"
                 "def resolver(auth=Depends(require_auth)):\n"
                 "    return uuid.UUID(auth.customer_id)\n"
-                "@app.get('/old', dependencies=[Depends(require_auth)])\n"
+                "@app.get('/old', dependencies=[Depends(require_auth), Depends(resolver)])\n"
                 "def old():\n"
                 "    return {}\n",
                 encoding="utf-8",
@@ -540,6 +607,47 @@ class DiscoveryContractTests(unittest.TestCase):
             service = self._load(output)["services"][0]
             self.assertEqual(service["resolver"]["state"], "unresolved")
             self.assertTrue(any(item["code"] == "raw_identity_header" for item in service["findings"]))
+
+    def test_resolver_ignores_unused_helpers_but_keeps_reachable_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            app = repo / "app.py"
+            app.write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def unused(auth=Depends(require_auth)):\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+            app.write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(require_auth)):\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(customer=Depends(resolve_customer)): return {}\n",
+                encoding="utf-8",
+            )
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            resolver = self._load(output)["services"][0]["resolver"]
+            self.assertEqual(resolver["state"], "proposed")
+            self.assertEqual(resolver["expression"], "auth.customer_id")
 
     def test_resolver_conservatively_merges_raw_and_trusted_python_branches(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1663,6 +1771,45 @@ class DiscoveryContractTests(unittest.TestCase):
                 [("express", "GET", "/orders", {"file": "routes.ts", "line": 2})],
             )
 
+    def test_express_and_hono_middleware_coverage_respects_registration_order(self):
+        for dependency, constructor in (
+            ("express", "express()"),
+            ("hono", "new Hono()"),
+        ):
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "package.json").write_text(
+                    json.dumps({"dependencies": {dependency: "1"}}),
+                    encoding="utf-8",
+                )
+                (repo / "app.ts").write_text(
+                    f"const app = {constructor};\n"
+                    "app.get('/before', beforeHandler);\n"
+                    "app.use(attributionMiddleware);\n"
+                    "app.get('/after', afterHandler);\n",
+                    encoding="utf-8",
+                )
+                output = repo.parent / f"{dependency}-map.json"
+
+                run = self._discover(repo, output)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                result = self._load(output)
+                service = result["services"][0]
+                self.assertEqual(
+                    result["discovery_projection"],
+                    {
+                        "routes_discovered": 2,
+                        "routes_statically_covered": 1,
+                        "routes_unknown": 1,
+                    },
+                )
+                self.assertTrue(
+                    any(
+                        finding["code"] == "middleware_missing"
+                        for finding in service["findings"]
+                    )
+                )
+
     def test_js_ambiguous_extensionless_import_is_unresolved_and_deterministic(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "repo"
@@ -1862,14 +2009,14 @@ class DiscoveryContractTests(unittest.TestCase):
             (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
             (repo / "app.py").write_text(
                 "import uuid\n"
-                "from fastapi import FastAPI\n"
+                "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
                 "def trusted(request):\n"
                 "    request.state.customer_id = verify_signed_customer_identity(\n"
                 "        request.headers.get('X-Customer-ID')\n"
                 "    )\n"
                 "    uuid.UUID(request.state.customer_id)\n"
-                "@app.get('/orders')\n"
+                "@app.get('/orders', dependencies=[Depends(trusted)])\n"
                 "def orders(): return {}\n",
                 encoding="utf-8",
             )
@@ -2020,14 +2167,14 @@ class DiscoveryContractTests(unittest.TestCase):
             (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
             (repo / "app.py").write_text(
                 "import uuid\n"
-                "from fastapi import FastAPI\n"
+                "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
                 "def trusted(request):\n"
                 "    raw_customer = request.headers.get('X-Customer-ID')\n"
                 "    verified_customer = verify_signed_customer_identity(raw_customer)\n"
                 "    verified_customer, request.state.customer_id = None, verified_customer\n"
                 "    uuid.UUID(request.state.customer_id)\n"
-                "@app.get('/orders')\n"
+                "@app.get('/orders', dependencies=[Depends(trusted)])\n"
                 "def orders(): return {}\n",
                 encoding="utf-8",
             )
@@ -2297,6 +2444,79 @@ class DiscoveryContractTests(unittest.TestCase):
                     (finding["code"], finding["evidence"]["line"])
                     for finding in findings
                     if finding["evidence"] is not None
+                },
+            )
+
+    def test_raw_identity_headers_ignore_comments_and_string_examples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            python = repo / "services" / "python"
+            javascript = repo / "services" / "javascript"
+            golang = repo / "services" / "go"
+            python.mkdir(parents=True)
+            javascript.mkdir(parents=True)
+            golang.mkdir(parents=True)
+            (python / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (python / "app.py").write_text(
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "# request.headers.get('X-Customer-ID')\n"
+                "'request.headers.get(\\\"X-Tenant-ID\\\")'\n"
+                "@app.get('/python')\n"
+                "def route(request):\n"
+                "    return request.headers.get(\n"
+                "        'X-Customer-ID'\n"
+                "    )\n",
+                encoding="utf-8",
+            )
+            (javascript / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            (javascript / "app.ts").write_text(
+                "const app = express();\n"
+                "// req.headers.get('X-Customer-ID')\n"
+                "const example = `req.headers.get('X-Tenant-ID')`;\n"
+                "app.get('/javascript', (req) => req.headers.get(\n"
+                "  'X-Customer-ID'\n"
+                "));\n",
+                encoding="utf-8",
+            )
+            (golang / "go.mod").write_text("module example.test/go\n", encoding="utf-8")
+            (golang / "main.go").write_text(
+                'package main\n'
+                '// r.Header.Get("X-Customer-ID")\n'
+                'const example = `r.Header.Get("X-Tenant-ID")`\n'
+                'func handler(r *http.Request) {\n'
+                '  _ = r.Header.Get(\n'
+                '    "X-Customer-ID",\n'
+                '  )\n'
+                '}\n'
+                'func main() { http.HandleFunc("/go", handler) }\n',
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            services = {
+                service["service_path"]: service
+                for service in self._load(output)["services"]
+            }
+            observed = {
+                service_path: [
+                    finding["evidence"]["line"]
+                    for finding in service["findings"]
+                    if finding["code"] == "raw_identity_header"
+                ]
+                for service_path, service in services.items()
+            }
+            self.assertEqual(
+                observed,
+                {
+                    "services/go": [5],
+                    "services/javascript": [4],
+                    "services/python": [7],
                 },
             )
 

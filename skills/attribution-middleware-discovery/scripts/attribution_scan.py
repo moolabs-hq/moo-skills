@@ -1021,6 +1021,28 @@ def _js_receiver_framework(constructor: str) -> str:
     return "hono" if "Hono" in constructor else "express"
 
 
+def _js_middleware_enabled(
+    metadata: dict[str, Any],
+    state_key: str,
+    position: int,
+) -> bool:
+    return bool(metadata.get(state_key)) or any(
+        registration <= position
+        for registration in metadata.get(f"{state_key}_positions", [])
+    )
+
+
+def _js_receiver_snapshot(
+    metadata: dict[str, Any],
+    position: int,
+) -> dict[str, Any]:
+    return {
+        "framework": metadata["framework"],
+        "attribution": _js_middleware_enabled(metadata, "attribution", position),
+        "auth": _js_middleware_enabled(metadata, "auth", position),
+    }
+
+
 def _js_brace_ranges(code: str) -> dict[int, tuple[int, int]]:
     ranges: dict[int, tuple[int, int]] = {}
     stack: list[int] = []
@@ -1091,7 +1113,11 @@ def _js_receiver_state(
         bindings.setdefault(name, []).append((scope, position, identity))
 
     for name, metadata in (imported_receivers or {}).items():
-        states[name] = dict(metadata)
+        states[name] = {
+            **metadata,
+            "attribution_positions": [],
+            "auth_positions": [],
+        }
         add_binding(name, module_scope, -1, name)
 
     receiver_declarations: set[int] = set()
@@ -1106,6 +1132,8 @@ def _js_receiver_state(
             "framework": _js_receiver_framework(constructor),
             "attribution": False,
             "auth": False,
+            "attribution_positions": [],
+            "auth_positions": [],
         }
         add_binding(name, scope, match.start(), identity)
         local_receiver_ids.add(identity)
@@ -1182,7 +1210,7 @@ def _js_receiver_state(
                 continue
             resolved = resolve(match.group(1), match.start())
             if resolved is not None:
-                resolved[1][state_key] = True
+                resolved[1][f"{state_key}_positions"].append(match.start())
 
     return states, resolve, local_receiver_ids
 
@@ -1257,8 +1285,8 @@ def _js_imported_route_receivers(
             if _outside_js_string(code, match.start()):
                 receiver = resolve(match.group(1), match.end())
                 if receiver is not None:
-                    exported.setdefault(path.resolve(), {})[match.group(1)] = dict(
-                        receiver[1]
+                    exported.setdefault(path.resolve(), {})[match.group(1)] = (
+                        _js_receiver_snapshot(receiver[1], len(code))
                     )
         export_clause_pattern = re.compile(r"\bexport\s*\{([^}]+)\}\s*;?", re.S)
         for match in export_clause_pattern.finditer(code):
@@ -1270,8 +1298,8 @@ def _js_imported_route_receivers(
                 exported_name = parts[-1].strip()
                 receiver = resolve(local_name, len(code))
                 if receiver is not None:
-                    exported.setdefault(path.resolve(), {})[exported_name] = dict(
-                        receiver[1]
+                    exported.setdefault(path.resolve(), {})[exported_name] = (
+                        _js_receiver_snapshot(receiver[1], len(code))
                     )
         default_constructor = re.search(
             r"\bexport\s+default\s+"
@@ -1291,7 +1319,9 @@ def _js_imported_route_receivers(
         if default_name and _outside_js_string(code, default_name.start()):
             receiver = resolve(default_name.group(1), default_name.start())
             if receiver is not None:
-                exported.setdefault(path.resolve(), {})["default"] = dict(receiver[1])
+                exported.setdefault(path.resolve(), {})["default"] = (
+                    _js_receiver_snapshot(receiver[1], len(code))
+                )
 
     imported: dict[Path, dict[str, dict[str, Any]]] = {}
     named_import_pattern = re.compile(
@@ -1464,13 +1494,19 @@ def _scan_js(
         line = code.count("\n", 0, match.start()) + 1
         arguments = code[match.end():code.find(")", match.end())]
         handler_auth = bool(re.search(r"\b(?:require[_-]?auth|authenticate\w*|verify(?:jwt|token)|withAuth)\b", arguments, re.I))
-        scope = "handler" if handler_auth else "global" if metadata["auth"] else "unknown"
+        scope = (
+            "handler"
+            if handler_auth
+            else "global"
+            if _js_middleware_enabled(metadata, "auth", match.start())
+            else "unknown"
+        )
         routes.append(_route(
             service_path, metadata["framework"],
             match.group(2).upper(),
             _prefixed_raw_path(effective_prefix(receiver), match.group(3).strip()),
             _location(repo, path, line), scope, receiver,
-            bool(metadata["attribution"]),
+            _js_middleware_enabled(metadata, "attribution", match.start()),
         ))
     if re.search(r"(?:^|/)app/(?:.+/)?route\.(?:ts|tsx|js|jsx)$", path.relative_to(repo).as_posix()):
         route_parts = list(path.relative_to(repo).parts)
@@ -1518,7 +1554,14 @@ def _scan_js(
                 _location(repo, path, number),
                 scope,
             ))
-    return routes, any(metadata["attribution"] for metadata in states.values()), mounts
+    return (
+        routes,
+        any(
+            _js_middleware_enabled(metadata, "attribution", len(code))
+            for metadata in states.values()
+        ),
+        mounts,
+    )
 
 
 GO_ATTRIBUTION_PATTERN = re.compile(
@@ -2073,7 +2116,184 @@ def _assignment_bindings(
     return [binding for target in targets for binding in bind(target, node.value)]
 
 
-def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+def _python_ingress_reachable_functions(
+    files: list[Path],
+    service_context: dict[str, Any],
+) -> set[tuple[Path, int]]:
+    definitions: dict[str, tuple[Path, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    local_definitions: dict[Path, dict[str, str]] = {}
+
+    for path, context in service_context["files"].items():
+        module = context["module"]
+        grouped: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+        for node in context["tree"].body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                grouped.setdefault(node.name, []).append(node)
+        for name, nodes in grouped.items():
+            if len(nodes) != 1:
+                continue
+            identity = ".".join(part for part in (module, name) if part)
+            definitions[identity] = (path, nodes[0])
+            local_definitions.setdefault(path, {})[name] = identity
+
+    def resolve_function(path: Path, expression: ast.AST) -> str | None:
+        context = service_context["files"].get(path)
+        name = _dotted_name(expression)
+        if context is None or not name:
+            return None
+        head, separator, tail = name.partition(".")
+        scope = context["node_scopes"].get(id(expression), context["module_scope"])
+        while scope is not None:
+            scoped = context["bindings"].get(scope, {})
+            if head not in scoped:
+                scope = context["scope_parents"].get(scope)
+                continue
+            values = set(scoped[head])
+            if (
+                scope == context["module_scope"]
+                and not separator
+                and values == {None}
+            ):
+                return local_definitions.get(path, {}).get(head)
+            if len(values) != 1 or None in values:
+                return None
+            expanded = next(iter(values))
+            identity = f"{expanded}.{tail}" if separator else expanded
+            return identity if identity in definitions else None
+        return None
+
+    edges: dict[str, set[str]] = {identity: set() for identity in definitions}
+    roots: set[str] = set()
+    receivers = service_context["receivers"]
+
+    for identity, (path, function) in definitions.items():
+        for decorator in function.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            if isinstance(decorator.func, ast.Attribute):
+                receiver = service_context["canonical"](
+                    path,
+                    _dotted_name(decorator.func.value),
+                    decorator,
+                )
+                if receiver in receivers and (
+                    decorator.func.attr.upper() in METHODS
+                    or decorator.func.attr == "middleware"
+                ):
+                    roots.add(identity)
+        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+            target_node = (
+                call.args[0]
+                if _call_name(call.func).rsplit(".", 1)[-1] == "Depends" and call.args
+                else call.func
+            )
+            target = resolve_function(path, target_node)
+            if target is not None:
+                edges[identity].add(target)
+
+    for path, context in service_context["files"].items():
+        for call in (node for node in ast.walk(context["tree"]) if isinstance(node, ast.Call)):
+            if isinstance(call.func, ast.Attribute):
+                receiver = service_context["canonical"](
+                    path,
+                    _dotted_name(call.func.value),
+                    call,
+                )
+                if receiver in receivers and call.func.attr == "add_api_route" and len(call.args) > 1:
+                    target = resolve_function(path, call.args[1])
+                    if target is not None:
+                        roots.add(target)
+            constructor = service_context["canonical"](
+                path,
+                _dotted_name(call.func),
+                call,
+            )
+            if constructor != "starlette.routing.Route" or len(call.args) < 2:
+                continue
+            target = resolve_function(path, call.args[1])
+            if target is not None:
+                roots.add(target)
+
+    reachable = set(roots)
+    pending = list(roots)
+    while pending:
+        current = pending.pop()
+        for target in edges.get(current, set()):
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    return {
+        (definitions[identity][0], definitions[identity][1].lineno)
+        for identity in reachable
+    }
+
+
+IDENTITY_HEADER_NAME_PATTERN = re.compile(
+    r"x[-_]?(?:moolabs|customer|tenant)[-_]?(?:id|customer|tenant)?",
+    re.I,
+)
+
+
+def _python_raw_identity_header_lines(
+    tree: ast.AST,
+    dead_nodes: set[int],
+) -> list[int]:
+    lines: set[int] = set()
+
+    def is_headers(value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Name)
+            and value.id.lower() in {"header", "headers"}
+        ) or (
+            isinstance(value, ast.Attribute)
+            and value.attr.lower() in {"header", "headers"}
+        )
+
+    def is_identity_header(value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and IDENTITY_HEADER_NAME_PATTERN.search(value.value) is not None
+        )
+
+    for node in ast.walk(tree):
+        if id(node) in dead_nodes:
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr.lower() == "get"
+            and is_headers(node.func.value)
+            and node.args
+            and is_identity_header(node.args[0])
+        ):
+            lines.add(node.lineno)
+        elif (
+            isinstance(node, ast.Subscript)
+            and is_headers(node.value)
+            and is_identity_header(node.slice)
+        ):
+            lines.add(node.lineno)
+    return sorted(lines)
+
+
+def _lexical_raw_identity_header_lines(
+    text: str,
+    raw_pattern: re.Pattern[str],
+) -> list[int]:
+    code = _without_js_comments(text)
+    return sorted({
+        code.count("\n", 0, match.start()) + 1
+        for match in raw_pattern.finditer(code)
+        if _outside_js_string(code, match.start())
+    })
+
+
+def _resolver_and_async(
+    repo: Path,
+    files: list[Path],
+    python_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     raw_headers: list[dict[str, Any]] = []
     candidates: list[tuple[Path, int, str, str]] = []
     async_hops: list[dict[str, Any]] = []
@@ -2085,18 +2305,14 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
         re.I | re.S,
     )
     context_pattern = re.compile(r"(?:request\.(?:state|context)|claims|auth|current_user)\.[A-Za-z_]*(?:customer|tenant|account)[A-Za-z_]*", re.I)
+    reachable_functions = _python_ingress_reachable_functions(files, python_context)
 
     def record_header_findings(
         path: Path,
-        text: str,
+        lines: list[int],
         verified_lines: set[int],
     ) -> None:
-        seen_lines: set[int] = set()
-        for match in raw_pattern.finditer(text):
-            number = text.count("\n", 0, match.start()) + 1
-            if number in seen_lines:
-                continue
-            seen_lines.add(number)
+        for number in lines:
             if number in verified_lines:
                 raw_headers.append({
                     "code": "verified_identity_header",
@@ -2117,12 +2333,16 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
         verified_header_lines: set[int] = set()
         async_hops.extend(_async_boundaries(repo, path, text))
         if path.suffix != ".py":
-            record_header_findings(path, text, verified_header_lines)
+            record_header_findings(
+                path,
+                _lexical_raw_identity_header_lines(text, raw_pattern),
+                verified_header_lines,
+            )
             continue
         try:
             tree = ast.parse(text)
         except SyntaxError:
-            record_header_findings(path, text, verified_header_lines)
+            record_header_findings(path, [], verified_header_lines)
             continue
         dead_nodes = _dead_python_nodes(tree)
         for function in (
@@ -2464,10 +2684,15 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
             if final_state is not None:
                 verified_header_lines.update(final_state["verified_contexts"].values())
                 for candidate in final_state["resolver_candidates"].values():
-                    candidates.append(candidate[:4])
+                    if (path, function.lineno) in reachable_functions:
+                        candidates.append(candidate[:4])
                     if candidate[4] is not None:
                         verified_header_lines.add(candidate[4])
-        record_header_findings(path, text, verified_header_lines)
+        record_header_findings(
+            path,
+            _python_raw_identity_header_lines(tree, dead_nodes),
+            verified_header_lines,
+        )
     unsupported = {
         "JavaScript/TypeScript": next(
             (path for path in files if path.suffix.lower() in {".js", ".jsx", ".mjs", ".ts", ".tsx"}),
@@ -2688,7 +2913,11 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             routes.extend(detected)
             mounts.extend(detected_mounts)
             middleware = middleware or present
-        resolver, findings, async_hops = _resolver_and_async(repo, files)
+        resolver, findings, async_hops = _resolver_and_async(
+            repo,
+            files,
+            python_context,
+        )
         findings.extend(_python_parse_findings(repo, files))
         unresolved_mount_targets = {
             mount.get("_target_receiver", mount["target"].rsplit(".", 1)[-1])
@@ -2707,6 +2936,14 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             else "no-middleware-inherits-thread-id" if profile.execution_runtimes and not profile.frameworks_detected
             else "unknown"
         )
+        if ingress_state == "no-middleware-inherits-thread-id":
+            resolver = {
+                "state": "not-required",
+                "identity_kind": None,
+                "expression": None,
+                "template": None,
+                "evidence": None,
+            }
         route_keys: set[tuple[Any, ...]] = set()
         unique_routes: list[dict[str, Any]] = []
         for route in sorted(routes, key=lambda item: (item["framework"], str(item["method"]), str(item["path_template"]), item["evidence"]["file"], item["evidence"]["line"])):
@@ -2814,6 +3051,17 @@ def _validate_schema(value: Any, schema: dict[str, Any], root: dict[str, Any], l
     if "$ref" in schema:
         _validate_schema(value, _schema_ref(root, schema["$ref"]), root, location)
         return
+    for branch in schema.get("allOf", []):
+        _validate_schema(value, branch, root, location)
+    if "if" in schema:
+        try:
+            _validate_schema(value, schema["if"], root, location)
+            condition_matches = True
+        except DiscoveryError:
+            condition_matches = False
+        branch = schema.get("then" if condition_matches else "else")
+        if branch is not None:
+            _validate_schema(value, branch, root, location)
     if "oneOf" in schema:
         matches = 0
         for branch in schema["oneOf"]:

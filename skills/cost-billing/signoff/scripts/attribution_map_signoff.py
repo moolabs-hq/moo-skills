@@ -332,7 +332,8 @@ def _map_review(document: dict[str, Any]) -> tuple[int, tuple[str, ...]]:
         if (
             not isinstance(resolver, dict)
             or set(resolver) != RESOLVER_FIELDS
-            or resolver.get("state") not in {"proposed", "unresolved"}
+            or resolver.get("state")
+            not in {"proposed", "unresolved", "not-required"}
         ):
             raise ValueError("instrumentation map service resolver is malformed")
         if resolver["state"] == "proposed" and not (
@@ -342,11 +343,29 @@ def _map_review(document: dict[str, Any]) -> tuple[int, tuple[str, ...]]:
             and _location(resolver.get("evidence"))
         ):
             raise ValueError("instrumentation map proposed resolver is incomplete")
-        if resolver["state"] == "unresolved" and any(
+        if resolver["state"] in {"unresolved", "not-required"} and any(
             resolver.get(field) is not None
             for field in ("identity_kind", "expression", "template", "evidence")
         ):
-            raise ValueError("instrumentation map unresolved resolver is malformed")
+            raise ValueError(
+                f"instrumentation map {resolver['state']} resolver is malformed"
+            )
+        worker_only = (
+            service["ingress_state"] == "no-middleware-inherits-thread-id"
+        )
+        if worker_only != (resolver["state"] == "not-required"):
+            raise ValueError(
+                "instrumentation map resolver state does not match ingress requirement"
+            )
+        if worker_only and (
+            service["frameworks"]
+            or service["middleware_detected"]
+            or service["routes"]
+            or service["mounts"]
+        ):
+            raise ValueError(
+                "instrumentation map worker-only service contains an HTTP shape"
+            )
         if resolver["state"] == "unresolved":
             unsafe.append(f"{service_path}:unresolved-resolver")
 

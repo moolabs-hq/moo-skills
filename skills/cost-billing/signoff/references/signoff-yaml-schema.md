@@ -209,6 +209,22 @@ false-positive counts, derives the accepted count from `--accepted-risk`, and
 computes `findings_total`; a review that fixed findings must not be recorded as
 zero-finding clean.
 
+Ingress `unresolved` resolvers cannot be accepted as risk and always block
+creation and verification. Worker-only services with
+`ingress_state: no-middleware-inherits-thread-id` instead use a resolver with
+`state: not-required` and null identity, expression, template, and evidence;
+that state is valid only when `frameworks`, `routes`, and `mounts` are empty and
+`middleware_detected` is false.
+
+For JavaScript/TypeScript or Go HTTP ingress, the scanner intentionally emits
+`unresolved` plus `resolver_provenance_unsupported`. The engineer must inspect
+the auth/context path and edit the resolver in the map itself to `proposed`,
+including `identity_kind`, the concrete resolver `expression`, an implementation
+`template`, and file/line `evidence`. Independent review records the unsupported
+scanner finding as resolved, then the helper signs the exact edited map bytes.
+Changing that proposal or reformatting the map invalidates the digest and
+requires another review and signoff.
+
 `attribution_map_signoff.py` writes this document as JSON-form YAML and reads
 that same portable representation during verification. JSON is valid YAML, so
 the `.yaml` filename and downstream YAML consumers remain compatible while the

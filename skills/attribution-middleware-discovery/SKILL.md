@@ -27,8 +27,11 @@ access are optional inputs, not prerequisites.
    `unknown`/`unresolved` unless concrete source evidence proves them.
 6. Exclude tests, fixtures, examples, generated code, vendored code, SDKs,
    archived trees, and local worktree copies.
-7. Worker-only services do not need request middleware. They inherit a verified
-   thread ID at the queue/stream boundary; missing extraction remains a gap.
+7. Worker-only services do not need request middleware or an ingress resolver.
+   Their resolver state is `not-required`, and the signed map must contain no
+   HTTP framework, route, mount, or middleware shape for that service. They
+   inherit a verified thread ID at the queue/stream boundary; missing extraction
+   remains a gap.
 8. Call coverage `discovery_projection`. Never present it as measured runtime,
    customer, cloud-cost, or financial coverage.
 
@@ -61,7 +64,7 @@ Review these in order, one engineering decision at a time:
 | `routes[].evidence` | Exact runtime source declaration; confirm dynamic registrations separately. |
 | `mounts[]` | Mount evidence only; a dynamic prefix remains unresolved. |
 | `auth_scope` | `global`, `router`, `handler`, or honest `unknown`. |
-| `resolver` | `proposed` only with explicit validation/crosswalk evidence; otherwise `unresolved`. |
+| `resolver` | HTTP ingress is `proposed` only with explicit reachable validation/crosswalk evidence; unresolved ingress blocks signoff. Worker-only services use `not-required`. |
 | `feature_proposal` | Draft slug requiring engineer/product confirmation, never an automatic financial label. |
 | `async_hops` | `verified`, `missing`, or `unknown` from concrete inject/extract/bind evidence. |
 | `middleware_detected` | Static presence of attribution middleware, not proof of ordering or runtime execution. |
@@ -69,13 +72,18 @@ Review these in order, one engineering decision at a time:
 | `scanner_version` | Scanner release that generated the map; it is also domain-bound into `source_fingerprint`. |
 
 Any `raw_identity_header`, `middleware_missing`, feature collision, unknown auth
-scope, unresolved resolver, or missing async propagation must be resolved or
-explicitly accepted before rollout.
+scope, or missing async propagation must be resolved or explicitly accepted
+before rollout. An unresolved HTTP ingress resolver cannot be accepted and
+blocks signoff; a worker-only `not-required` resolver is not a gap.
 
 Resolver provenance proposals are Python-only in v1. JavaScript/TypeScript and
-Go ingress remain supported, but their resolver fields stay `unresolved` and
-carry `resolver_provenance_unsupported`; do not treat those services as resolver
-coverage.
+Go ingress remain supported, but scanner-generated resolver fields stay
+`unresolved` and carry `resolver_provenance_unsupported`; do not treat those
+services as resolver coverage. To sign one, an engineer must inspect executable
+auth/context code, edit the resolver in the exact map to `proposed` with a
+concrete expression, template, identity kind, and file/line evidence, then run
+independent review and sign those exact edited map bytes. Never accept the
+generated unresolved state as risk.
 
 ## Signoff
 
