@@ -888,11 +888,34 @@ class DiscoveryContractTests(unittest.TestCase):
                 "unresolved",
             )
 
-    def _discover_python_source(self, source: str) -> dict:
+    def _discover_python_source(
+        self,
+        source: str,
+        requirements: str = "fastapi\n",
+    ) -> dict:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "requirements.txt").write_text(
+                requirements,
+                encoding="utf-8",
+            )
             (repo / "app.py").write_text(source, encoding="utf-8")
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            return self._load(output)["services"][0]
+
+    def _discover_go_source(self, source: str) -> dict:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/routes\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(source, encoding="utf-8")
             output = repo.parent / "map.json"
 
             run = self._discover(repo, output)
@@ -1543,6 +1566,197 @@ class DiscoveryContractTests(unittest.TestCase):
                 (None, "/unsupported", "high"),
             },
         )
+
+    def test_chi_method_literal_emits_route_with_receiver_evidence(self):
+        service = self._discover_go_source(
+            "package main\n"
+            'import "github.com/go-chi/chi/v5"\n'
+            "func main() {\n"
+            "  router := chi.NewRouter()\n"
+            "  router.Use(AuthenticationMiddleware)\n"
+            "  router.Use(AttributionMiddleware)\n"
+            '  router.Method("POST", "/orders", ordersHandler)\n'
+            "}\n"
+        )
+
+        self.assertEqual(
+            [
+                (
+                    route["method"],
+                    route["path_template"],
+                    route["auth_scope"],
+                    route["confidence"],
+                )
+                for route in service["routes"]
+            ],
+            [("POST", "/orders", "global", "high")],
+        )
+        self.assertTrue(service["middleware_detected"])
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
+
+    def test_chi_method_dynamic_and_unsupported_methods_are_explicitly_unknown(self):
+        service = self._discover_go_source(
+            "package main\n"
+            'import "github.com/go-chi/chi/v5"\n'
+            "func main() {\n"
+            "  router := chi.NewRouter()\n"
+            "  router.Use(AuthenticationMiddleware)\n"
+            "  router.Use(AttributionMiddleware)\n"
+            '  router.Method(methodName, "/dynamic", dynamicHandler)\n'
+            '  router.Method("TRACE", "/unsupported", unsupportedHandler)\n'
+            "}\n"
+        )
+
+        self.assertEqual(
+            {
+                (
+                    route["method"],
+                    route["path_template"],
+                    route["auth_scope"],
+                    route["confidence"],
+                )
+                for route in service["routes"]
+            },
+            {
+                (None, "/dynamic", "global", "high"),
+                (None, "/unsupported", "global", "high"),
+            },
+        )
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
+
+    def test_starlette_route_inherits_app_auth_and_attribution_context(self):
+        service = self._discover_python_source(
+            "from starlette.applications import Starlette\n"
+            "from starlette.routing import Route\n"
+            "def orders(request): return response\n"
+            "routes = [Route('/orders', orders, methods=['GET'])]\n"
+            "app = Starlette(routes=routes)\n"
+            "app.add_middleware(AuthenticationMiddleware)\n"
+            "app.add_middleware(AttributionMiddleware)\n",
+            requirements="starlette\n",
+        )
+
+        self.assertEqual(
+            [
+                (
+                    route["method"],
+                    route["path_template"],
+                    route["auth_scope"],
+                    route["confidence"],
+                )
+                for route in service["routes"]
+            ],
+            [("GET", "/orders", "global", "high")],
+        )
+        self.assertTrue(service["middleware_detected"])
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
+
+    def test_mounted_starlette_child_composes_prefix_and_parent_middleware(self):
+        service = self._discover_python_source(
+            "from starlette.applications import Starlette\n"
+            "from starlette.routing import Route\n"
+            "def orders(request): return response\n"
+            "child_routes = [Route('/orders', orders, methods=['GET'])]\n"
+            "child = Starlette(routes=child_routes)\n"
+            "parent = Starlette()\n"
+            "parent.add_middleware(AuthenticationMiddleware)\n"
+            "parent.add_middleware(AttributionMiddleware)\n"
+            "parent.mount(path='/api', app=child)\n",
+            requirements="starlette\n",
+        )
+
+        self.assertEqual(
+            [
+                (
+                    route["method"],
+                    route["path_template"],
+                    route["auth_scope"],
+                    route["confidence"],
+                )
+                for route in service["routes"]
+            ],
+            [("GET", "/api/orders", "global", "high")],
+        )
+        self.assertEqual(
+            [
+                (mount["target"], mount["prefix"], mount["confidence"])
+                for mount in service["mounts"]
+            ],
+            [("child", "/api", "high")],
+        )
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
+
+    def test_starlette_dynamic_routes_and_mounts_remain_explicitly_unknown(self):
+        cases = {
+            "dynamic-route-collection": (
+                "routes = build_routes()\n"
+                "child = Starlette(routes=routes)\n"
+                "parent.mount('/api', child)\n",
+                (None, None, "global", "low"),
+                ("/api", "high"),
+            ),
+            "dynamic-mount-prefix": (
+                "routes = [Route('/orders', orders, methods=['GET'])]\n"
+                "child = Starlette(routes=routes)\n"
+                "prefix = load_prefix()\n"
+                "parent.mount(prefix, child)\n",
+                ("GET", None, "global", "low"),
+                (None, "low"),
+            ),
+        }
+        for name, (composition, expected_route, expected_mount) in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "from starlette.applications import Starlette\n"
+                    "from starlette.routing import Route\n"
+                    "def orders(request): return response\n"
+                    "parent = Starlette()\n"
+                    "parent.add_middleware(AuthenticationMiddleware)\n"
+                    "parent.add_middleware(AttributionMiddleware)\n"
+                    f"{composition}",
+                    requirements="starlette\n",
+                )
+
+                self.assertEqual(
+                    [
+                        (
+                            route["method"],
+                            route["path_template"],
+                            route["auth_scope"],
+                            route["confidence"],
+                        )
+                        for route in service["routes"]
+                    ],
+                    [expected_route],
+                )
+                self.assertEqual(
+                    [
+                        (mount["prefix"], mount["confidence"])
+                        for mount in service["mounts"]
+                    ],
+                    [expected_mount],
+                )
+                if expected_mount[0] is None:
+                    self.assertIn(
+                        "mount_unresolved",
+                        {finding["code"] for finding in service["findings"]},
+                    )
+                self.assertNotIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
 
     def test_resolver_accepts_verified_tenant_crosswalk(self):
         service = self._discover_python_source(

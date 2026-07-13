@@ -765,6 +765,90 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             return expanded or f"<unresolved:{context['module']}:{name}>"
         return name
 
+    static_values: dict[
+        tuple[Path, str, str],
+        list[tuple[tuple[int, int], ast.AST | None]],
+    ] = {}
+    for path, context in file_contexts.items():
+        for node in ast.walk(context["tree"]):
+            if id(node) in context["dead_nodes"] or not isinstance(
+                node,
+                (ast.Assign, ast.AnnAssign),
+            ):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                scope = context["node_scopes"].get(
+                    id(target),
+                    context["module_scope"],
+                )
+                static_values.setdefault((path, scope, target.id), []).append(
+                    ((node.lineno, node.col_offset), node.value)
+                )
+
+    def static_value(
+        path: Path,
+        name: str,
+        use_node: ast.AST,
+    ) -> tuple[tuple[Path, str, str, tuple[int, int]], ast.AST | None] | None:
+        context = file_contexts[path]
+        scope = context["node_scopes"].get(id(use_node), context["module_scope"])
+        use_position = (
+            getattr(use_node, "lineno", sys.maxsize),
+            getattr(use_node, "col_offset", sys.maxsize),
+        )
+        while scope is not None:
+            candidates = [
+                (position, value)
+                for position, value in static_values.get((path, scope, name), [])
+                if position < use_position
+            ]
+            if candidates:
+                position, value = max(candidates, key=lambda item: item[0])
+                return (path, scope, name, position), value
+            if name in context["bindings"].get(scope, {}):
+                return None
+            scope = context["scope_parents"].get(scope)
+        return None
+
+    def static_starlette_routes(
+        path: Path,
+        node: ast.AST,
+        seen: frozenset[tuple[Path, str, str, tuple[int, int]]] = frozenset(),
+    ) -> tuple[list[ast.Call], bool]:
+        if isinstance(node, ast.Constant) and node.value is None:
+            return [], False
+        if isinstance(node, ast.Name):
+            binding = static_value(path, node.id, node)
+            if binding is None or binding[0] in seen or binding[1] is None:
+                return [], True
+            return static_starlette_routes(
+                path,
+                binding[1],
+                seen | {binding[0]},
+            )
+        if isinstance(node, ast.Call):
+            constructor = canonical(path, _dotted_name(node.func), node)
+            return ([node], False) if constructor == "starlette.routing.Route" else ([], True)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            routes: list[ast.Call] = []
+            unresolved = False
+            for item in node.elts:
+                value = item.value if isinstance(item, ast.Starred) else item
+                item_routes, item_unresolved = static_starlette_routes(
+                    path,
+                    value,
+                    seen,
+                )
+                routes.extend(item_routes)
+                unresolved = unresolved or item_unresolved
+            return routes, unresolved
+        return [], True
+
+    starlette_route_receivers: dict[int, set[str]] = {}
+    starlette_unknown_routes: dict[Path, list[tuple[str, ast.AST]]] = {}
     attribution_receivers: set[str] = set()
     global_auth_roots: set[str] = set()
     authenticated_routers: set[str] = set()
@@ -778,13 +862,38 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                 continue
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 value = node.value
-                if isinstance(value, ast.Call) and _call_name(value.func).rsplit(".", 1)[-1] in {"FastAPI", "APIRouter"}:
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                constructor = (
+                    _call_name(value.func).rsplit(".", 1)[-1]
+                    if isinstance(value, ast.Call)
+                    else ""
+                )
+                if constructor == "Starlette":
+                    routes_node = _call_argument(value, 1, "routes")
+                    if routes_node is not None:
+                        route_calls, unresolved = static_starlette_routes(
+                            path,
+                            routes_node,
+                        )
+                        for target in targets:
+                            if not isinstance(target, ast.Name):
+                                continue
+                            receiver = canonical(path, target.id, target)
+                            for route_call in route_calls:
+                                starlette_route_receivers.setdefault(
+                                    id(route_call),
+                                    set(),
+                                ).add(receiver)
+                            if unresolved:
+                                starlette_unknown_routes.setdefault(path, []).append(
+                                    (receiver, routes_node)
+                                )
+                if constructor in {"FastAPI", "APIRouter"}:
                     for target in targets:
                         if not isinstance(target, ast.Name) or not _has_auth_dependency(value):
                             continue
                         receiver = canonical(path, target.id, target)
-                        if _call_name(value.func).rsplit(".", 1)[-1] == "FastAPI":
+                        if constructor == "FastAPI":
                             global_auth_roots.add(receiver)
                         else:
                             authenticated_routers.add(receiver)
@@ -883,6 +992,8 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
         "attribution_covered": {receiver for receiver in receivers if inherited(receiver, attribution_receivers)},
         "global_auth": {receiver for receiver in receivers if inherited(receiver, global_auth_roots)},
         "authenticated_routers": authenticated_routers,
+        "starlette_route_receivers": starlette_route_receivers,
+        "starlette_unknown_routes": starlette_unknown_routes,
     }
 
 
@@ -1059,7 +1170,7 @@ def _scan_python(
                     receiver,
                     receiver in attribution_covered,
                 ))
-        if isinstance(node, ast.Call) and node.args and context is not None:
+        if isinstance(node, ast.Call) and context is not None:
             imported, constructor = _python_scoped_binding(
                 context,
                 _dotted_name(node.func),
@@ -1067,8 +1178,47 @@ def _scan_python(
             )
             if not imported or constructor != "starlette.routing.Route":
                 continue
-            for method in _python_route_methods(node):
-                routes.append(_route(service_path, "starlette", method, _literal_source(node.args[0]), _location(repo, path, node.lineno)))
+            path_node = _call_argument(node, 0, "path")
+            raw_path = _literal_source(path_node) if path_node is not None else "<dynamic>"
+            route_receivers: list[str | None] = sorted(
+                service_context["starlette_route_receivers"].get(id(node), set())
+            ) or [None]
+            for receiver in route_receivers:
+                auth_scope = (
+                    "global"
+                    if receiver is not None and receiver in global_auth
+                    else "unknown"
+                )
+                prefixed_path = (
+                    _prefixed_raw_path(prefixes.get(receiver, ""), raw_path)
+                    if receiver is not None
+                    else raw_path
+                )
+                for method in _python_route_methods(node):
+                    routes.append(_route(
+                        service_path,
+                        "starlette",
+                        method,
+                        prefixed_path,
+                        _location(repo, path, node.lineno),
+                        auth_scope,
+                        receiver,
+                        receiver is not None and receiver in attribution_covered,
+                    ))
+    if service_context is not None:
+        for receiver, routes_node in service_context[
+            "starlette_unknown_routes"
+        ].get(path, []):
+            routes.append(_route(
+                service_path,
+                "starlette",
+                None,
+                _prefixed_raw_path(prefixes.get(receiver, ""), "<dynamic>"),
+                _location(repo, path, routes_node.lineno),
+                "global" if receiver in global_auth else "unknown",
+                receiver,
+                receiver in attribution_covered,
+            ))
     return routes, bool(attribution_receivers), mounts
 
 
@@ -2073,7 +2223,7 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         re.compile(r"\bhttp\.HandleFunc\s*\(\s*([^,\)]+)", re.S),
         re.compile(r"\bhttp\.Handle\s*\(\s*([^,\)]+)", re.S),
         re.compile(
-            r"\b(\w+)\.(Get|Post|Put|Patch|Delete|Head|Options|Method)\s*\(\s*([^,\)]+)",
+            r"\b(\w+)\.(Get|Post|Put|Patch|Delete|Head|Options)\s*\(\s*([^,\)]+)",
             re.I | re.S,
         ),
     )
@@ -2086,18 +2236,39 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
                 service_path, framework, None, match.group(1).strip(),
                 _location(repo, path, number),
             ))
+    registered_routes: list[tuple[int, str, str | None, str]] = []
     for match in patterns[2].finditer(code):
         if not _outside_js_string(code, match.start()) or is_dead(match.start()):
             continue
         receiver_name, method, raw_path = match.groups()
-        receiver = resolve_receiver(receiver_name, match.start())
-        if receiver is None or method.upper() == "METHOD":
+        registered_routes.append(
+            (match.start(), receiver_name, method.upper(), raw_path)
+        )
+    method_pattern = re.compile(
+        r"\b(\w+)\.Method\s*\(\s*([^,\)]+)\s*,\s*([^,\)]+)",
+        re.I | re.S,
+    )
+    for match in method_pattern.finditer(code):
+        if not _outside_js_string(code, match.start()) or is_dead(match.start()):
+            continue
+        receiver_name, raw_method, raw_path = match.groups()
+        literal_method, _ = _path_value(raw_method)
+        method = (
+            literal_method.upper()
+            if literal_method is not None and literal_method.upper() in METHODS
+            else None
+        )
+        registered_routes.append((match.start(), receiver_name, method, raw_path))
+
+    for position, receiver_name, method, raw_path in sorted(registered_routes):
+        receiver = resolve_receiver(receiver_name, position)
+        if receiver is None:
             continue
         receiver_identity, receiver_state = receiver
-        number = code.count("\n", 0, match.start()) + 1
+        number = code.count("\n", 0, position) + 1
         containing = [
             block for block in inline_blocks
-            if block[0] < match.start() < block[1]
+            if block[0] < position < block[1]
             and block[2] == receiver_identity
         ]
         route_prefix = (
@@ -2106,7 +2277,7 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
             else effective_prefix(receiver_identity)
         )
         route = _route(
-            service_path, framework, method.upper(),
+            service_path, framework, method,
             _prefixed_raw_path(route_prefix, raw_path.strip()),
             _location(repo, path, number),
             "global" if receiver_state["auth"] else "unknown", receiver_identity,
@@ -2114,7 +2285,7 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         )
         containing_function = [
             block for block in function_blocks
-            if block[0] <= match.start() < block[1] and receiver_name in block[3]
+            if block[0] <= position < block[1] and receiver_name in block[3]
         ]
         if containing_function:
             function_block = min(
