@@ -888,6 +888,150 @@ class DiscoveryContractTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def _discover_python_source(self, source: str) -> dict:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(source, encoding="utf-8")
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            return self._load(output)["services"][0]
+
+    def test_resolver_accepts_keyword_verified_identity_source(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    request.state.customer_id = verify_signed_customer_identity(\n"
+            "        token=request.headers.get('X-Customer-ID'))\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            [
+                finding["code"]
+                for finding in service["findings"]
+                if finding["code"]
+                in {"raw_identity_header", "verified_identity_header"}
+            ],
+            ["verified_identity_header"],
+        )
+
+    def test_resolver_preserves_each_completed_verified_context_binding(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    request.state.customer_id = verify_signed_customer_identity(request.headers.get('X-Customer-ID'))\n"
+            "    request.state.customer_id = verify_signed_customer_identity(request.headers.get('X-Moolabs-Customer'))\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            [
+                (finding["code"], finding["evidence"]["line"])
+                for finding in service["findings"]
+                if finding["code"]
+                in {"raw_identity_header", "verified_identity_header"}
+            ],
+            [
+                ("verified_identity_header", 5),
+                ("verified_identity_header", 6),
+            ],
+        )
+
+    def test_resolver_tracks_verified_request_context_alias(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    state = request.state\n"
+            "    state.customer_id = verify_signed_customer_identity(request.headers.get('X-Customer-ID'))\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            service["resolver"]["expression"],
+            "request.state.customer_id",
+        )
+
+    def test_resolver_does_not_trust_raw_request_context_alias(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def poisoned(request):\n"
+            "    state = request.state\n"
+            "    state.customer_id = request.headers.get('X-Customer-ID')\n"
+            "    uuid.UUID(state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(poisoned)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "unresolved")
+        self.assertTrue(
+            any(
+                finding["code"] == "raw_identity_header"
+                for finding in service["findings"]
+            )
+        )
+
+    def test_resolver_accepts_verified_request_context_setattr(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    setattr(request.state, 'customer_id', verify_signed_customer_identity(\n"
+            "        request.headers.get('X-Customer-ID')))\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            [
+                finding["code"]
+                for finding in service["findings"]
+                if finding["code"]
+                in {"raw_identity_header", "verified_identity_header"}
+            ],
+            ["verified_identity_header"],
+        )
+
+    def test_resolver_accepts_verified_tenant_crosswalk(self):
+        service = self._discover_python_source(
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def resolve_tenant_key(auth=Depends(verify_jwt)):\n"
+            "    return lookup_tenant(auth.tenant_key)\n"
+            "@app.get('/orders')\n"
+            "def orders(tenant=Depends(resolve_tenant_key)): return {'tenant': tenant}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            service["resolver"]["identity_kind"],
+            "external_key_crosswalk",
+        )
+        self.assertEqual(service["resolver"]["expression"], "auth.tenant_key")
+
     def test_resolver_conservatively_merges_raw_and_trusted_python_branches(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -2394,7 +2538,7 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(service["resolver"]["state"], "unresolved")
             self.assertTrue(
                 any(
-                    item["code"] == "raw_identity_header"
+                    item["code"] == "verified_identity_header"
                     and item["evidence"]["line"] == 6
                     for item in service["findings"]
                 )
@@ -2650,7 +2794,7 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(service["resolver"]["state"], "unresolved")
             self.assertTrue(
                 any(
-                    finding["code"] == "raw_identity_header"
+                    finding["code"] == "verified_identity_header"
                     and finding["evidence"]["line"] == 6
                     for finding in service["findings"]
                 )
