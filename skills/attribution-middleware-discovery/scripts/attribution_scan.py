@@ -2244,14 +2244,17 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         registered_routes.append(
             (match.start(), receiver_name, method.upper(), raw_path)
         )
-    method_pattern = re.compile(
-        r"\b(\w+)\.Method\s*\(\s*([^,\)]+)\s*,\s*([^,\)]+)",
-        re.I | re.S,
-    )
+    method_pattern = re.compile(r"\b(\w+)\.Method\s*(\()", re.I)
     for match in method_pattern.finditer(code):
         if not _outside_js_string(code, match.start()) or is_dead(match.start()):
             continue
-        receiver_name, raw_method, raw_path = match.groups()
+        arguments = _split_call_arguments(
+            _balanced_call_text(code, match.start(2))
+        )
+        if len(arguments) < 2:
+            continue
+        receiver_name = match.group(1)
+        raw_method, raw_path = arguments[:2]
         literal_method, _ = _path_value(raw_method)
         method = (
             literal_method.upper()

@@ -1606,6 +1606,7 @@ class DiscoveryContractTests(unittest.TestCase):
             "  router.Use(AuthenticationMiddleware)\n"
             "  router.Use(AttributionMiddleware)\n"
             '  router.Method(methodName, "/dynamic", dynamicHandler)\n'
+            '  router.Method(resolveMethod(), "/computed", computedHandler)\n'
             '  router.Method("TRACE", "/unsupported", unsupportedHandler)\n'
             "}\n"
         )
@@ -1622,6 +1623,7 @@ class DiscoveryContractTests(unittest.TestCase):
             },
             {
                 (None, "/dynamic", "global", "high"),
+                (None, "/computed", "global", "high"),
                 (None, "/unsupported", "global", "high"),
             },
         )
