@@ -192,6 +192,17 @@ class AttributionSkillInstallTests(unittest.TestCase):
             self.assertTrue((attribution_root / "scripts" / "drift_lint.py").is_file())
             customer_repo = Path(temp_dir) / "customer-repo"
             shutil.copytree(attribution_root / "fixtures" / "drift", customer_repo)
+            (customer_repo / "service" / "app.py").write_text(
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "app.add_middleware(AttributionMiddleware)\n"
+                "@app.get('/orders')\n"
+                "def orders(claims=Depends(require_auth)):\n"
+                "    customer = claims.customer_id\n"
+                "    parsed = UUID(customer)\n"
+                "    return {'customer': str(parsed)}\n",
+                encoding="utf-8",
+            )
             for command in (
                 ["git", "init", "--quiet"],
                 ["git", "add", "."],
@@ -257,13 +268,13 @@ class AttributionSkillInstallTests(unittest.TestCase):
                     "independent-reviewer",
                     "--review-evidence",
                     "review://ws5/extracted-package",
-                "--review-verdict",
-                "clean",
-                "--findings-resolved",
-                "0",
-                "--findings-rejected-as-false-positive",
-                "0",
-            ],
+                    "--review-verdict",
+                    "clean",
+                    "--findings-resolved",
+                    "0",
+                    "--findings-rejected-as-false-positive",
+                    "0",
+                ],
                 env=clean_env,
                 text=True,
                 capture_output=True,

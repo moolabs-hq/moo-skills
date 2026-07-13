@@ -32,6 +32,7 @@ SUPPORTED_PYTHON_FRAMEWORKS = {"fastapi"}
 GENERATED_SOURCE_NAME = re.compile(r"(?:^|[._-])gen(?:erated)?(?:[._-]|$)", re.I)
 SDK_SOURCE_PART = re.compile(r"(?:^|[-_])sdk$", re.I)
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "assets" / "instrumentation-map.schema.yaml"
+SCANNER_VERSION = "1.0.0"
 
 
 class DiscoveryError(ValueError):
@@ -495,6 +496,203 @@ def _python_import_aliases(tree: ast.AST, module: str, is_package: bool) -> dict
     return aliases
 
 
+def _python_scope_context(
+    tree: ast.AST,
+    module: str,
+    is_package: bool,
+) -> dict[str, Any]:
+    module_scope = f"{module or '<root>'}:<module>"
+    node_scopes: dict[int, str] = {}
+    scope_parents: dict[str, str | None] = {module_scope: None}
+    bindings: dict[str, dict[str, list[str | None]]] = {module_scope: {}}
+    receivers: set[str] = set()
+    local_prefixes: dict[str, str | None] = {}
+
+    def bind(scope: str, name: str, value: str | None) -> None:
+        bindings.setdefault(scope, {}).setdefault(name, []).append(value)
+
+    def target_names(target: ast.AST) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, ast.Starred):
+            return target_names(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for item in target.elts for name in target_names(item)]
+        return []
+
+    def receiver_identity(scope: str, name: str) -> str:
+        if scope == module_scope:
+            return ".".join(part for part in (module, name) if part)
+        return f"{scope}.<receiver>.{name}"
+
+    def import_base(node: ast.ImportFrom) -> str:
+        base = node.module or ""
+        if not node.level:
+            return base
+        package = module.split(".") if is_package else module.split(".")[:-1]
+        keep = max(0, len(package) - node.level + 1)
+        return ".".join(package[:keep] + ([base] if base else []))
+
+    class ScopeVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scope = module_scope
+
+        def generic_visit(self, node: ast.AST) -> None:
+            node_scopes[id(node)] = self.scope
+            super().generic_visit(node)
+
+        def _visit_function(
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+        ) -> None:
+            node_scopes[id(node)] = self.scope
+            bind(self.scope, node.name, None)
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                if default is not None:
+                    self.visit(default)
+            if node.returns is not None:
+                self.visit(node.returns)
+            inner = f"{self.scope}.<function:{node.name}@{node.lineno}>"
+            scope_parents[inner] = self.scope
+            bindings.setdefault(inner, {})
+            previous = self.scope
+            self.scope = inner
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                node_scopes[id(argument)] = inner
+                bind(inner, argument.arg, None)
+            if node.args.vararg is not None:
+                bind(inner, node.args.vararg.arg, None)
+            if node.args.kwarg is not None:
+                bind(inner, node.args.kwarg.arg, None)
+            for statement in node.body:
+                self.visit(statement)
+            self.scope = previous
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            node_scopes[id(node)] = self.scope
+            bind(self.scope, node.name, None)
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for base in node.bases:
+                self.visit(base)
+            for keyword in node.keywords:
+                self.visit(keyword)
+            inner = f"{self.scope}.<class:{node.name}@{node.lineno}>"
+            scope_parents[inner] = self.scope
+            bindings.setdefault(inner, {})
+            previous = self.scope
+            self.scope = inner
+            for statement in node.body:
+                self.visit(statement)
+            self.scope = previous
+
+        def visit_Import(self, node: ast.Import) -> None:
+            node_scopes[id(node)] = self.scope
+            for imported in node.names:
+                local = imported.asname or imported.name.split(".", 1)[0]
+                value = imported.name if imported.asname else local
+                bind(self.scope, local, value)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            node_scopes[id(node)] = self.scope
+            base = import_base(node)
+            for imported in node.names:
+                if imported.name == "*":
+                    continue
+                value = ".".join(part for part in (base, imported.name) if part)
+                bind(self.scope, imported.asname or imported.name, value)
+
+        def _visit_assignment(
+            self,
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+        ) -> None:
+            node_scopes[id(node)] = self.scope
+            value = node.value
+            if value is not None:
+                self.visit(value)
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+            )
+            constructor = (
+                _call_name(value.func).rsplit(".", 1)[-1]
+                if isinstance(value, ast.Call)
+                else ""
+            )
+            prefix_node = (
+                next(
+                    (keyword.value for keyword in value.keywords if keyword.arg == "prefix"),
+                    None,
+                )
+                if isinstance(value, ast.Call)
+                else None
+            )
+            for target in targets:
+                self.visit(target)
+                for name in target_names(target):
+                    identity = None
+                    if constructor in {"FastAPI", "APIRouter"}:
+                        identity = receiver_identity(self.scope, name)
+                        receivers.add(identity)
+                        local_prefixes[identity] = (
+                            _path_value(_literal_source(prefix_node))[0]
+                            if prefix_node is not None
+                            else ""
+                        )
+                    bind(self.scope, name, identity)
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            self._visit_assignment(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            self._visit_assignment(node)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            self._visit_assignment(node)
+
+    ScopeVisitor().visit(tree)
+
+    return {
+        "module_scope": module_scope,
+        "node_scopes": node_scopes,
+        "scope_parents": scope_parents,
+        "bindings": bindings,
+        "receivers": receivers,
+        "prefixes": local_prefixes,
+    }
+
+
+def _python_scoped_binding(
+    context: dict[str, Any],
+    name: str,
+    node: ast.AST | None,
+) -> tuple[bool, str | None]:
+    head, separator, tail = name.partition(".")
+    scope = context["node_scopes"].get(id(node), context["module_scope"])
+    while scope is not None:
+        if head in context["bindings"].get(scope, {}):
+            values = set(context["bindings"][scope][head])
+            if len(values) != 1 or None in values:
+                return True, None
+            expanded = next(iter(values))
+            return True, f"{expanded}.{tail}" if separator else expanded
+        scope = context["scope_parents"].get(scope)
+    return False, None
+
+
 def _python_service_context(repo: Path, service_path: str, files: list[Path]) -> dict[str, Any]:
     service_root = repo / service_path if service_path else repo
     file_contexts: dict[Path, dict[str, Any]] = {}
@@ -511,43 +709,25 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             continue
         module, is_package = _python_module_name(service_root, path)
         dead_nodes = _dead_python_nodes(tree)
-        locals_in_file: set[str] = set()
-        for node in ast.walk(tree):
-            if id(node) in dead_nodes or not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            value = node.value
-            if not isinstance(value, ast.Call) or _call_name(value.func).rsplit(".", 1)[-1] not in {"FastAPI", "APIRouter"}:
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            prefix_node = next((keyword.value for keyword in value.keywords if keyword.arg == "prefix"), None)
-            local_prefix = _path_value(_literal_source(prefix_node))[0] if prefix_node else ""
-            for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                canonical = ".".join(part for part in (module, target.id) if part)
-                receivers.add(canonical)
-                locals_in_file.add(target.id)
-                local_prefixes[canonical] = local_prefix
+        scopes = _python_scope_context(tree, module, is_package)
+        receivers.update(scopes["receivers"])
+        local_prefixes.update(scopes["prefixes"])
         file_contexts[path] = {
             "tree": tree,
             "dead_nodes": dead_nodes,
             "module": module,
             "aliases": _python_import_aliases(tree, module, is_package),
-            "locals": locals_in_file,
+            **scopes,
         }
 
-    def canonical(path: Path, name: str) -> str:
+    def canonical(path: Path, name: str, node: ast.AST | None = None) -> str:
         context = file_contexts.get(path)
         if context is None or not name:
             return name
-        head, separator, tail = name.partition(".")
-        expanded = context["aliases"].get(head, head)
-        if separator:
-            expanded = f"{expanded}.{tail}"
-        if expanded in receivers:
-            return expanded
-        local = ".".join(part for part in (context["module"], expanded) if part)
-        return local if local in receivers else expanded
+        found, expanded = _python_scoped_binding(context, name, node)
+        if found:
+            return expanded or f"<unresolved:{context['module']}:{name}>"
+        return name
 
     attribution_receivers: set[str] = set()
     global_auth_roots: set[str] = set()
@@ -567,7 +747,7 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                     for target in targets:
                         if not isinstance(target, ast.Name) or not _has_auth_dependency(value):
                             continue
-                        receiver = canonical(path, target.id)
+                        receiver = canonical(path, target.id, target)
                         if _call_name(value.func).rsplit(".", 1)[-1] == "FastAPI":
                             global_auth_roots.add(receiver)
                         else:
@@ -580,10 +760,18 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                         and decorator.func.attr == "middleware"
                         and _attribution_name(node.name)
                     ):
-                        attribution_receivers.add(canonical(path, _dotted_name(decorator.func.value)))
+                        receiver = canonical(
+                            path,
+                            _dotted_name(decorator.func.value),
+                            decorator,
+                        )
+                        if receiver in receivers:
+                            attribution_receivers.add(receiver)
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            parent = canonical(path, _dotted_name(node.func.value))
+            parent = canonical(path, _dotted_name(node.func.value), node)
+            if parent not in receivers:
+                continue
             if node.func.attr == "add_middleware" and node.args:
                 middleware_name = _dotted_name(node.args[0])
                 if _auth_name(middleware_name):
@@ -591,7 +779,7 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                 if _attribution_name(middleware_name):
                     attribution_receivers.add(parent)
             elif node.func.attr == "include_router" and node.args:
-                child = canonical(path, _dotted_name(node.args[0]))
+                child = canonical(path, _dotted_name(node.args[0]), node.args[0])
                 if child not in receivers:
                     continue
                 prefix_node = next((keyword.value for keyword in node.keywords if keyword.arg == "prefix"), None)
@@ -659,21 +847,27 @@ def _scan_python(
 ) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return routes, False, mounts
-    dead_nodes = _dead_python_nodes(tree)
+    context = service_context["files"].get(path) if service_context else None
+    if context is not None:
+        tree = context["tree"]
+        dead_nodes = context["dead_nodes"]
+    else:
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return routes, False, mounts
+        dead_nodes = _dead_python_nodes(tree)
     framework = "fastapi" if any(
         isinstance(node, (ast.Name, ast.Attribute)) and _dotted_name(node).rsplit(".", 1)[-1] in {"FastAPI", "APIRouter"}
         for node in ast.walk(tree)
     ) else "starlette"
     canonical = (
-        (lambda value: service_context["canonical"](path, value))
+        (lambda value, node=None: service_context["canonical"](path, value, node))
         if service_context is not None
-        else (lambda value: value)
+        else (lambda value, node=None: value)
     )
     prefixes: dict[str, str | None] = dict(service_context["prefixes"]) if service_context else {"app": ""}
+    receivers: set[str] = set(service_context["receivers"]) if service_context else set(prefixes)
     authenticated_routers: set[str] = set(service_context["authenticated_routers"]) if service_context else set()
     global_auth: set[str] = set(service_context["global_auth"]) if service_context else set()
     attribution_receivers: set[str] = set(service_context["attribution_receivers"]) if service_context else set()
@@ -695,7 +889,7 @@ def _scan_python(
                     if not isinstance(target, ast.Name):
                         continue
                     prefix_node = next((keyword.value for keyword in value.keywords if keyword.arg == "prefix"), None)
-                    receiver_name = canonical(target.id)
+                    receiver_name = canonical(target.id, target)
                     if service_context is None:
                         prefixes[receiver_name] = _path_value(_literal_source(prefix_node))[0] if prefix_node else ""
                     if _has_auth_dependency(value):
@@ -705,7 +899,9 @@ def _scan_python(
                             authenticated_routers.add(receiver_name)
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        receiver = canonical(_dotted_name(node.func.value))
+        receiver = canonical(_dotted_name(node.func.value), node)
+        if receiver not in receivers:
+            continue
         if node.func.attr == "add_middleware" and node.args:
             middleware_name = _dotted_name(node.args[0])
             if _auth_name(middleware_name):
@@ -714,7 +910,7 @@ def _scan_python(
                 attribution_receivers.add(receiver)
         if node.func.attr == "include_router" and node.args:
             target = _dotted_name(node.args[0])
-            router_name = canonical(target)
+            router_name = canonical(target, node.args[0])
             prefix_node = next((keyword.value for keyword in node.keywords if keyword.arg == "prefix"), None)
             raw_prefix = _literal_source(prefix_node) if prefix_node else None
             resolved = router_name in prefixes
@@ -738,7 +934,9 @@ def _scan_python(
                 and decorator.func.attr == "middleware"
                 and _attribution_name(node.name)
             ):
-                attribution_receivers.add(canonical(_dotted_name(decorator.func.value)))
+                receiver = canonical(_dotted_name(decorator.func.value), decorator)
+                if receiver in receivers:
+                    attribution_receivers.add(receiver)
 
     for node in ast.walk(tree):
         if id(node) in dead_nodes:
@@ -747,12 +945,15 @@ def _scan_python(
             for decorator in node.decorator_list:
                 if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
                     continue
-                receiver = canonical(_dotted_name(decorator.func.value))
+                receiver = canonical(_dotted_name(decorator.func.value), decorator)
                 method = decorator.func.attr.upper()
                 if decorator.func.attr == "middleware" and _attribution_name(node.name):
-                    attribution_receivers.add(receiver)
+                    if receiver in receivers:
+                        attribution_receivers.add(receiver)
                     continue
                 if method not in METHODS or not decorator.args:
+                    continue
+                if receiver not in receivers:
                     continue
                 scope = (
                     "handler" if _has_auth_dependency(node) or _has_auth_dependency(decorator)
@@ -767,7 +968,9 @@ def _scan_python(
                     receiver in attribution_covered,
                 ))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route" and node.args:
-            receiver = canonical(_dotted_name(node.func.value))
+            receiver = canonical(_dotted_name(node.func.value), node)
+            if receiver not in receivers:
+                continue
             handler_name = _dotted_name(node.args[1]).rsplit(".", 1)[-1] if len(node.args) > 1 else ""
             handler = function_defs.get(handler_name)
             methods_node = next((keyword.value for keyword in node.keywords if keyword.arg == "methods"), None)
@@ -784,7 +987,14 @@ def _scan_python(
                     receiver,
                     receiver in attribution_covered,
                 ))
-        if isinstance(node, ast.Call) and _call_name(node.func).rsplit(".", 1)[-1] == "Route" and node.args:
+        if isinstance(node, ast.Call) and node.args and context is not None:
+            imported, constructor = _python_scoped_binding(
+                context,
+                _dotted_name(node.func),
+                node,
+            )
+            if not imported or constructor != "starlette.routing.Route":
+                continue
             methods_node = next((keyword.value for keyword in node.keywords if keyword.arg == "methods"), None)
             methods = [item.value for item in methods_node.elts if isinstance(item, ast.Constant)] if isinstance(methods_node, (ast.List, ast.Tuple)) else [None]
             for method in methods:
@@ -792,7 +1002,7 @@ def _scan_python(
     return routes, bool(attribution_receivers), mounts
 
 
-JS_SOURCE_SUFFIXES = {".js", ".jsx", ".mjs", ".ts", ".tsx"}
+JS_SOURCE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs")
 JS_RECEIVER_DECLARATION_PATTERN = re.compile(
     r"(?:\b(?:const|let|var)\s+)?\b(\w+)\s*=\s*"
     r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
@@ -801,52 +1011,369 @@ JS_EXPORTED_RECEIVER_PATTERN = re.compile(
     r"\bexport\s+(?:const|let|var)\s+(\w+)\s*=\s*"
     r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
 )
+JS_SCOPED_RECEIVER_PATTERN = re.compile(
+    r"\b(?:(const|let|var)\s+)?([A-Za-z_$]\w*)\s*=\s*"
+    r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()"
+)
 
 
 def _js_receiver_framework(constructor: str) -> str:
     return "hono" if "Hono" in constructor else "express"
 
 
-def _js_imported_route_receivers(files: list[Path]) -> dict[Path, dict[str, str]]:
-    source_files = [path for path in files if path.suffix.lower() in JS_SOURCE_SUFFIXES]
-    exported: dict[Path, dict[str, str]] = {}
-    for path in source_files:
-        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
-        for match in JS_EXPORTED_RECEIVER_PATTERN.finditer(code):
-            if _outside_js_string(code, match.start()):
-                exported.setdefault(path.resolve(), {})[match.group(1)] = (
-                    _js_receiver_framework(match.group(2))
-                )
+def _js_brace_ranges(code: str) -> dict[int, tuple[int, int]]:
+    ranges: dict[int, tuple[int, int]] = {}
+    stack: list[int] = []
+    quote: str | None = None
+    escaped = False
+    for position, character in enumerate(code):
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif quote:
+            if character == quote:
+                quote = None
+        elif character in {"'", '"', "`"}:
+            quote = character
+        elif character == "{":
+            stack.append(position)
+        elif character == "}" and stack:
+            start = stack.pop()
+            ranges[start] = (start, position + 1)
+    return ranges
 
-    imported: dict[Path, dict[str, str]] = {}
-    import_pattern = re.compile(
-        r"\bimport\s*\{([^}]+)\}\s*from\s*['\"](\.[^'\"]+)['\"]",
-        re.S,
+
+def _js_receiver_state(
+    code: str,
+    imported_receivers: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], Any, set[str]]:
+    brace_ranges = _js_brace_ranges(code)
+    lexical_scopes = list(brace_ranges.values())
+    module_scope = (0, len(code) + 1)
+    function_scopes: list[tuple[int, int]] = []
+    function_matches: list[tuple[re.Match[str], tuple[int, int], str]] = []
+    function_patterns = (
+        re.compile(r"\bfunction(?:\s+[A-Za-z_$]\w*)?\s*\(([^)]*)\)\s*\{"),
+        re.compile(r"(?:\(([^)]*)\)|([A-Za-z_$]\w*))\s*=>\s*\{"),
     )
-    for path in source_files:
-        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
-        for match in import_pattern.finditer(code):
+    for pattern in function_patterns:
+        for match in pattern.finditer(code):
             if not _outside_js_string(code, match.start()):
                 continue
-            module = (path.parent / match.group(2)).resolve()
-            candidates = [module]
-            if module.suffix.lower() not in JS_SOURCE_SUFFIXES:
-                candidates.extend(Path(f"{module}{suffix}") for suffix in JS_SOURCE_SUFFIXES)
-                candidates.extend(module / f"index{suffix}" for suffix in JS_SOURCE_SUFFIXES)
-            source_exports = next(
-                (exported[candidate] for candidate in candidates if candidate in exported),
-                None,
+            scope = brace_ranges.get(match.end() - 1)
+            if scope is None:
+                continue
+            parameters = next(
+                (group for group in match.groups() if group is not None),
+                "",
             )
-            if source_exports is None:
+            function_scopes.append(scope)
+            function_matches.append((match, scope, parameters))
+
+    def containing_scope(
+        position: int,
+        scopes: list[tuple[int, int]],
+    ) -> tuple[int, int]:
+        containing = [scope for scope in scopes if scope[0] < position < scope[1]]
+        return min(containing, key=lambda scope: scope[1] - scope[0]) if containing else module_scope
+
+    states: dict[str, dict[str, Any]] = {}
+    bindings: dict[str, list[tuple[tuple[int, int], int, str | None]]] = {}
+    local_receiver_ids: set[str] = set()
+
+    def add_binding(
+        name: str,
+        scope: tuple[int, int],
+        position: int,
+        identity: str | None,
+    ) -> None:
+        bindings.setdefault(name, []).append((scope, position, identity))
+
+    for name, metadata in (imported_receivers or {}).items():
+        states[name] = dict(metadata)
+        add_binding(name, module_scope, -1, name)
+
+    receiver_declarations: set[int] = set()
+    for match in JS_SCOPED_RECEIVER_PATTERN.finditer(code):
+        if not _outside_js_string(code, match.start()):
+            continue
+        kind, name, constructor = match.groups()
+        scopes = function_scopes if kind == "var" else lexical_scopes
+        scope = containing_scope(match.start(), scopes)
+        identity = name if scope == module_scope else f"{name}@{match.start()}"
+        states[identity] = {
+            "framework": _js_receiver_framework(constructor),
+            "attribution": False,
+            "auth": False,
+        }
+        add_binding(name, scope, match.start(), identity)
+        local_receiver_ids.add(identity)
+        receiver_declarations.add(match.start(2))
+
+    relevant_names = set(bindings)
+    declaration_pattern = re.compile(r"\b(const|let|var)\s+([A-Za-z_$]\w*)\b")
+    for match in declaration_pattern.finditer(code):
+        if (
+            match.start(2) in receiver_declarations
+            or match.group(2) not in relevant_names
+            or not _outside_js_string(code, match.start())
+        ):
+            continue
+        scopes = function_scopes if match.group(1) == "var" else lexical_scopes
+        add_binding(
+            match.group(2),
+            containing_scope(match.start(), scopes),
+            match.start(),
+            None,
+        )
+
+    for match, scope, parameters in function_matches:
+        for argument in _split_call_arguments(f"({parameters})"):
+            binding = argument.split("=", 1)[0].strip()
+            if binding in relevant_names:
+                add_binding(binding, scope, match.start(), None)
+
+    def resolve(name: str, position: int) -> tuple[str, dict[str, Any]] | None:
+        candidate_scopes = sorted(
+            {
+                scope
+                for scope, _, _ in bindings.get(name, [])
+                if scope[0] <= position < scope[1]
+            },
+            key=lambda scope: scope[1] - scope[0],
+        )
+        for scope in candidate_scopes:
+            scoped = [
+                (binding_position, identity)
+                for binding_scope, binding_position, identity in bindings[name]
+                if binding_scope == scope
+            ]
+            preceding = [item for item in scoped if item[0] <= position]
+            if not preceding:
+                return None
+            _, identity = max(preceding, key=lambda item: item[0])
+            if identity is None:
+                return None
+            return identity, states[identity]
+        return None
+
+    middleware_patterns = (
+        (
+            re.compile(
+                r"\b([A-Za-z_$]\w*)\.use\s*\([^\)]*?"
+                r"(?:attribution\w*middleware|moolabs\w*middleware|middleware\w*attribution)",
+                re.I | re.S,
+            ),
+            "attribution",
+        ),
+        (
+            re.compile(
+                r"\b([A-Za-z_$]\w*)\.use\s*\([^\)]*?"
+                r"(?:require[_-]?auth|authenticate\w*|auth(?:entication)?middleware|verify(?:jwt|token))",
+                re.I | re.S,
+            ),
+            "auth",
+        ),
+    )
+    for pattern, state_key in middleware_patterns:
+        for match in pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            resolved = resolve(match.group(1), match.start())
+            if resolved is not None:
+                resolved[1][state_key] = True
+
+    return states, resolve, local_receiver_ids
+
+
+def _js_import_shadow_ranges(
+    code: str,
+    imported_names: set[str],
+) -> dict[str, list[tuple[int, int]]]:
+    shadows = {name: [] for name in imported_names}
+    if not imported_names:
+        return shadows
+    brace_ranges = _js_brace_ranges(code)
+    lexical_ranges = list(brace_ranges.values())
+    function_ranges: list[tuple[int, int]] = []
+
+    function_patterns = (
+        re.compile(r"\bfunction(?:\s+[A-Za-z_$]\w*)?\s*\(([^)]*)\)\s*\{"),
+        re.compile(r"(?:\(([^)]*)\)|([A-Za-z_$]\w*))\s*=>\s*\{"),
+    )
+    for pattern in function_patterns:
+        for match in pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            scope = brace_ranges.get(match.end() - 1)
+            if scope is None:
+                continue
+            function_ranges.append(scope)
+            parameters = next(
+                (group for group in match.groups() if group is not None),
+                "",
+            )
+            binding_sides = [
+                argument.split("=", 1)[0]
+                for argument in _split_call_arguments(f"({parameters})")
+            ]
+            for name in imported_names:
+                if any(re.search(rf"\b{re.escape(name)}\b", side) for side in binding_sides):
+                    shadows[name].append(scope)
+
+    def containing_range(
+        position: int,
+        ranges: list[tuple[int, int]],
+    ) -> tuple[int, int] | None:
+        containing = [scope for scope in ranges if scope[0] < position < scope[1]]
+        return min(containing, key=lambda scope: scope[1] - scope[0]) if containing else None
+
+    for name in imported_names:
+        declaration = re.compile(
+            rf"\b(const|let|var)\s+(?:{re.escape(name)}\b|"
+            rf"[{{\[][^;\n=]*\b{re.escape(name)}\b)"
+        )
+        for match in declaration.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            ranges = function_ranges if match.group(1) == "var" else lexical_ranges
+            scope = containing_range(match.start(), ranges)
+            if scope is not None:
+                shadows[name].append(scope)
+    return shadows
+
+
+def _js_imported_route_receivers(
+    files: list[Path],
+) -> dict[Path, dict[str, dict[str, Any]]]:
+    source_files = [path for path in files if path.suffix.lower() in JS_SOURCE_SUFFIXES]
+    source_paths = {path.resolve() for path in source_files}
+    exported: dict[Path, dict[str, dict[str, Any]]] = {}
+    for path in source_files:
+        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
+        _, resolve, _ = _js_receiver_state(code)
+        for match in JS_EXPORTED_RECEIVER_PATTERN.finditer(code):
+            if _outside_js_string(code, match.start()):
+                receiver = resolve(match.group(1), match.end())
+                if receiver is not None:
+                    exported.setdefault(path.resolve(), {})[match.group(1)] = dict(
+                        receiver[1]
+                    )
+        export_clause_pattern = re.compile(r"\bexport\s*\{([^}]+)\}\s*;?", re.S)
+        for match in export_clause_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
                 continue
             for binding in match.group(1).split(","):
                 parts = re.split(r"\s+as\s+", binding.strip(), maxsplit=1)
-                exported_name = parts[0].removeprefix("type ").strip()
-                local_name = parts[-1].strip()
-                framework = source_exports.get(exported_name)
-                if framework is not None:
-                    imported.setdefault(path, {})[local_name] = framework
+                local_name = parts[0].removeprefix("type ").strip()
+                exported_name = parts[-1].strip()
+                receiver = resolve(local_name, len(code))
+                if receiver is not None:
+                    exported.setdefault(path.resolve(), {})[exported_name] = dict(
+                        receiver[1]
+                    )
+        default_constructor = re.search(
+            r"\bexport\s+default\s+"
+            r"(express\s*\(|express\.Router\s*\(|Router\s*\(|new\s+Hono\s*\()",
+            code,
+        )
+        if default_constructor and _outside_js_string(code, default_constructor.start()):
+            exported.setdefault(path.resolve(), {})["default"] = {
+                "framework": _js_receiver_framework(default_constructor.group(1)),
+                "attribution": False,
+                "auth": False,
+            }
+        default_name = re.search(
+            r"\bexport\s+default\s+([A-Za-z_$]\w*)\s*;?",
+            code,
+        )
+        if default_name and _outside_js_string(code, default_name.start()):
+            receiver = resolve(default_name.group(1), default_name.start())
+            if receiver is not None:
+                exported.setdefault(path.resolve(), {})["default"] = dict(receiver[1])
+
+    imported: dict[Path, dict[str, dict[str, Any]]] = {}
+    named_import_pattern = re.compile(
+        r"\bimport\s*\{([^}]+)\}\s*from\s*['\"](\.[^'\"]+)['\"]",
+        re.S,
+    )
+    default_import_pattern = re.compile(
+        r"\bimport\s+([A-Za-z_$]\w*)\s+from\s*['\"](\.[^'\"]+)['\"]"
+    )
+    combined_import_pattern = re.compile(
+        r"\bimport\s+([A-Za-z_$]\w*)\s*,\s*\{([^}]+)\}\s*"
+        r"from\s*['\"](\.[^'\"]+)['\"]",
+        re.S,
+    )
+
+    def source_exports(
+        path: Path,
+        specifier: str,
+    ) -> dict[str, dict[str, Any]] | None:
+        module = (path.parent / specifier).resolve()
+        candidates = [module]
+        if module.suffix.lower() not in JS_SOURCE_SUFFIXES:
+            candidates.extend(Path(f"{module}{suffix}") for suffix in JS_SOURCE_SUFFIXES)
+            candidates.extend(module / f"index{suffix}" for suffix in JS_SOURCE_SUFFIXES)
+        existing = [candidate for candidate in candidates if candidate in source_paths]
+        return exported.get(existing[0]) if len(existing) == 1 else None
+
+    def bind_named_imports(
+        path: Path,
+        bindings: str,
+        available_exports: dict[str, dict[str, Any]],
+    ) -> None:
+        for binding in bindings.split(","):
+            parts = re.split(r"\s+as\s+", binding.strip(), maxsplit=1)
+            exported_name = parts[0].removeprefix("type ").strip()
+            local_name = parts[-1].strip()
+            metadata = available_exports.get(exported_name)
+            if metadata is not None:
+                imported.setdefault(path, {})[local_name] = dict(metadata)
+
+    for path in source_files:
+        code = _without_js_comments(path.read_text(encoding="utf-8", errors="replace"))
+        for match in combined_import_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            available_exports = source_exports(path, match.group(3))
+            if available_exports is None:
+                continue
+            default_metadata = available_exports.get("default")
+            if default_metadata is not None:
+                imported.setdefault(path, {})[match.group(1)] = dict(default_metadata)
+            bind_named_imports(path, match.group(2), available_exports)
+        for match in named_import_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            available_exports = source_exports(path, match.group(2))
+            if available_exports is None:
+                continue
+            bind_named_imports(path, match.group(1), available_exports)
+        for match in default_import_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            available_exports = source_exports(path, match.group(2))
+            metadata = available_exports.get("default") if available_exports else None
+            if metadata is not None:
+                imported.setdefault(path, {})[match.group(1)] = dict(metadata)
     return imported
+
+
+def _next_route_segment(segment: str) -> str | None:
+    if re.fullmatch(r"\([^)]*\)", segment):
+        return None
+    optional_catchall = re.fullmatch(r"\[\[\.\.\.([^\]]+)\]\]", segment)
+    if optional_catchall:
+        return f"{{...{optional_catchall.group(1)}?}}"
+    catchall = re.fullmatch(r"\[\.\.\.([^\]]+)\]", segment)
+    if catchall:
+        return f"{{...{catchall.group(1)}}}"
+    dynamic = re.fullmatch(r"\[([^\]]+)\]", segment)
+    if dynamic:
+        return f"{{{dynamic.group(1)}}}"
+    return segment
 
 
 def _scan_js(
@@ -854,34 +1381,16 @@ def _scan_js(
     service_path: str,
     path: Path,
     text: str,
-    imported_receivers: dict[str, str] | None = None,
+    imported_receivers: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     code = _without_js_comments(text)
-    receiver_frameworks = dict(imported_receivers or {})
-    route_receivers: set[str] = set(receiver_frameworks)
-    declared_receivers: set[str] = set()
+    states, resolve_receiver, local_receiver_ids = _js_receiver_state(
+        code,
+        imported_receivers,
+    )
     parents: dict[str, list[tuple[str, str | None]]] = {}
-    unsupported_receivers = set(
-        re.findall(r"\b(\w+)\s*=\s*(?:Fastify|fastify)\s*\(", code)
-    )
-    attribution_pattern = re.compile(
-        r"\b(\w+)\.use\s*\([^\)]*?(?:attribution\w*middleware|moolabs\w*middleware|middleware\w*attribution)",
-        re.I | re.S,
-    )
-    auth_pattern = re.compile(
-        r"\b(\w+)\.use\s*\([^\)]*?(?:require[_-]?auth|authenticate\w*|auth(?:entication)?middleware|verify(?:jwt|token))",
-        re.I | re.S,
-    )
-    attribution_receivers = {match.group(1) for match in attribution_pattern.finditer(code) if _outside_js_string(code, match.start())}
-    auth_receivers = {match.group(1) for match in auth_pattern.finditer(code) if _outside_js_string(code, match.start())}
-    for match in JS_RECEIVER_DECLARATION_PATTERN.finditer(code):
-        if not _outside_js_string(code, match.start()):
-            continue
-        route_receivers.add(match.group(1))
-        declared_receivers.add(match.group(1))
-        receiver_frameworks[match.group(1)] = _js_receiver_framework(match.group(2))
     mount_pattern = re.compile(
         r"\b(\w+)\.(use|route)\s*\(\s*([^,\)]+)\s*,\s*(\w+)\s*\)",
         re.S,
@@ -890,14 +1399,33 @@ def _scan_js(
         if not _outside_js_string(code, match.start()):
             continue
         parent, mount_kind, mount, child = match.groups()
-        if parent not in route_receivers and child not in declared_receivers:
+        parent_receiver = resolve_receiver(parent, match.start())
+        child_receiver = resolve_receiver(child, match.start())
+        if parent_receiver is None and child_receiver is None:
             continue
-        resolved = child in declared_receivers
+        resolved = (
+            child_receiver is not None
+            and child_receiver[0] in local_receiver_ids
+        )
         if resolved:
-            parents.setdefault(child, []).append((parent, _path_value(mount)[0]))
-        route_receivers.add(child)
+            parents.setdefault(child_receiver[0], []).append(
+                (
+                    parent_receiver[0] if parent_receiver is not None else parent,
+                    _path_value(mount)[0],
+                )
+            )
         line = code.count("\n", 0, match.start()) + 1
-        mounts.append(_mount("hono" if mount_kind == "route" else "express", child, mount, _location(repo, path, line), resolved))
+        mounted = _mount(
+            "hono" if mount_kind == "route" else "express",
+            child,
+            mount,
+            _location(repo, path, line),
+            resolved,
+        )
+        mounted["_target_receiver"] = (
+            child_receiver[0] if child_receiver is not None else child
+        )
+        mounts.append(mounted)
 
     effective_prefixes: dict[str, str | None] = {}
 
@@ -926,43 +1454,71 @@ def _scan_js(
         r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*\(\s*([^,\)]+)",
         re.I | re.S,
     )
-    default_framework = "hono" if re.search(r"\bHono\b", code) else "express"
     for match in pattern.finditer(code):
         if not _outside_js_string(code, match.start()):
             continue
-        if match.group(1) not in route_receivers:
+        resolved = resolve_receiver(match.group(1), match.start())
+        if resolved is None:
             continue
-        receiver = match.group(1)
-        if receiver in unsupported_receivers:
-            continue
+        receiver, metadata = resolved
         line = code.count("\n", 0, match.start()) + 1
         arguments = code[match.end():code.find(")", match.end())]
         handler_auth = bool(re.search(r"\b(?:require[_-]?auth|authenticate\w*|verify(?:jwt|token)|withAuth)\b", arguments, re.I))
-        scope = "handler" if handler_auth else "global" if receiver in auth_receivers else "unknown"
+        scope = "handler" if handler_auth else "global" if metadata["auth"] else "unknown"
         routes.append(_route(
-            service_path, receiver_frameworks.get(receiver, default_framework),
+            service_path, metadata["framework"],
             match.group(2).upper(),
             _prefixed_raw_path(effective_prefix(receiver), match.group(3).strip()),
             _location(repo, path, line), scope, receiver,
-            receiver in attribution_receivers,
+            bool(metadata["attribution"]),
         ))
     if re.search(r"(?:^|/)app/(?:.+/)?route\.(?:ts|tsx|js|jsx)$", path.relative_to(repo).as_posix()):
         route_parts = list(path.relative_to(repo).parts)
         app_index = route_parts.index("app")
         segments = route_parts[app_index + 1:-1]
-        rendered = ["{" + segment[1:-1] + "}" if segment.startswith("[") and segment.endswith("]") else segment for segment in segments]
+        rendered = [_next_route_segment(segment) for segment in segments]
         template = "/" + "/".join(segment for segment in rendered if segment)
-        for number, line in enumerate(code.splitlines(), 1):
-            match = re.search(
-                r"\bexport\s+(?:(?:async\s+)?function\s+|const\s+)(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b",
-                line,
+        method_exports: list[tuple[str, int, str]] = []
+        direct_export_pattern = re.compile(
+            r"\bexport\s+(?:(?:async\s+)?function\s+|const\s+)"
+            r"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b"
+        )
+        for match in direct_export_pattern.finditer(code):
+            if _outside_js_string(code, match.start()):
+                method_exports.append((match.group(1), match.start(), match.group(0)))
+        export_clause_pattern = re.compile(r"\bexport\s*\{([^}]+)\}", re.S)
+        for match in export_clause_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            for binding in match.group(1).split(","):
+                parts = re.split(r"\s+as\s+", binding.strip(), maxsplit=1)
+                exported_name = parts[-1].strip()
+                if exported_name in METHODS:
+                    method_exports.append((exported_name, match.start(), binding))
+        seen_exports: set[tuple[str, int]] = set()
+        for method, position, evidence_text in method_exports:
+            number = code.count("\n", 0, position) + 1
+            if (method, number) in seen_exports:
+                continue
+            seen_exports.add((method, number))
+            scope = (
+                "handler"
+                if re.search(
+                    r"\b(?:withAuth|requireAuth|authenticate)\b",
+                    evidence_text,
+                    re.I,
+                )
+                else "unknown"
             )
-            if match:
-                if not _outside_js_string(line, match.start()):
-                    continue
-                scope = "handler" if re.search(r"\b(?:withAuth|requireAuth|authenticate)\b", line, re.I) else "unknown"
-                routes.append(_route(service_path, "nextjs-app-router", match.group(1), json.dumps(template), _location(repo, path, number), scope))
-    return routes, bool(attribution_receivers), mounts
+            routes.append(_route(
+                service_path,
+                "nextjs-app-router",
+                method,
+                json.dumps(template),
+                _location(repo, path, number),
+                scope,
+            ))
+    return routes, any(metadata["attribution"] for metadata in states.values()), mounts
 
 
 GO_ATTRIBUTION_PATTERN = re.compile(
@@ -971,78 +1527,366 @@ GO_ATTRIBUTION_PATTERN = re.compile(
 )
 
 
-def _go_function_blocks(code: str) -> list[tuple[int, int, str, set[str]]]:
-    blocks: list[tuple[int, int, str, set[str]]] = []
+def _split_call_arguments(call_text: str) -> list[str]:
+    arguments: list[str] = []
+    start = 1
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(call_text[1:-1], 1):
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif quote:
+            if character == quote:
+                quote = None
+        elif character in {'"', "'", "`"}:
+            quote = character
+        elif character in depths:
+            depths[character] += 1
+        elif character in closing:
+            depths[closing[character]] -= 1
+        elif character == "," and not any(depths.values()):
+            arguments.append(call_text[start:index].strip())
+            start = index + 1
+    final = call_text[start:-1].strip()
+    if final or arguments:
+        arguments.append(final)
+    return arguments
+
+
+def _go_import_declarations(code: str) -> list[tuple[str | None, str]]:
+    declarations = [
+        match.groups()
+        for match in re.finditer(r"\bimport\s+(?:(\w+)\s+)?\"([^\"]+)\"", code)
+    ]
+    for block in re.finditer(r"\bimport\s*\((.*?)\)", code, re.S):
+        declarations.extend(
+            match.groups()
+            for match in re.finditer(
+                r"(?m)^\s*(?:(\w+|\.|_)\s+)?\"([^\"]+)\"",
+                block.group(1),
+            )
+        )
+    return declarations
+
+
+def _go_chi_aliases(code: str) -> set[str]:
+    return {
+        alias or "chi"
+        for alias, import_path in _go_import_declarations(code)
+        if alias not in {".", "_"}
+        and re.fullmatch(r"github\.com/go-chi/chi(?:/v\d+)?", import_path)
+    }
+
+
+def _go_dead_ranges(code: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for match in re.finditer(r"\b(?:if|for)\s+false\s*\{", code):
+        if _outside_js_string(code, match.start()):
+            ranges.append((match.start(), _balanced_block_end(code, match.end() - 1)))
+    return ranges
+
+
+def _go_router_parameters(parameters: str, chi_aliases: set[str]) -> dict[str, int]:
+    router_parameters: dict[str, int] = {}
+    pending: list[tuple[str, int]] = []
+    qualifier = "|".join(re.escape(alias) for alias in sorted(chi_aliases))
+    if not qualifier:
+        return router_parameters
+    for position, parameter in enumerate(_split_call_arguments(f"({parameters})")):
+        parts = parameter.split()
+        if len(parts) == 1 and re.fullmatch(r"[A-Za-z_]\w*", parts[0]):
+            pending.append((parts[0], position))
+            continue
+        if len(parts) < 2:
+            pending.clear()
+            continue
+        names = pending + [(parts[0], position)]
+        pending.clear()
+        if re.fullmatch(
+            rf"(?:(?:{qualifier})\.Router|\*(?:{qualifier})\.Mux)",
+            "".join(parts[1:]),
+        ):
+            router_parameters.update(names)
+    return router_parameters
+
+
+def _go_function_blocks(
+    code: str,
+    chi_aliases: set[str],
+) -> list[tuple[int, int, str, dict[str, int]]]:
+    blocks: list[tuple[int, int, str, dict[str, int]]] = []
     pattern = re.compile(
         r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(([^)]*)\)[^{]*\{",
         re.S,
     )
     for match in pattern.finditer(code):
-        router_parameters = set(
-            re.findall(r"\b(\w+)\s+(?:chi\.Router|\*chi\.Mux)\b", match.group(2))
-        )
         blocks.append((
             match.start(),
             _balanced_block_end(code, match.end() - 1),
             match.group(1),
-            router_parameters,
+            _go_router_parameters(match.group(2), chi_aliases),
         ))
     return blocks
 
 
-def _go_attributed_call_targets(text: str) -> set[str]:
+def _go_import_package_keys(code: str, module_path: str) -> dict[str, str]:
+    imports: dict[str, str] = {}
+    for alias, import_path in _go_import_declarations(code):
+        if alias in {".", "_"} or not module_path or (
+            import_path != module_path and not import_path.startswith(f"{module_path}/")
+        ):
+            continue
+        package_key = import_path.removeprefix(module_path).lstrip("/") or "."
+        imports[alias or import_path.rsplit("/", 1)[-1]] = package_key
+    return imports
+
+
+def _go_attributed_call_targets(
+    path: Path,
+    text: str,
+    service_root: Path,
+    module_path: str,
+) -> set[tuple[str, str, int]]:
     code = _without_js_comments(text)
-    blocks = _go_function_blocks(code)
-    targets: set[str] = set()
+    blocks = _go_function_blocks(code, _go_chi_aliases(code))
+    dead_ranges = _go_dead_ranges(code)
+    package_key = path.parent.relative_to(service_root).as_posix() or "."
+    import_packages = _go_import_package_keys(code, module_path)
+    targets: set[tuple[str, str, int]] = set()
     for middleware in GO_ATTRIBUTION_PATTERN.finditer(code):
+        if not _outside_js_string(code, middleware.start()) or any(
+            start <= middleware.start() < end for start, end in dead_ranges
+        ):
+            continue
         containing = [
             block for block in blocks if block[0] <= middleware.start() < block[1]
         ]
         if not containing:
             continue
         block = min(containing, key=lambda item: item[1] - item[0])
-        receiver = re.escape(middleware.group(1))
+        receiver = middleware.group(1)
         call_pattern = re.compile(
-            rf"(?<![\w.])([A-Za-z_]\w*)\s*\(\s*{receiver}\s*\)"
+            r"(?<![\w.])((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(\()"
         )
-        targets.update(
-            call.group(1)
-            for call in call_pattern.finditer(code, middleware.end(), block[1])
-        )
+        for call in call_pattern.finditer(code, middleware.end(), block[1]):
+            if not _outside_js_string(code, call.start()):
+                continue
+            target = call.group(1)
+            if "." in target:
+                alias, function_name = target.split(".", 1)
+                target_package = import_packages.get(alias)
+                if target_package is None:
+                    continue
+            else:
+                target_package = package_key
+                function_name = target
+            arguments = _split_call_arguments(_balanced_call_text(code, call.start(2)))
+            targets.update(
+                (target_package, function_name, position)
+                for position, argument in enumerate(arguments)
+                if argument == receiver
+            )
     return targets
+
+
+def _go_receiver_state(
+    code: str,
+    chi_aliases: set[str],
+) -> tuple[
+    dict[str, dict[str, bool]],
+    Any,
+    list[tuple[int, int, str, dict[str, int]]],
+    list[tuple[int, int]],
+]:
+    function_blocks = _go_function_blocks(code, chi_aliases)
+    dead_ranges = _go_dead_ranges(code)
+    brace_scopes = list(_js_brace_ranges(code).values())
+    module_scope = (0, len(code) + 1)
+    states: dict[str, dict[str, bool]] = {}
+    bindings: dict[str, list[tuple[tuple[int, int], int, str | None]]] = {}
+
+    def is_dead(position: int) -> bool:
+        return any(start <= position < end for start, end in dead_ranges)
+
+    def containing_scope(position: int) -> tuple[int, int]:
+        containing = [
+            scope for scope in brace_scopes if scope[0] < position < scope[1]
+        ]
+        return (
+            min(containing, key=lambda scope: scope[1] - scope[0])
+            if containing
+            else module_scope
+        )
+
+    def add_receiver(
+        name: str,
+        scope: tuple[int, int],
+        position: int,
+        identity: str,
+    ) -> None:
+        states[identity] = {"attribution": False, "auth": False}
+        bindings.setdefault(name, []).append((scope, position, identity))
+
+    for start, end, function_name, parameters in function_blocks:
+        for name in parameters:
+            add_receiver(
+                name,
+                (start, end),
+                start,
+                f"{function_name}@{start}:parameter:{name}",
+            )
+
+    qualifier = "|".join(re.escape(alias) for alias in sorted(chi_aliases))
+    receiver_declarations: set[int] = set()
+    if qualifier:
+        constructor_pattern = re.compile(
+            rf"\b([A-Za-z_]\w*)\s*(?::=|=)\s*(?:{qualifier})\.NewRouter\s*\("
+        )
+        for match in constructor_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()) or is_dead(match.start()):
+                continue
+            identity = f"{match.group(1)}@{match.start()}"
+            add_receiver(
+                match.group(1),
+                containing_scope(match.start()),
+                match.start(),
+                identity,
+            )
+            receiver_declarations.add(match.start(1))
+
+        typed_pattern = re.compile(
+            rf"\bvar\s+([A-Za-z_]\w*)\s+"
+            rf"(?:(?:{qualifier})\.Router|\*(?:{qualifier})\.Mux)\b"
+        )
+        for match in typed_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()) or is_dead(match.start()):
+                continue
+            identity = f"{match.group(1)}@{match.start()}"
+            add_receiver(
+                match.group(1),
+                containing_scope(match.start()),
+                match.start(),
+                identity,
+            )
+            receiver_declarations.add(match.start(1))
+
+        inline_parameter_pattern = re.compile(
+            rf"\bfunc\s*\(\s*([A-Za-z_]\w*)\s+"
+            rf"(?:{qualifier})\.Router\s*\)\s*\{{"
+        )
+        for match in inline_parameter_pattern.finditer(code):
+            if not _outside_js_string(code, match.start()) or is_dead(match.start()):
+                continue
+            scope = (match.start(), _balanced_block_end(code, match.end() - 1))
+            add_receiver(
+                match.group(1),
+                scope,
+                match.start(),
+                f"inline@{match.start()}:parameter:{match.group(1)}",
+            )
+
+    relevant_names = set(bindings)
+    for match in re.finditer(r"\b([A-Za-z_]\w*)\s*:=", code):
+        if (
+            match.start(1) in receiver_declarations
+            or match.group(1) not in relevant_names
+            or not _outside_js_string(code, match.start())
+            or is_dead(match.start())
+        ):
+            continue
+        bindings.setdefault(match.group(1), []).append(
+            (containing_scope(match.start()), match.start(), None)
+        )
+
+    def resolve(name: str, position: int) -> tuple[str, dict[str, bool]] | None:
+        if is_dead(position):
+            return None
+        candidate_scopes = sorted(
+            {
+                scope
+                for scope, binding_position, _ in bindings.get(name, [])
+                if scope[0] <= position < scope[1] and binding_position <= position
+            },
+            key=lambda scope: scope[1] - scope[0],
+        )
+        for scope in candidate_scopes:
+            preceding = [
+                (binding_position, identity)
+                for binding_scope, binding_position, identity in bindings[name]
+                if binding_scope == scope and binding_position <= position
+            ]
+            if not preceding:
+                continue
+            _, identity = max(preceding, key=lambda item: item[0])
+            if identity is None:
+                return None
+            return identity, states[identity]
+        return None
+
+    auth_pattern = re.compile(
+        r"\b(\w+)\.Use\s*\([^\)]*?"
+        r"(?:Auth\w*|Authenticate\w*|Verify(?:JWT|Token))",
+        re.I | re.S,
+    )
+    for pattern, state_key in (
+        (GO_ATTRIBUTION_PATTERN, "attribution"),
+        (auth_pattern, "auth"),
+    ):
+        for match in pattern.finditer(code):
+            if not _outside_js_string(code, match.start()):
+                continue
+            receiver = resolve(match.group(1), match.start())
+            if receiver is not None:
+                receiver[1][state_key] = True
+
+    return states, resolve, function_blocks, dead_ranges
 
 
 def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]]]:
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     code = _without_js_comments(text)
-    auth_pattern = re.compile(
-        r"\b(\w+)\.Use\s*\([^\)]*?(?:Auth\w*|Authenticate\w*|Verify(?:JWT|Token))",
-        re.I | re.S,
+    chi_aliases = _go_chi_aliases(code)
+    states, resolve_receiver, function_blocks, dead_ranges = _go_receiver_state(
+        code,
+        chi_aliases,
     )
-    attribution_receivers = {match.group(1) for match in GO_ATTRIBUTION_PATTERN.finditer(code) if _outside_js_string(code, match.start())}
-    auth_receivers = {match.group(1) for match in auth_pattern.finditer(code) if _outside_js_string(code, match.start())}
-    framework = "chi" if "github.com/go-chi/chi" in code or re.search(r"\bchi\.\w+", code) else "net-http"
-    chi_receivers = set(re.findall(r"\b(\w+)\s*(?::=|=)\s*chi\.NewRouter\s*\(", code))
-    chi_receivers.update(re.findall(r"\b(\w+)\s+(?:chi\.Router|\*chi\.Mux)\b", code))
-    function_blocks = _go_function_blocks(code)
+
+    def is_dead(position: int) -> bool:
+        return any(start <= position < end for start, end in dead_ranges)
+
+    framework = "chi" if chi_aliases else "net-http"
     parents: dict[str, list[tuple[str, str | None]]] = {}
     mount_pattern = re.compile(
         r"\b(\w+)\.Mount\s*\(\s*([^,\)]+)(?:\s*,\s*([\w.]+))?",
         re.S,
     )
     for mount in mount_pattern.finditer(code):
-        if not _outside_js_string(code, mount.start()) or mount.group(1) not in chi_receivers:
+        if not _outside_js_string(code, mount.start()) or is_dead(mount.start()):
+            continue
+        parent_receiver = resolve_receiver(mount.group(1), mount.start())
+        if parent_receiver is None:
             continue
         child = mount.group(3)
-        resolved = child in chi_receivers if child else True
-        if child and resolved:
-            parents.setdefault(child, []).append((mount.group(1), _path_value(mount.group(2).strip())[0]))
+        child_receiver = resolve_receiver(child, mount.start()) if child else None
+        resolved = child_receiver is not None if child else True
+        if child_receiver is not None:
+            parents.setdefault(child_receiver[0], []).append(
+                (parent_receiver[0], _path_value(mount.group(2).strip())[0])
+            )
         number = code.count("\n", 0, mount.start()) + 1
-        mounts.append(_mount(
+        mounted = _mount(
             framework, child or "inline-router", mount.group(2).strip(),
             _location(repo, path, number), resolved,
-        ))
+        )
+        mounted["_target_receiver"] = (
+            child_receiver[0] if child_receiver is not None else child or "inline-router"
+        )
+        mounts.append(mounted)
 
     effective_prefixes: dict[str, str | None] = {}
 
@@ -1069,37 +1913,49 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         return effective_prefixes[receiver]
 
     inline_blocks: list[tuple[int, int, str, str | None]] = []
-    inline_route_pattern = re.compile(
-        r"\b(\w+)\.Route\s*\(\s*([^,\)]+)\s*,\s*"
-        r"func\s*\(\s*(\w+)\s+chi\.Router\s*\)\s*\{",
-        re.S,
-    )
-    for mount in inline_route_pattern.finditer(code):
-        parent, raw_prefix, child = mount.groups()
-        if parent not in chi_receivers:
-            continue
-        containing = [
-            block for block in inline_blocks
-            if block[0] < mount.start() < block[1] and block[2] == parent
-        ]
-        parent_prefix = (
-            min(containing, key=lambda block: block[1] - block[0])[3]
-            if containing
-            else effective_prefix(parent)
+    qualifier = "|".join(re.escape(alias) for alias in sorted(chi_aliases))
+    if qualifier:
+        inline_route_pattern = re.compile(
+            r"\b(\w+)\.Route\s*\(\s*([^,\)]+)\s*,\s*"
+            rf"func\s*\(\s*(\w+)\s+(?:{qualifier})\.Router\s*\)\s*\{{",
+            re.S,
         )
-        mount_prefix = _path_value(raw_prefix.strip())[0]
-        block_prefix = (
-            None
-            if parent_prefix is None or mount_prefix is None
-            else (parent_prefix.rstrip("/") + "/" + mount_prefix.lstrip("/")).rstrip("/") or "/"
-        )
-        block_end = _balanced_block_end(code, mount.end() - 1)
-        inline_blocks.append((mount.start(), block_end, child, block_prefix))
-        number = code.count("\n", 0, mount.start()) + 1
-        mounts.append(_mount(
-            framework, "inline-router", raw_prefix.strip(),
-            _location(repo, path, number),
-        ))
+        for mount in inline_route_pattern.finditer(code):
+            if not _outside_js_string(code, mount.start()) or is_dead(mount.start()):
+                continue
+            parent, raw_prefix, child = mount.groups()
+            parent_receiver = resolve_receiver(parent, mount.start())
+            child_receiver = resolve_receiver(child, mount.end())
+            if parent_receiver is None or child_receiver is None:
+                continue
+            containing = [
+                block for block in inline_blocks
+                if block[0] < mount.start() < block[1]
+                and block[2] == parent_receiver[0]
+            ]
+            parent_prefix = (
+                min(containing, key=lambda block: block[1] - block[0])[3]
+                if containing
+                else effective_prefix(parent_receiver[0])
+            )
+            mount_prefix = _path_value(raw_prefix.strip())[0]
+            block_prefix = (
+                None
+                if parent_prefix is None or mount_prefix is None
+                else (
+                    parent_prefix.rstrip("/") + "/" + mount_prefix.lstrip("/")
+                ).rstrip("/")
+                or "/"
+            )
+            block_end = _balanced_block_end(code, mount.end() - 1)
+            inline_blocks.append(
+                (mount.start(), block_end, child_receiver[0], block_prefix)
+            )
+            number = code.count("\n", 0, mount.start()) + 1
+            mounts.append(_mount(
+                framework, "inline-router", raw_prefix.strip(),
+                _location(repo, path, number),
+            ))
     patterns = (
         re.compile(r"\bhttp\.HandleFunc\s*\(\s*([^,\)]+)", re.S),
         re.compile(r"\bhttp\.Handle\s*\(\s*([^,\)]+)", re.S),
@@ -1110,7 +1966,7 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
     )
     for pattern in patterns[:2]:
         for match in pattern.finditer(code):
-            if not _outside_js_string(code, match.start()):
+            if not _outside_js_string(code, match.start()) or is_dead(match.start()):
                 continue
             number = code.count("\n", 0, match.start()) + 1
             routes.append(_route(
@@ -1118,39 +1974,46 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
                 _location(repo, path, number),
             ))
     for match in patterns[2].finditer(code):
-        if not _outside_js_string(code, match.start()):
+        if not _outside_js_string(code, match.start()) or is_dead(match.start()):
             continue
-        receiver, method, raw_path = match.groups()
-        if receiver not in chi_receivers or method.upper() == "METHOD":
+        receiver_name, method, raw_path = match.groups()
+        receiver = resolve_receiver(receiver_name, match.start())
+        if receiver is None or method.upper() == "METHOD":
             continue
+        receiver_identity, receiver_state = receiver
         number = code.count("\n", 0, match.start()) + 1
         containing = [
             block for block in inline_blocks
-            if block[0] < match.start() < block[1] and block[2] == receiver
+            if block[0] < match.start() < block[1]
+            and block[2] == receiver_identity
         ]
         route_prefix = (
             min(containing, key=lambda block: block[1] - block[0])[3]
             if containing
-            else effective_prefix(receiver)
+            else effective_prefix(receiver_identity)
         )
         route = _route(
             service_path, framework, method.upper(),
             _prefixed_raw_path(route_prefix, raw_path.strip()),
             _location(repo, path, number),
-            "global" if receiver in auth_receivers else "unknown", receiver,
-            receiver in attribution_receivers,
+            "global" if receiver_state["auth"] else "unknown", receiver_identity,
+            receiver_state["attribution"],
         )
         containing_function = [
             block for block in function_blocks
-            if block[0] <= match.start() < block[1] and receiver in block[3]
+            if block[0] <= match.start() < block[1] and receiver_name in block[3]
         ]
         if containing_function:
-            route["_go_function"] = min(
+            function_block = min(
                 containing_function,
                 key=lambda item: item[1] - item[0],
-            )[2]
+            )
+            service_root = repo / service_path if service_path else repo
+            route["_go_package"] = path.parent.relative_to(service_root).as_posix() or "."
+            route["_go_function"] = function_block[2]
+            route["_go_router_parameter"] = function_block[3][receiver_name]
         routes.append(route)
-    return routes, bool(attribution_receivers), mounts
+    return routes, any(state["attribution"] for state in states.values()), mounts
 
 
 IDENTITY_VERIFIER_PATTERN = re.compile(
@@ -1180,239 +2043,431 @@ def _verified_identity_source_line(
     return source.lineno if raw_pattern.search(source_text) else None
 
 
-def _verified_python_identity_header_lines(text: str, raw_pattern: re.Pattern[str]) -> set[int]:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return set()
-    verified_sources: set[int] = set()
-    dead_nodes = _dead_python_nodes(tree)
-    context_target = re.compile(
-        r"request\.(?:state|context)\.[A-Za-z_]*(?:customer|tenant|account)[A-Za-z_]*",
-        re.I,
-    )
-    for function in (
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ):
-        raw_variables: dict[str, int] = {}
-        verified_variables: dict[str, int] = {}
-        scoped_nodes: list[ast.AST] = list(function.body)
-        scoped_assignments: list[ast.Assign | ast.AnnAssign] = []
-        while scoped_nodes:
-            node = scoped_nodes.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                continue
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) not in dead_nodes:
-                scoped_assignments.append(node)
-            scoped_nodes.extend(ast.iter_child_nodes(node))
-        assignments = sorted(
-            scoped_assignments,
-            key=lambda node: (node.lineno, node.col_offset),
-        )
-        for assignment in assignments:
-            value = assignment.value
-            targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
-            names = [target.id for target in targets if isinstance(target, ast.Name)]
-            expression = _dotted_name(value)
-            source_line = _verified_identity_source_line(
-                value,
-                text,
-                raw_pattern,
-                raw_variables,
-            )
-            if source_line is None and raw_pattern.search(expression):
-                for name in names:
-                    raw_variables[name] = assignment.lineno
-                continue
+def _assignment_bindings(
+    node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+) -> list[tuple[ast.AST, ast.AST | None]]:
+    def bind(target: ast.AST, value: ast.AST | None) -> list[tuple[ast.AST, ast.AST | None]]:
+        if isinstance(target, ast.Starred):
+            return bind(target.value, None)
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return [(target, value)]
+        if (
+            isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+            and not any(isinstance(item, ast.Starred) for item in target.elts)
+        ):
+            return [
+                binding
+                for target_item, value_item in zip(target.elts, value.elts)
+                for binding in bind(target_item, value_item)
+            ]
+        return [
+            binding
+            for target_item in target.elts
+            for binding in bind(target_item, None)
+        ]
 
-            if source_line is not None:
-                for name in names:
-                    verified_variables[name] = source_line
-
-            for target in targets:
-                if not context_target.fullmatch(_dotted_name(target)):
-                    continue
-                if isinstance(value, ast.Name) and value.id in verified_variables:
-                    verified_sources.add(verified_variables[value.id])
-                elif source_line is not None:
-                    verified_sources.add(source_line)
-    return verified_sources
+    if isinstance(node, ast.AugAssign):
+        return bind(node.target, None)
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return [binding for target in targets for binding in bind(target, node.value)]
 
 
 def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     raw_headers: list[dict[str, Any]] = []
     candidates: list[tuple[Path, int, str, str]] = []
     async_hops: list[dict[str, Any]] = []
-    raw_pattern = re.compile(r"(?:headers\s*\[|headers?\.(?:get|Get)\s*\()[^\n]*(?:x[-_]?(?:moolabs|customer|tenant)[-_]?(?:id|customer|tenant)?)", re.I)
+    raw_pattern = re.compile(
+        r"(?:headers\s*\[\s*|headers?\.(?:get|Get)\s*\(\s*)"
+        r"[\"'][^\"']*"
+        r"x[-_]?(?:moolabs|customer|tenant)[-_]?(?:id|customer|tenant)?"
+        r"[^\"']*[\"']",
+        re.I | re.S,
+    )
     context_pattern = re.compile(r"(?:request\.(?:state|context)|claims|auth|current_user)\.[A-Za-z_]*(?:customer|tenant|account)[A-Za-z_]*", re.I)
+
+    def record_header_findings(
+        path: Path,
+        text: str,
+        verified_lines: set[int],
+    ) -> None:
+        seen_lines: set[int] = set()
+        for match in raw_pattern.finditer(text):
+            number = text.count("\n", 0, match.start()) + 1
+            if number in seen_lines:
+                continue
+            seen_lines.add(number)
+            if number in verified_lines:
+                raw_headers.append({
+                    "code": "verified_identity_header",
+                    "severity": "info",
+                    "message": "raw inbound identity header has a supported verification and context-binding chain",
+                    "evidence": _location(repo, path, number),
+                })
+            else:
+                raw_headers.append({
+                    "code": "raw_identity_header",
+                    "severity": "high",
+                    "message": "raw inbound identity header is not trusted resolver evidence",
+                    "evidence": _location(repo, path, number),
+                })
+
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
-        verified_header_lines = (
-            _verified_python_identity_header_lines(text, raw_pattern)
-            if path.suffix == ".py"
-            else set()
-        )
-        lines = text.splitlines()
-        for number, line in enumerate(lines, 1):
-            if raw_pattern.search(line):
-                if number in verified_header_lines:
-                    raw_headers.append({
-                        "code": "verified_identity_header",
-                        "severity": "info",
-                        "message": "raw inbound identity header has a supported verification and context-binding chain",
-                        "evidence": _location(repo, path, number),
-                    })
-                else:
-                    raw_headers.append({"code": "raw_identity_header", "severity": "high", "message": "raw inbound identity header is not trusted resolver evidence", "evidence": _location(repo, path, number)})
+        verified_header_lines: set[int] = set()
         async_hops.extend(_async_boundaries(repo, path, text))
         if path.suffix != ".py":
+            record_header_findings(path, text, verified_header_lines)
             continue
         try:
             tree = ast.parse(text)
         except SyntaxError:
+            record_header_findings(path, text, verified_header_lines)
             continue
         dead_nodes = _dead_python_nodes(tree)
         for function in (
             node for node in ast.walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(node) not in dead_nodes
         ):
-            trusted_roots: set[str] = set()
-            raw_variables: dict[str, int] = {}
-            verified_variables: set[str] = set()
-            verified_contexts: set[str] = set()
+            state: dict[str, Any] = {
+                "trusted_roots": set(),
+                "raw_variables": {},
+                "verified_variables": {},
+                "verified_contexts": {},
+                "aliases": {},
+                "resolver_candidates": {},
+            }
+            terminal_states: list[dict[str, Any]] = []
             positional = list(function.args.posonlyargs) + list(function.args.args)
             defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
             for argument, default in zip(positional, defaults):
                 if isinstance(default, ast.Call) and _call_name(default.func).rsplit(".", 1)[-1] == "Depends":
                     if default.args and _auth_name(_dotted_name(default.args[0])):
-                        trusted_roots.add(argument.arg)
-            aliases: dict[str, tuple[str, str]] = {}
-            scoped_nodes: list[ast.AST] = list(function.body)
-            events: list[ast.Assign | ast.AnnAssign | ast.Call] = []
-            parents: dict[int, ast.AST] = {}
-            while scoped_nodes:
-                node = scoped_nodes.pop()
-                if id(node) in dead_nodes:
-                    continue
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                    continue
-                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call)):
-                    events.append(node)
-                for child in ast.iter_child_nodes(node):
-                    parents[id(child)] = node
-                    scoped_nodes.append(child)
+                        state["trusted_roots"].add(argument.arg)
 
-            def event_order(
-                node: ast.Assign | ast.AnnAssign | ast.Call,
-            ) -> tuple[int, int, int, int]:
-                if isinstance(node, ast.Call):
-                    ancestor = parents.get(id(node))
-                    while ancestor is not None and not isinstance(
-                        ancestor,
-                        (ast.Assign, ast.AnnAssign),
-                    ):
-                        ancestor = parents.get(id(ancestor))
-                    if isinstance(ancestor, (ast.Assign, ast.AnnAssign)):
-                        return (
-                            ancestor.lineno,
-                            ancestor.col_offset,
-                            0,
-                            node.col_offset,
-                        )
-                return (
-                    node.lineno,
-                    node.col_offset,
-                    1 if isinstance(node, (ast.Assign, ast.AnnAssign)) else 0,
-                    node.col_offset,
-                )
+            def clone(current: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    key: value.copy()
+                    for key, value in current.items()
+                }
 
-            events.sort(key=event_order)
-
-            for node in events:
-                if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    value = node.value
-                    targets = (
-                        node.targets if isinstance(node, ast.Assign) else [node.target]
+            def merge(paths: list[dict[str, Any] | None]) -> dict[str, Any] | None:
+                reachable = [path_state for path_state in paths if path_state is not None]
+                if not reachable:
+                    return None
+                merged = clone(reachable[0])
+                for key in ("trusted_roots",):
+                    merged[key].intersection_update(
+                        *(path_state[key] for path_state in reachable[1:])
                     )
-                    target_names = [
-                        target.id for target in targets if isinstance(target, ast.Name)
+                for key in (
+                    "raw_variables",
+                    "verified_variables",
+                    "verified_contexts",
+                    "aliases",
+                    "resolver_candidates",
+                ):
+                    merged[key] = {
+                        name: value
+                        for name, value in merged[key].items()
+                        if all(path_state[key].get(name) == value for path_state in reachable[1:])
+                    }
+                return merged
+
+            def record_calls(root: ast.AST | None, current: dict[str, Any]) -> None:
+                if root is None:
+                    return
+                for call in (child for child in ast.walk(root) if isinstance(child, ast.Call)):
+                    if not call.args:
+                        continue
+                    validator = _call_name(call.func)
+                    argument = call.args[0]
+                    if isinstance(argument, ast.Name):
+                        provenance = current["aliases"].get(argument.id)
+                    else:
+                        expression = _dotted_name(argument)
+                        root_name = expression.split(".", 1)[0]
+                        provenance = (
+                            (
+                                "trusted",
+                                expression,
+                                current["verified_contexts"].get(expression),
+                            )
+                            if context_pattern.fullmatch(expression)
+                            and (
+                                root_name in current["trusted_roots"]
+                                or expression in current["verified_contexts"]
+                            )
+                            else None
+                        )
+                    if not provenance or provenance[0] != "trusted":
+                        continue
+                    if re.fullmatch(
+                        r"(?:UUID|uuid\.UUID|uuid\.Parse|validate_uuid|is_uuid|parse_uuid)",
+                        validator,
+                        re.I,
+                    ):
+                        current["resolver_candidates"][provenance[1]] = (
+                            path,
+                            call.lineno,
+                            provenance[1],
+                            "moolabs_uuid",
+                            provenance[2],
+                        )
+                    elif re.search(
+                        r"(?:crosswalk|resolve_customer|lookup_customer)",
+                        validator,
+                        re.I,
+                    ):
+                        current["resolver_candidates"][provenance[1]] = (
+                            path,
+                            call.lineno,
+                            provenance[1],
+                            "external_key_crosswalk",
+                            provenance[2],
+                        )
+
+            def apply_assignment(
+                assignment: ast.Assign | ast.AnnAssign | ast.AugAssign,
+                current: dict[str, Any],
+            ) -> None:
+                raw_before = dict(current["raw_variables"])
+                verified_before = dict(current["verified_variables"])
+                aliases_before = dict(current["aliases"])
+                trusted_roots_before = set(current["trusted_roots"])
+                verified_contexts_before = dict(current["verified_contexts"])
+                evaluated: list[
+                    tuple[
+                        ast.AST,
+                        ast.AST | None,
+                        int | None,
+                        int | None,
+                        tuple[str, str, int | None] | None,
                     ]
+                ] = []
+                for target, value in _assignment_bindings(assignment):
+                    if value is None:
+                        evaluated.append((target, value, None, False, None))
+                        continue
                     expression = _dotted_name(value)
                     verified_source_line = _verified_identity_source_line(
                         value,
                         text,
                         raw_pattern,
-                        raw_variables,
+                        raw_before,
                     )
                     direct_raw_source = bool(
                         verified_source_line is None and raw_pattern.search(expression)
                     )
-                    inherited_verified = bool(
-                        isinstance(value, ast.Name)
-                        and value.id in verified_variables
-                    )
-                    inherited_provenance = (
-                        aliases.get(value.id) if isinstance(value, ast.Name) else None
-                    )
-                    root = expression.split(".", 1)[0]
-                    trusted_context = bool(
-                        context_pattern.fullmatch(expression)
-                        and (root in trusted_roots or expression in verified_contexts)
-                    )
-
-                    for target_name in target_names:
-                        raw_variables.pop(target_name, None)
-                        verified_variables.discard(target_name)
-                        aliases.pop(target_name, None)
-                        trusted_roots.discard(target_name)
-                    for target in targets:
-                        context_expression = _dotted_name(target)
-                        if not context_pattern.fullmatch(context_expression):
-                            continue
-                        verified_contexts.discard(context_expression)
-                        if verified_source_line is not None or inherited_verified:
-                            verified_contexts.add(context_expression)
-
-                    if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
-                        trusted_roots.update(target_names)
-                    if direct_raw_source:
-                        for target_name in target_names:
-                            raw_variables[target_name] = node.lineno
-                    if verified_source_line is not None:
-                        verified_variables.update(target_names)
-
-                    provenance = inherited_provenance
-                    if provenance is None and trusted_context:
-                        provenance = ("trusted", expression)
-                    elif provenance is None and direct_raw_source:
-                        provenance = ("raw", expression)
-                    if provenance is not None:
-                        for target_name in target_names:
-                            aliases[target_name] = provenance
-                    continue
-
-                if not node.args:
-                    continue
-                validator = _call_name(node.func)
-                argument = node.args[0]
-                if isinstance(argument, ast.Name):
-                    provenance = aliases.get(argument.id)
-                else:
-                    expression = _dotted_name(argument)
-                    root = expression.split(".", 1)[0]
-                    provenance = (
-                        ("trusted", expression)
-                        if context_pattern.fullmatch(expression)
-                        and (root in trusted_roots or expression in verified_contexts)
+                    inherited_verified_source = (
+                        verified_before.get(value.id)
+                        if isinstance(value, ast.Name)
                         else None
                     )
-                if not provenance or provenance[0] != "trusted":
-                    continue
-                if re.fullmatch(r"(?:UUID|uuid\.UUID|uuid\.Parse|validate_uuid|is_uuid|parse_uuid)", validator, re.I):
-                    candidates.append((path, node.lineno, provenance[1], "moolabs_uuid"))
-                elif re.search(r"(?:crosswalk|resolve_customer|lookup_customer)", validator, re.I):
-                    candidates.append((path, node.lineno, provenance[1], "external_key_crosswalk"))
+                    provenance = (
+                        aliases_before.get(value.id)
+                        if isinstance(value, ast.Name)
+                        else None
+                    )
+                    root_name = expression.split(".", 1)[0]
+                    if provenance is None and context_pattern.fullmatch(expression) and (
+                        root_name in trusted_roots_before
+                        or expression in verified_contexts_before
+                    ):
+                        provenance = (
+                            "trusted",
+                            expression,
+                            verified_contexts_before.get(expression),
+                        )
+                    elif provenance is None and direct_raw_source:
+                        provenance = ("raw", expression, value.lineno)
+                    evaluated.append((
+                        target,
+                        value,
+                        verified_source_line,
+                        inherited_verified_source,
+                        provenance,
+                    ))
+
+                for (
+                    target,
+                    value,
+                    verified_source_line,
+                    inherited_verified_source,
+                    provenance,
+                ) in evaluated:
+                    target_names = [target.id] if isinstance(target, ast.Name) else []
+                    for target_name in target_names:
+                        current["raw_variables"].pop(target_name, None)
+                        current["verified_variables"].pop(target_name, None)
+                        current["aliases"].pop(target_name, None)
+                        current["trusted_roots"].discard(target_name)
+                        current["resolver_candidates"] = {
+                            expression: candidate
+                            for expression, candidate in current["resolver_candidates"].items()
+                            if expression != target_name
+                            and not expression.startswith(f"{target_name}.")
+                        }
+                    context_expression = _dotted_name(target)
+                    if context_pattern.fullmatch(context_expression):
+                        current["verified_contexts"].pop(context_expression, None)
+                        current["resolver_candidates"].pop(context_expression, None)
+                    if value is None:
+                        continue
+
+                    expression = _dotted_name(value)
+                    direct_raw_source = bool(
+                        verified_source_line is None and raw_pattern.search(expression)
+                    )
+                    context_source_line = (
+                        verified_source_line
+                        if verified_source_line is not None
+                        else inherited_verified_source
+                    )
+                    if (
+                        context_pattern.fullmatch(context_expression)
+                        and context_source_line is not None
+                    ):
+                        current["verified_contexts"][context_expression] = context_source_line
+                    if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
+                        current["trusted_roots"].update(target_names)
+                    if direct_raw_source:
+                        for target_name in target_names:
+                            current["raw_variables"][target_name] = value.lineno
+                    if verified_source_line is not None:
+                        for target_name in target_names:
+                            current["verified_variables"][target_name] = verified_source_line
+                    if provenance is not None:
+                        for target_name in target_names:
+                            current["aliases"][target_name] = provenance
+
+            def clear_target(target: ast.AST, current: dict[str, Any]) -> None:
+                for child, _ in _assignment_bindings(ast.AnnAssign(target, None, None, 1)):
+                    if isinstance(child, ast.Name):
+                        current["raw_variables"].pop(child.id, None)
+                        current["verified_variables"].pop(child.id, None)
+                        current["aliases"].pop(child.id, None)
+                        current["trusted_roots"].discard(child.id)
+                        current["resolver_candidates"] = {
+                            expression: candidate
+                            for expression, candidate in current["resolver_candidates"].items()
+                            if expression != child.id
+                            and not expression.startswith(f"{child.id}.")
+                        }
+                    context_expression = _dotted_name(child)
+                    if context_pattern.fullmatch(context_expression):
+                        current["verified_contexts"].pop(context_expression, None)
+                        current["resolver_candidates"].pop(context_expression, None)
+
+            def process_statements(
+                statements: list[ast.stmt],
+                current: dict[str, Any],
+            ) -> dict[str, Any] | None:
+                for statement in statements:
+                    if id(statement) in dead_nodes:
+                        continue
+                    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        continue
+                    if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                        record_calls(statement.value, current)
+                        apply_assignment(statement, current)
+                    elif isinstance(statement, ast.If):
+                        record_calls(statement.test, current)
+                        if isinstance(statement.test, ast.Constant):
+                            selected = statement.body if bool(statement.test.value) else statement.orelse
+                            result = process_statements(selected, current)
+                        else:
+                            result = merge([
+                                process_statements(statement.body, clone(current)),
+                                process_statements(statement.orelse, clone(current))
+                                if statement.orelse
+                                else clone(current),
+                            ])
+                        if result is None:
+                            return None
+                        current = result
+                    elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                        expression = statement.iter if isinstance(
+                            statement, (ast.For, ast.AsyncFor)
+                        ) else statement.test
+                        record_calls(expression, current)
+                        body_state = process_statements(statement.body, clone(current))
+                        result = merge([current, body_state])
+                        if result is None:
+                            return None
+                        if statement.orelse:
+                            else_state = process_statements(statement.orelse, clone(result))
+                            result = merge([result, else_state])
+                            if result is None:
+                                return None
+                        current = result
+                    elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                        for item in statement.items:
+                            record_calls(item.context_expr, current)
+                        result = process_statements(statement.body, current)
+                        if result is None:
+                            return None
+                        current = result
+                    elif isinstance(statement, ast.Try):
+                        normal = process_statements(statement.body, clone(current))
+                        if normal is not None and statement.orelse:
+                            normal = process_statements(statement.orelse, normal)
+                        paths = [current, normal]
+                        paths.extend(
+                            process_statements(handler.body, clone(current))
+                            for handler in statement.handlers
+                        )
+                        result = merge(paths)
+                        if result is None:
+                            return None
+                        if statement.finalbody:
+                            result = process_statements(statement.finalbody, result)
+                            if result is None:
+                                return None
+                        current = result
+                    elif isinstance(statement, ast.Match):
+                        record_calls(statement.subject, current)
+                        paths: list[dict[str, Any] | None] = []
+                        exhaustive = False
+                        for case in statement.cases:
+                            case_state = clone(current)
+                            record_calls(case.guard, case_state)
+                            paths.append(process_statements(case.body, case_state))
+                            exhaustive = exhaustive or isinstance(case.pattern, ast.MatchAs) and (
+                                case.pattern.name is None and case.pattern.pattern is None
+                            )
+                        if not exhaustive:
+                            paths.append(current)
+                        result = merge(paths)
+                        if result is None:
+                            return None
+                        current = result
+                    elif isinstance(statement, ast.Delete):
+                        for target in statement.targets:
+                            clear_target(target, current)
+                    elif isinstance(statement, (ast.Return, ast.Raise)):
+                        for child in ast.iter_child_nodes(statement):
+                            record_calls(child, current)
+                        terminal_states.append(clone(current))
+                        return None
+                    elif isinstance(statement, (ast.Break, ast.Continue)):
+                        return None
+                    else:
+                        record_calls(statement, current)
+                return current
+
+            fallthrough_state = process_statements(function.body, state)
+            final_state = merge([
+                *terminal_states,
+                fallthrough_state,
+            ])
+            if final_state is not None:
+                verified_header_lines.update(final_state["verified_contexts"].values())
+                for candidate in final_state["resolver_candidates"].values():
+                    candidates.append(candidate[:4])
+                    if candidate[4] is not None:
+                        verified_header_lines.add(candidate[4])
+        record_header_findings(path, text, verified_header_lines)
     unsupported = {
         "JavaScript/TypeScript": next(
             (path for path in files if path.suffix.lower() in {".js", ".jsx", ".mjs", ".ts", ".tsx"}),
@@ -1456,6 +2511,9 @@ def _python_parse_findings(repo: Path, files: list[Path]) -> list[dict[str, Any]
 
 def _fingerprint(repo: Path, services: list[dict[str, Any]]) -> dict[str, str]:
     digest = hashlib.sha256()
+    digest.update(b"moolabs-attribution-scanner\0")
+    digest.update(SCANNER_VERSION.encode("ascii"))
+    digest.update(b"\0")
     inputs = set(_repo_scan_inputs(repo))
     for service in services:
         inputs.update(iter_runtime_files(repo, service["service_path"]))
@@ -1581,9 +2639,21 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         files = list(iter_runtime_files(repo, service_path))
         python_context = _python_service_context(repo, service_path, files)
         js_imported_receivers = _js_imported_route_receivers(files)
+        service_root = repo / service_path if service_path else repo
+        go_mod = service_root / "go.mod"
+        module_match = re.search(
+            r"(?m)^\s*module\s+(\S+)",
+            go_mod.read_text(encoding="utf-8", errors="replace")
+            if go_mod.is_file()
+            else "",
+        )
+        go_module_path = module_match.group(1) if module_match else ""
         go_attributed_call_targets = set().union(*(
             _go_attributed_call_targets(
-                path.read_text(encoding="utf-8", errors="replace")
+                path,
+                path.read_text(encoding="utf-8", errors="replace"),
+                service_root,
+                go_module_path,
             )
             for path in files
             if path.suffix == ".go"
@@ -1643,7 +2713,11 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             if (
                 route["framework"] == "chi"
                 and not route.get("_middleware_covered")
-                and route.get("_go_function") in go_attributed_call_targets
+                and (
+                    route.get("_go_package"),
+                    route.get("_go_function"),
+                    route.get("_go_router_parameter"),
+                ) in go_attributed_call_targets
             ):
                 route["_middleware_covered"] = True
             key = (route["framework"], route["method"], route["path_template"], route["evidence"]["file"], route["evidence"]["line"])
@@ -1685,7 +2759,9 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         for route in unique_routes:
             route.pop("_receiver", None)
             route.pop("_middleware_covered", None)
+            route.pop("_go_package", None)
             route.pop("_go_function", None)
+            route.pop("_go_router_parameter", None)
         service = {"service_path": service_path or ".", "frameworks": sorted(profile.frameworks_detected),
                    "ingress_state": ingress_state, "middleware_detected": middleware,
                    "routes": unique_routes, "mounts": unique_mounts, "resolver": resolver,
@@ -1696,7 +2772,8 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         all_findings.extend({**finding, "service_path": service["service_path"]} for finding in service["findings"])
     services.sort(key=lambda item: item["service_path"])
     route_total = sum(len(service["routes"]) for service in services)
-    result = {"schema_version": "1.0", "generated_at": generated_at,
+    result = {"schema_version": "1.0", "scanner_version": SCANNER_VERSION,
+              "generated_at": generated_at,
               "source_revision": _source_revision(repo, services),
               "source_fingerprint": _fingerprint(repo, services),
               "discovery_projection": {"routes_discovered": route_total,

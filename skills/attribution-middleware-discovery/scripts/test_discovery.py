@@ -6,11 +6,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -92,6 +94,7 @@ class DiscoveryContractTests(unittest.TestCase):
 
             result = self._load(first)
             self.assertEqual(result["generated_at"], FIXED_TIME)
+            self.assertEqual(result["scanner_version"], "1.0.0")
             self.assertEqual(set(result["source_fingerprint"]), {"algorithm", "value"})
             self.assertEqual([service["service_path"] for service in result["services"]],
                              ["go-api", "python-api", "web-api", "worker"])
@@ -160,7 +163,8 @@ class DiscoveryContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "main.go").write_text(
-                'package main\nfunc routes(r chi.Router) { r.Get("/owned", h) }\n',
+                'package main\nimport "github.com/go-chi/chi/v5"\n'
+                'func routes(r chi.Router) { r.Get("/owned", h) }\n',
                 encoding="utf-8",
             )
             (repo / "api.gen.go").write_text(
@@ -191,7 +195,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "main.go").write_text(
-                'package main\nfunc routes() {\n'
+                'package main\nimport "github.com/go-chi/chi/v5"\nfunc routes() {\n'
                 '  r := chi.NewRouter()\n'
                 '  r.Get("/owned", h)\n'
                 '  token := headers.Get("Authorization")\n'
@@ -210,6 +214,51 @@ class DiscoveryContractTests(unittest.TestCase):
                 [("GET", "/owned")],
             )
 
+    def test_go_chi_tokens_without_an_import_remain_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text("module example/go\n", encoding="utf-8")
+            (repo / "main.go").write_text(
+                'package main\nfunc routes() {\n'
+                '  r := chi.NewRouter()\n'
+                '  r.Use(AttributionMiddleware)\n'
+                '  r.Get("/false-positive", h)\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertEqual(service["routes"], [])
+            self.assertFalse(service["middleware_detected"])
+            self.assertEqual(
+                result["discovery_projection"],
+                {
+                    "routes_discovered": 0,
+                    "routes_statically_covered": 0,
+                    "routes_unknown": 0,
+                },
+            )
+
+    def test_scanner_version_is_visible_and_participates_in_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "from fastapi import FastAPI\napp = FastAPI()\n",
+                encoding="utf-8",
+            )
+            services = [{"service_path": "."}]
+
+            baseline = SCAN_MODULE._fingerprint(repo, services)
+            with mock.patch.object(SCAN_MODULE, "SCANNER_VERSION", "1.0.1"):
+                changed = SCAN_MODULE._fingerprint(repo, services)
+
+            self.assertNotEqual(changed, baseline)
+
     def test_service_selector_accepts_exact_path_and_rejects_ambiguous_basenames(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -226,6 +275,21 @@ class DiscoveryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             _copy_fixture("drift", repo)
+            app = repo / "service" / "app.py"
+            app.write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.middleware('http')\n"
+                "async def attribution_context(request, call_next):\n"
+                "    return await call_next(request)\n"
+                "def resolver(auth=Depends(require_auth)):\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/old', dependencies=[Depends(require_auth)])\n"
+                "def old():\n"
+                "    return {}\n",
+                encoding="utf-8",
+            )
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(
@@ -236,7 +300,6 @@ class DiscoveryContractTests(unittest.TestCase):
             baseline = repo / "baseline.yaml"
             initial = self._discover(repo, baseline)
             self.assertEqual(initial.returncode, 0, initial.stderr)
-            app = repo / "service" / "app.py"
             app.write_text(app.read_text(encoding="utf-8") + '\n@app.get("/new")\ndef new():\n    return {}\n', encoding="utf-8")
 
             warn = subprocess.run([sys.executable, str(DRIFT), "--repo", str(repo), "--baseline", str(baseline),
@@ -326,7 +389,8 @@ class DiscoveryContractTests(unittest.TestCase):
             (go / "go.mod").write_text(
                 'module example/go\n\nrequire github.com/go-chi/chi v1.0.0\n', encoding="utf-8")
             (go / "main.go").write_text(
-                'package main\nfunc main() {\n r := chi.NewRouter()\n r.Use(cors.Handler)\n r.Get("/go", h)\n}\n',
+                'package main\nimport "github.com/go-chi/chi"\n'
+                'func main() {\n r := chi.NewRouter()\n r.Use(cors.Handler)\n r.Get("/go", h)\n}\n',
                 encoding="utf-8")
             output = repo.parent / "map.json"
 
@@ -477,6 +541,38 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(service["resolver"]["state"], "unresolved")
             self.assertTrue(any(item["code"] == "raw_identity_header" for item in service["findings"]))
 
+    def test_resolver_conservatively_merges_raw_and_trusted_python_branches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def branch(request, use_claims, claims=Depends(require_auth)):\n"
+                "    if use_claims:\n"
+                "        customer = request.headers.get('X-Customer-ID')\n"
+                "    else:\n"
+                "        customer = claims.customer_id\n"
+                "    uuid.UUID(customer)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+            self.assertTrue(
+                any(
+                    item["code"] == "raw_identity_header"
+                    and item["evidence"]["line"] == 6
+                    for item in service["findings"]
+                )
+            )
+
     def test_auth_and_attribution_middleware_require_attached_runtime_calls(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -534,6 +630,7 @@ class DiscoveryContractTests(unittest.TestCase):
             )
             (repo / "main.go").write_text(
                 "package main\n"
+                'import "github.com/go-chi/chi/v5"\n'
                 "func main() {\n"
                 "  r := chi.NewRouter()\n"
                 "  dead := \"r.Use(AttributionMiddleware)\"\n"
@@ -590,7 +687,7 @@ class DiscoveryContractTests(unittest.TestCase):
                     (route["framework"], route["method"], route["path_template"], route["evidence"])
                     for route in service["routes"]
                 ],
-                [("chi", "GET", "/multiline", {"file": "main.go", "line": 8})],
+                [("chi", "GET", "/multiline", {"file": "main.go", "line": 10})],
             )
             self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
 
@@ -1171,6 +1268,7 @@ class DiscoveryContractTests(unittest.TestCase):
             )
             (go / "main.go").write_text(
                 "package main\n"
+                'import "github.com/go-chi/chi/v5"\n'
                 "func main() {\n"
                 "  root := chi.NewRouter()\n"
                 "  api := chi.NewRouter()\n"
@@ -1367,6 +1465,43 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
             self.assertEqual(result["discovery_projection"]["routes_unknown"], 0)
 
+    def test_chi_cross_file_call_discovery_ignores_string_literals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func main() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Use(AttributionMiddleware)\n"
+                "  dead := \"register(r)\"\n"
+                "  _ = dead\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func register(r chi.Router) { r.Get(\"/orders\", handler) }\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertTrue(
+                any(item["code"] == "middleware_missing" for item in service["findings"])
+            )
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 0)
+            self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
     def test_unrelated_split_file_chi_router_stays_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -1392,6 +1527,94 @@ class DiscoveryContractTests(unittest.TestCase):
                 "func public() {\n"
                 "  r := chi.NewRouter()\n"
                 "  r.Get(\"/public\", publicHandler)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertTrue(
+                any(item["code"] == "middleware_missing" for item in service["findings"])
+            )
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
+            self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_package_qualified_multi_arg_chi_call_covers_only_called_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                "import (\n"
+                '  "github.com/go-chi/chi/v5"\n'
+                '  routes "example.test/go/internal/routes"\n'
+                ")\n"
+                "func main() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Use(AttributionMiddleware)\n"
+                "  routes.Register(r, database)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            routes = repo / "internal" / "routes"
+            routes.mkdir(parents=True)
+            (routes / "routes.go").write_text(
+                "package routes\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func Register(r chi.Router, db *Database) {\n"
+                "  r.Get(\"/orders\", ordersHandler)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            unrelated = repo / "internal" / "unrelated"
+            unrelated.mkdir(parents=True)
+            (unrelated / "routes.go").write_text(
+                "package unrelated\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func Register(r chi.Router, db *Database) {\n"
+                "  r.Get(\"/unrelated\", unrelatedHandler)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertTrue(
+                any(item["code"] == "middleware_missing" for item in service["findings"])
+            )
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
+            self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_chi_coverage_tracks_attributed_router_argument_position(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func main() {\n"
+                "  public := chi.NewRouter()\n"
+                "  attributed := chi.NewRouter()\n"
+                "  attributed.Use(AttributionMiddleware)\n"
+                "  register(public, attributed)\n"
+                "}\n"
+                "func register(publicRouter chi.Router, privateRouter chi.Router) {\n"
+                "  publicRouter.Get(\"/public\", publicHandler)\n"
+                "  privateRouter.Get(\"/private\", privateHandler)\n"
                 "}\n",
                 encoding="utf-8",
             )
@@ -1440,6 +1663,199 @@ class DiscoveryContractTests(unittest.TestCase):
                 [("express", "GET", "/orders", {"file": "routes.ts", "line": 2})],
             )
 
+    def test_js_ambiguous_extensionless_import_is_unresolved_and_deterministic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1","hono":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "app.js").write_text(
+                "export const app = express();\n",
+                encoding="utf-8",
+            )
+            (repo / "app.ts").write_text(
+                "export const app = new Hono();\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import { app } from './app';\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            first = Path(directory) / "seed-1.json"
+            second = Path(directory) / "seed-6.json"
+
+            runs = [
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(DISCOVER),
+                        "--repo",
+                        str(repo),
+                        "--output",
+                        str(output),
+                        "--generated-at",
+                        FIXED_TIME,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={**os.environ, "PYTHONHASHSEED": seed},
+                )
+                for seed, output in (("1", first), ("6", second))
+            ]
+
+            for run in runs:
+                self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            service = self._load(first)["services"][0]
+            self.assertEqual(service["routes"], [])
+            self.assertEqual(service["ingress_state"], "unknown")
+
+    def test_imported_js_receiver_ignores_lexically_shadowed_bindings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}', encoding="utf-8"
+            )
+            (repo / "app.ts").write_text(
+                "export const app = express();\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import { app } from './app';\n"
+                "function parameterShadow(app) {\n"
+                "  app.get('/parameter-shadow', fakeHandler);\n"
+                "}\n"
+                "function localShadow() {\n"
+                "  const app = createTestDouble();\n"
+                "  app.get('/local-shadow', fakeHandler);\n"
+                "}\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                [
+                    (route["framework"], route["path_template"], route["evidence"])
+                    for route in routes
+                ],
+                [("express", "/orders", {"file": "routes.ts", "line": 9})],
+            )
+
+    def test_default_import_resolves_declared_default_export_express_receiver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}', encoding="utf-8"
+            )
+            (repo / "app.ts").write_text(
+                "const app = express();\n"
+                "export default app;\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import api from './app';\n"
+                "api.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                [
+                    (
+                        route["framework"],
+                        route["method"],
+                        route["path_template"],
+                        route["evidence"],
+                    )
+                    for route in routes
+                ],
+                [("express", "GET", "/orders", {"file": "routes.ts", "line": 2})],
+            )
+
+    def test_default_import_resolves_inline_default_export_hono_receiver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"hono":"1"}}', encoding="utf-8"
+            )
+            (repo / "app.ts").write_text(
+                "export default new Hono();\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import api from './app';\n"
+                "api.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                [
+                    (
+                        route["framework"],
+                        route["method"],
+                        route["path_template"],
+                        route["evidence"],
+                    )
+                    for route in routes
+                ],
+                [("hono", "GET", "/orders", {"file": "routes.ts", "line": 2})],
+            )
+
+    def test_combined_default_and_named_js_imports_resolve_both_receivers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1","hono":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "app.ts").write_text(
+                "const app = express();\n"
+                "export const admin = new Hono();\n"
+                "export default app;\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import api, { admin as adminApi } from './app';\n"
+                "api.get('/orders', handler);\n"
+                "adminApi.get('/admin', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                {
+                    (
+                        route["framework"],
+                        route["method"],
+                        route["path_template"],
+                        route["evidence"]["line"],
+                    )
+                    for route in routes
+                },
+                {
+                    ("express", "GET", "/orders", 2),
+                    ("hono", "GET", "/admin", 3),
+                },
+            )
+
     def test_inline_verified_header_binding_is_trusted_resolver_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -1477,6 +1893,39 @@ class DiscoveryContractTests(unittest.TestCase):
                 "request.state.customer_id",
             )
 
+    def test_verified_header_finding_revokes_an_overwritten_verified_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def poisoned(request):\n"
+                "    raw_customer = request.headers.get('X-Customer-ID')\n"
+                "    verified_customer = verify_signed_customer_identity(raw_customer)\n"
+                "    verified_customer = load_untrusted_identity()\n"
+                "    request.state.customer_id = verified_customer\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            header_findings = [
+                item for item in service["findings"]
+                if item["code"] in {"raw_identity_header", "verified_identity_header"}
+            ]
+            self.assertEqual(
+                [(item["code"], item["evidence"]["line"]) for item in header_findings],
+                [("raw_identity_header", 5)],
+            )
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+
     def test_raw_context_overwrite_revokes_verified_resolver_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -1504,6 +1953,98 @@ class DiscoveryContractTests(unittest.TestCase):
                 any(
                     item["code"] == "raw_identity_header"
                     and item["evidence"]["line"] == 8
+                    for item in service["findings"]
+                )
+            )
+
+    def test_augmented_context_write_revokes_verified_resolver_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def poisoned(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID')\n"
+                "    )\n"
+                "    request.state.customer_id += '-unverified'\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+
+    def test_destructured_context_write_revokes_verified_resolver_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def poisoned(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID')\n"
+                "    )\n"
+                "    request.state.customer_id, ignored = load_untrusted_identity()\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+            self.assertTrue(
+                any(
+                    item["code"] == "raw_identity_header"
+                    and item["evidence"]["line"] == 6
+                    for item in service["findings"]
+                )
+            )
+
+    def test_destructured_context_write_uses_pre_assignment_verified_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def trusted(request):\n"
+                "    raw_customer = request.headers.get('X-Customer-ID')\n"
+                "    verified_customer = verify_signed_customer_identity(raw_customer)\n"
+                "    verified_customer, request.state.customer_id = None, verified_customer\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "proposed")
+            self.assertEqual(
+                service["resolver"]["expression"],
+                "request.state.customer_id",
+            )
+            self.assertTrue(
+                any(
+                    item["code"] == "verified_identity_header"
+                    and item["evidence"]["line"] == 5
                     for item in service["findings"]
                 )
             )
@@ -1613,6 +2154,289 @@ class DiscoveryContractTests(unittest.TestCase):
             second = self._discover(repo, output)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(output.read_bytes(), first_bytes)
+
+    def test_receiver_identity_is_lexically_scoped_across_python_js_and_go(self):
+        cases = {
+            "python": (
+                "requirements.txt",
+                "fastapi\n",
+                "app.py",
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "app.add_middleware(AttributionMiddleware)\n"
+                "@app.get('/covered')\n"
+                "def covered(): return {}\n"
+                "def build_shadowed_app():\n"
+                "    app = FastAPI()\n"
+                "    @app.get('/shadowed')\n"
+                "    def shadowed(): return {}\n"
+                "    return app\n",
+            ),
+            "javascript": (
+                "package.json",
+                '{"dependencies":{"express":"1"}}',
+                "server.ts",
+                "const app = express();\n"
+                "app.use(attributionMiddleware);\n"
+                "app.get('/covered', handler);\n"
+                "function buildShadowedApp() {\n"
+                "  const app = express();\n"
+                "  app.get('/shadowed', handler);\n"
+                "  return app;\n"
+                "}\n",
+            ),
+            "go": (
+                "go.mod",
+                "module example.test/scopes\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                "main.go",
+                "package main\n"
+                'import "github.com/go-chi/chi/v5"\n'
+                "func coveredRoutes() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Use(AttributionMiddleware)\n"
+                '  r.Get("/covered", coveredHandler)\n'
+                "}\n"
+                "func shadowedRoutes() {\n"
+                "  r := chi.NewRouter()\n"
+                "  if false {\n"
+                "    r.Use(AttributionMiddleware)\n"
+                "  }\n"
+                '  r.Get("/shadowed", shadowedHandler)\n'
+                "}\n",
+            ),
+        }
+
+        for language, (manifest, manifest_text, source, source_text) in cases.items():
+            with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory) / language
+                repo.mkdir()
+                (repo / manifest).write_text(manifest_text, encoding="utf-8")
+                (repo / source).write_text(source_text, encoding="utf-8")
+                output = repo.parent / "map.json"
+
+                run = self._discover(repo, output)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                result = self._load(output)
+                service = result["services"][0]
+                self.assertEqual(
+                    {route["path_template"] for route in service["routes"]},
+                    {"/covered", "/shadowed"},
+                )
+                self.assertEqual(
+                    result["discovery_projection"]["routes_statically_covered"],
+                    1,
+                )
+                self.assertEqual(
+                    result["discovery_projection"]["routes_unknown"],
+                    1,
+                )
+                self.assertTrue(
+                    any(
+                        finding["code"] == "middleware_missing"
+                        for finding in service["findings"]
+                    )
+                )
+
+    def test_resolver_candidate_is_revoked_after_later_untrusted_context_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def poisoned(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID')\n"
+                "    )\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "    request.state.customer_id = load_untrusted_identity()\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["resolver"]["state"], "unresolved")
+            self.assertTrue(
+                any(
+                    finding["code"] == "raw_identity_header"
+                    and finding["evidence"]["line"] == 6
+                    for finding in service["findings"]
+                )
+            )
+
+    def test_multiline_raw_identity_header_read_emits_mandatory_finding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def raw_identity(request):\n"
+                "    customer_id = request.headers.get(\n"
+                "        'X-Customer-ID'\n"
+                "    )\n"
+                "    return customer_id\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            findings = self._load(output)["services"][0]["findings"]
+            self.assertIn(
+                ("raw_identity_header", 4),
+                {
+                    (finding["code"], finding["evidence"]["line"])
+                    for finding in findings
+                    if finding["evidence"] is not None
+                },
+            )
+
+    def test_js_export_clause_provenance_carries_receiver_middleware_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}', encoding="utf-8"
+            )
+            (repo / "app.ts").write_text(
+                "const app = express();\n"
+                "app.use(attributionMiddleware);\n"
+                "app.use(requireAuth);\n"
+                "export { app };\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.ts").write_text(
+                "import { app } from './app';\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            self.assertEqual(
+                [
+                    (
+                        route["framework"],
+                        route["path_template"],
+                        route["auth_scope"],
+                    )
+                    for route in service["routes"]
+                ],
+                [("express", "/orders", "global")],
+            )
+            self.assertEqual(
+                result["discovery_projection"]["routes_statically_covered"], 1
+            )
+            self.assertFalse(
+                any(
+                    finding["code"] == "middleware_missing"
+                    for finding in service["findings"]
+                )
+            )
+
+    def test_next_route_groups_optional_catchalls_and_alias_exports_are_honest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"next":"1"}}', encoding="utf-8"
+            )
+            optional = repo / "app" / "(marketing)" / "docs" / "[[...slug]]" / "route.ts"
+            optional.parent.mkdir(parents=True)
+            optional.write_text(
+                "export async function GET() { return Response.json({}); }\n",
+                encoding="utf-8",
+            )
+            aliased = repo / "app" / "api" / "[...parts]" / "route.ts"
+            aliased.parent.mkdir(parents=True)
+            aliased.write_text(
+                "const handler = () => Response.json({});\n"
+                "export { handler as POST };\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                {
+                    (route["method"], route["path_template"])
+                    for route in routes
+                },
+                {
+                    ("GET", "/docs/{...slug?}"),
+                    ("POST", "/api/{...parts}"),
+                },
+            )
+
+    def test_aliased_chi_and_python_route_calls_require_import_provenance(self):
+        with self.subTest(language="go"), tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/aliases\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                'import web "github.com/go-chi/chi/v5"\n'
+                "func main() {\n"
+                "  router := web.NewRouter()\n"
+                "  router.Use(AttributionMiddleware)\n"
+                '  router.Get("/orders", ordersHandler)\n'
+                "}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            self.assertEqual(
+                [
+                    (route["framework"], route["path_template"])
+                    for route in result["services"][0]["routes"]
+                ],
+                [("chi", "/orders")],
+            )
+            self.assertEqual(
+                result["discovery_projection"]["routes_statically_covered"], 1
+            )
+
+        with self.subTest(language="python"), tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "from fastapi import FastAPI\n"
+                "from internal.routing import Route\n"
+                "from starlette.routing import Route as StarletteRoute\n"
+                "fake = Route('/fake', fake_handler)\n"
+                "real = StarletteRoute('/real', real_handler, methods=['GET'])\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            routes = self._load(output)["services"][0]["routes"]
+            self.assertEqual(
+                [
+                    (route["framework"], route["method"], route["path_template"])
+                    for route in routes
+                ],
+                [("starlette", "GET", "/real")],
+            )
 
     @staticmethod
     def _load_text_json(text: str) -> dict:

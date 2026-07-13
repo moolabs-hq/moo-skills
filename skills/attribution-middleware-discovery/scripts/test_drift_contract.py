@@ -46,6 +46,7 @@ def _route() -> dict:
 def _map(commit: str, state: str = "clean") -> dict:
     return {
         "schema_version": "1.0",
+        "scanner_version": "1.0.0",
         "generated_at": FIXED_TIME,
         "source_revision": {"git_commit": commit if state != "unversioned" else None, "state": state},
         "source_fingerprint": {"algorithm": "sha256", "value": "1" * 64},

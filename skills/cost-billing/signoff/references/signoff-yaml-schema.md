@@ -192,7 +192,8 @@ artifact:
 ```
 
 The helper derives `artifact.path` from the map's exact location under `--repo`
-and recomputes `sha256` over the current map bytes. It copies `source_commit`
+and recomputes `sha256` over the current map bytes. Reformatting the map changes
+those bytes and invalidates the signoff. It copies `source_commit`
 only from a scanner map whose `source_revision.state` is `clean`; the commit
 must be a full lowercase 40-character SHA-1 or 64-character SHA-256 Git object
 ID that exists in that repository. Dirty and unversioned maps are ineligible

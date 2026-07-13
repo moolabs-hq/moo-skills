@@ -66,6 +66,7 @@ Review these in order, one engineering decision at a time:
 | `async_hops` | `verified`, `missing`, or `unknown` from concrete inject/extract/bind evidence. |
 | `middleware_detected` | Static presence of attribution middleware, not proof of ordering or runtime execution. |
 | `discovery_projection` | Route inventory projection only. |
+| `scanner_version` | Scanner release that generated the map; it is also domain-bound into `source_fingerprint`. |
 
 Any `raw_identity_header`, `middleware_missing`, feature collision, unknown auth
 scope, unresolved resolver, or missing async propagation must be resolved or

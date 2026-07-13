@@ -21,7 +21,9 @@ FIXED_TIME = "2026-07-13T12:00:00Z"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("attribution_map_signoff", MODULE_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "attribution_map_signoff", MODULE_PATH
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load attribution_map_signoff")
     module = importlib.util.module_from_spec(spec)
@@ -60,30 +62,88 @@ class AttributionMapSignoffTests(unittest.TestCase):
             capture_output=True,
             text=True,
         ).stdout.strip()
-        self.map_path = self.repo / ".moolabs" / "attribution" / "instrumentation-map.yaml"
+        self.map_path = (
+            self.repo / ".moolabs" / "attribution" / "instrumentation-map.yaml"
+        )
         self.map_path.parent.mkdir(parents=True)
         self._write_map()
 
-    def _write_map(self) -> None:
+    def _write_map(
+        self,
+        *,
+        services: list[dict] | None = None,
+        findings: list[dict] | None = None,
+        canonical: bool = False,
+        indent: int | None = None,
+    ) -> None:
+        services = services or []
+        if findings is None:
+            findings = [
+                {**finding, "service_path": service["service_path"]}
+                for service in services
+                for finding in service["findings"]
+            ]
+        payload = {
+            "schema_version": "1.0",
+            "scanner_version": "1.0.0",
+            "generated_at": FIXED_TIME,
+            "source_revision": {"git_commit": self.source_commit, "state": "clean"},
+            "source_fingerprint": {"algorithm": "sha256", "value": "1" * 64},
+            "discovery_projection": {
+                "routes_discovered": 0,
+                "routes_statically_covered": 0,
+                "routes_unknown": 0,
+            },
+            "services": services,
+            "findings": findings,
+        }
+        separators = (",", ":") if canonical else None
         self.map_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "generated_at": FIXED_TIME,
-                    "source_revision": {"git_commit": self.source_commit, "state": "clean"},
-                    "source_fingerprint": {"algorithm": "sha256", "value": "1" * 64},
-                    "discovery_projection": {
-                        "routes_discovered": 0,
-                        "routes_statically_covered": 0,
-                        "routes_unknown": 0,
-                    },
-                    "services": [],
-                    "findings": [],
-                },
-                sort_keys=True,
-            ),
+            json.dumps(payload, indent=indent, separators=separators, sort_keys=True),
             encoding="utf-8",
         )
+
+    def _finding(self, code: str, severity: str = "warning") -> dict:
+        return {
+            "code": code,
+            "severity": severity,
+            "message": f"{code} requires review",
+            "evidence": None,
+        }
+
+    def _service(
+        self,
+        *,
+        findings: list[dict] | None = None,
+        resolver_state: str = "proposed",
+    ) -> dict:
+        resolver = {
+            "state": resolver_state,
+            "identity_kind": "moolabs_uuid" if resolver_state == "proposed" else None,
+            "expression": "request.state.customer_id"
+            if resolver_state == "proposed"
+            else None,
+            "template": "validate before binding"
+            if resolver_state == "proposed"
+            else None,
+            "evidence": {"file": "app.py", "line": 1}
+            if resolver_state == "proposed"
+            else None,
+        }
+        return {
+            "service_path": ".",
+            "frameworks": ["fastapi"],
+            "ingress_state": "http-ingress",
+            "middleware_detected": True,
+            "routes": [],
+            "mounts": [],
+            "resolver": resolver,
+            "async_hops": [],
+            "findings": findings or [],
+        }
+
+    def _map_bytes_digest(self) -> str:
+        return hashlib.sha256(self.map_path.read_bytes()).hexdigest()
 
     def _build(self, **overrides):
         arguments = {
@@ -103,7 +163,7 @@ class AttributionMapSignoffTests(unittest.TestCase):
     def test_builds_engineer_owned_immutable_artifact_signoff(self) -> None:
         signoff = self._build()
 
-        expected_digest = hashlib.sha256(self.map_path.read_bytes()).hexdigest()
+        expected_digest = self._map_bytes_digest()
         self.assertEqual(signoff["stage"], "engineer-attribution-map")
         self.assertEqual(signoff["status"], "approved")
         self.assertEqual(signoff["signed_by"]["role"], "team-engineer")
@@ -111,12 +171,79 @@ class AttributionMapSignoffTests(unittest.TestCase):
         self.assertEqual(signoff["artifact"]["source_commit"], self.source_commit)
         self.assertTrue(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
-    def test_digest_verification_rejects_mutated_map(self) -> None:
+    def test_digest_verification_rejects_mutated_map_content(self) -> None:
         signoff = self._build()
-        self._write_map()
-        self.map_path.write_text(self.map_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        document = json.loads(self.map_path.read_text(encoding="utf-8"))
+        document["source_fingerprint"]["value"] = "2" * 64
+        self.map_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
 
         self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_digest_verification_rejects_equivalent_json_reformatting(self) -> None:
+        signoff = self._build()
+        document = json.loads(self.map_path.read_text(encoding="utf-8"))
+        self.map_path.write_text(
+            json.dumps(document, indent=4, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_build_rejects_unresolved_resolver_and_raw_identity_header(self) -> None:
+        raw_header = self._finding("raw_identity_header", severity="high")
+        self._write_map(
+            services=[
+                self._service(
+                    findings=[raw_header],
+                    resolver_state="unresolved",
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "unsafe or unresolved"):
+            self._build()
+
+    def test_build_rejects_raw_identity_header_even_if_severity_is_downgraded(
+        self,
+    ) -> None:
+        raw_header = self._finding("raw_identity_header", severity="info")
+        self._write_map(services=[self._service(findings=[raw_header])])
+
+        with self.assertRaisesRegex(ValueError, "unsafe or unresolved"):
+            self._build(findings_rejected_as_false_positive=1)
+
+    def test_verify_rejects_forged_zero_finding_signoff_for_unsafe_map(self) -> None:
+        signoff = self._build()
+        raw_header = self._finding("raw_identity_header", severity="high")
+        self._write_map(
+            services=[
+                self._service(
+                    findings=[raw_header],
+                    resolver_state="unresolved",
+                )
+            ],
+            canonical=True,
+        )
+        signoff["artifact"]["sha256"] = hashlib.sha256(
+            self.map_path.read_bytes()
+        ).hexdigest()
+
+        self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_build_rejects_caller_count_mismatch_with_map_findings(self) -> None:
+        self._write_map(
+            services=[self._service(findings=[self._finding("review_note", "info")])]
+        )
+
+        with self.assertRaisesRegex(ValueError, "do not match instrumentation map"):
+            self._build()
+
+    def test_build_rejects_inconsistent_nested_and_top_level_findings(self) -> None:
+        finding = self._finding("review_note", "info")
+        self._write_map(services=[self._service(findings=[finding])], findings=[])
+
+        with self.assertRaisesRegex(ValueError, "findings do not match"):
+            self._build(findings_rejected_as_false_positive=1)
 
     def test_accepted_risk_verdict_requires_explicit_risks(self) -> None:
         with self.assertRaisesRegex(ValueError, "accepted risk"):
@@ -132,6 +259,9 @@ class AttributionMapSignoffTests(unittest.TestCase):
         self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
     def test_verification_reconciles_accepted_risks_with_review_counts(self) -> None:
+        self._write_map(
+            services=[self._service(findings=[self._finding("tracked_gap", "info")])]
+        )
         signoff = self._build(
             review_verdict="clean-with-accepted-risks",
             accepted_risks=["The unclassified queue is tracked in an incident."],
@@ -141,6 +271,8 @@ class AttributionMapSignoffTests(unittest.TestCase):
         self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
     def test_build_records_every_review_finding_outcome(self) -> None:
+        findings = [self._finding(f"review-{index}", "info") for index in range(12)]
+        self._write_map(services=[self._service(findings=findings)])
         signoff = self._build(
             review_verdict="clean-with-accepted-risks",
             accepted_risks=["A dynamic route remains unknown."],
@@ -167,10 +299,9 @@ class AttributionMapSignoffTests(unittest.TestCase):
                     self._build(**{field: value})
 
     def test_documentation_states_the_verifier_contract(self) -> None:
-        documented_contract = (
-            SKILL_PATH.read_text(encoding="utf-8")
-            + REFERENCE_PATH.read_text(encoding="utf-8")
-        )
+        documented_contract = SKILL_PATH.read_text(
+            encoding="utf-8"
+        ) + REFERENCE_PATH.read_text(encoding="utf-8")
         self.assertIn("missing or blocked review", documented_contract)
         self.assertIn("accepted-risk list and review counts", documented_contract)
 
