@@ -249,16 +249,55 @@ class AttributionMapSignoffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe or unresolved"):
             self._build()
 
-    def test_worker_only_service_with_not_required_resolver_is_signable(self) -> None:
+    def test_worker_only_service_without_verified_extraction_is_rejected(self) -> None:
+        unsafe_hops = (
+            [],
+            [
+                {
+                    "kind": "publish",
+                    "propagation": "verified",
+                    "evidence": {"file": "worker.py", "line": 2},
+                }
+            ],
+            [
+                {
+                    "kind": "consume",
+                    "propagation": "missing",
+                    "evidence": {"file": "worker.py", "line": 2},
+                }
+            ],
+        )
+        for async_hops in unsafe_hops:
+            worker = self._service(
+                resolver_state="not-required",
+                ingress_state="no-middleware-inherits-thread-id",
+            )
+            worker["frameworks"] = []
+            worker["middleware_detected"] = False
+            worker["async_hops"] = async_hops
+            self._write_map(services=[worker])
+
+            with self.subTest(async_hops=async_hops), self.assertRaisesRegex(
+                ValueError,
+                "worker-async-extraction",
+            ):
+                self._build()
+
+    def test_worker_only_service_with_verified_extraction_is_signable(self) -> None:
         worker = self._service(
             resolver_state="not-required",
             ingress_state="no-middleware-inherits-thread-id",
         )
         worker["frameworks"] = []
         worker["middleware_detected"] = False
-        self._write_map(
-            services=[worker]
-        )
+        worker["async_hops"] = [
+            {
+                "kind": "consume",
+                "propagation": "verified",
+                "evidence": {"file": "worker.py", "line": 2},
+            }
+        ]
+        self._write_map(services=[worker])
 
         signoff = self._build()
 

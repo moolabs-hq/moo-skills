@@ -75,6 +75,65 @@ class DiscoveryContractTests(unittest.TestCase):
             return json.loads(path.read_text(encoding="utf-8"))
         return yaml.safe_load(path.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _commit_fixture(repo: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+
+    @staticmethod
+    def _create_signoff(
+        repo: Path,
+        map_path: Path,
+        output: Path,
+        *,
+        findings_resolved: int = 0,
+        review_evidence: str = "review://discovery-regression",
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SIGNOFF),
+                "create",
+                str(map_path),
+                "--repo",
+                str(repo),
+                "--output",
+                str(output),
+                "--operator",
+                "A. Engineer",
+                "--codegen-model",
+                "scanner-codegen",
+                "--reviewer-model",
+                "independent-reviewer",
+                "--review-evidence",
+                review_evidence,
+                "--review-verdict",
+                "clean",
+                "--findings-resolved",
+                str(findings_resolved),
+                "--findings-rejected-as-false-positive",
+                "0",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_generates_deterministic_validated_map_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "repo"
@@ -164,6 +223,117 @@ class DiscoveryContractTests(unittest.TestCase):
                     "evidence": None,
                 },
             )
+
+    def test_worker_only_service_requires_verified_queue_extraction_for_signoff(self):
+        sources = {
+            "missing": (
+                "def cleanup():\n"
+                "    return None\n",
+                False,
+            ),
+            "verified": (
+                "def consume_message(message):\n"
+                "    queue.consume(extract_thread_id(message))\n",
+                True,
+            ),
+        }
+        for case, (source, signable) in sources.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "requirements.txt").write_text(
+                    "celery\n",
+                    encoding="utf-8",
+                )
+                (repo / "worker.py").write_text(source, encoding="utf-8")
+                self._commit_fixture(repo)
+                output = repo / ".moolabs" / "attribution" / "map.json"
+
+                run = self._discover(repo, output)
+
+                self.assertEqual(run.returncode, 0, run.stderr)
+                service = self._load(output)["services"][0]
+                self.assertEqual(
+                    service["ingress_state"],
+                    "no-middleware-inherits-thread-id",
+                )
+                finding_codes = {
+                    finding["code"] for finding in service["findings"]
+                }
+                if signable:
+                    self.assertNotIn("async_extraction_missing", finding_codes)
+                    self.assertEqual(
+                        service["async_hops"],
+                        [
+                            {
+                                "kind": "consume",
+                                "propagation": "verified",
+                                "evidence": {"file": "worker.py", "line": 2},
+                            }
+                        ],
+                    )
+                else:
+                    self.assertEqual(service["async_hops"], [])
+                    self.assertIn("async_extraction_missing", finding_codes)
+
+                signoff = output.with_name("signoff.json")
+                created = self._create_signoff(
+                    repo,
+                    output,
+                    signoff,
+                    findings_resolved=len(service["findings"]),
+                    review_evidence=f"review://worker-{case}-extraction",
+                )
+                self.assertEqual(
+                    created.returncode,
+                    0 if signable else 2,
+                    created.stderr,
+                )
+                self.assertEqual(signoff.exists(), signable)
+
+    def test_worker_consumer_injection_is_not_extraction_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "celery\n",
+                encoding="utf-8",
+            )
+            (repo / "worker.py").write_text(
+                "def consume_message(message):\n"
+                "    queue.consume(inject_thread_id(message))\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(
+                service["async_hops"],
+                [
+                    {
+                        "kind": "consume",
+                        "propagation": "missing",
+                        "evidence": {"file": "worker.py", "line": 2},
+                    }
+                ],
+            )
+            self.assertIn(
+                "async_extraction_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(service["findings"]),
+                review_evidence="review://worker-injection-is-not-extraction",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
 
     def test_schema_restricts_not_required_resolvers_to_worker_ingress(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -530,6 +700,97 @@ class DiscoveryContractTests(unittest.TestCase):
             run = self._discover(repo, output)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual([s["service_path"] for s in self._load(output)["services"]], ["services/api"])
+
+    def test_root_runtime_service_survives_nested_worker_selection_and_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            server = repo / "server.js"
+            server.write_text(
+                "const app = express();\n"
+                "app.use(authMiddleware);\n"
+                "app.use(attributionMiddleware);\n"
+                "app.get('/root-orders', handler);\n",
+                encoding="utf-8",
+            )
+            worker = repo / "worker"
+            worker.mkdir()
+            (worker / "requirements.txt").write_text(
+                "celery\n",
+                encoding="utf-8",
+            )
+            (worker / "tasks.py").write_text(
+                "def cleanup():\n"
+                "    return None\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            baseline_path = repo / ".moolabs" / "attribution" / "baseline.json"
+
+            initial = self._discover(repo, baseline_path)
+
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            baseline = self._load(baseline_path)
+            services = {
+                service["service_path"]: service
+                for service in baseline["services"]
+            }
+            self.assertEqual(set(services), {".", "worker"})
+            self.assertEqual(
+                [route["path_template"] for route in services["."]["routes"]],
+                ["/root-orders"],
+            )
+            self.assertEqual(services["worker"]["routes"], [])
+            self.assertNotIn(
+                "/root-orders",
+                [
+                    route["path_template"]
+                    for route in services["worker"]["routes"]
+                ],
+            )
+
+            signoff = baseline_path.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                baseline_path,
+                signoff,
+                findings_resolved=1,
+                review_evidence="review://root-runtime-service",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
+
+            server.write_text(
+                server.read_text(encoding="utf-8").replace(
+                    "/root-orders",
+                    "/root-orders-v2",
+                ),
+                encoding="utf-8",
+            )
+            current_path = baseline_path.with_name("current.json")
+            changed = self._discover(repo, current_path)
+
+            self.assertEqual(changed.returncode, 0, changed.stderr)
+            current = self._load(current_path)
+            self.assertNotEqual(
+                current["source_fingerprint"],
+                baseline["source_fingerprint"],
+            )
+            drift_codes = {
+                finding["code"]
+                for finding in DRIFT_MODULE.compare(baseline, current)
+            }
+            self.assertTrue(
+                {
+                    "source_fingerprint_changed",
+                    "route_added",
+                    "route_removed",
+                }.issubset(drift_codes)
+            )
 
     def test_records_mount_evidence_without_inventing_dynamic_prefixes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2110,6 +2371,97 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertFalse(result["services"][0]["middleware_detected"])
             self.assertEqual(result["services"][0]["routes"][0]["auth_scope"], "unknown")
 
+    def test_python_middleware_installers_require_statically_executed_calls(self):
+        installers = {
+            "uncalled": (
+                "def install_middleware():\n"
+                "    app.add_middleware(AttributionMiddleware)\n"
+            ),
+            "nested-uncalled": (
+                "def outer():\n"
+                "    def install_middleware():\n"
+                "        app.add_middleware(AttributionMiddleware)\n"
+                "    install_middleware()\n"
+            ),
+            "indirect-call": (
+                "def install_middleware():\n"
+                "    app.add_middleware(AttributionMiddleware)\n"
+                "installer = install_middleware\n"
+                "installer()\n"
+            ),
+            "invalid-call": (
+                "def install_middleware():\n"
+                "    app.add_middleware(AttributionMiddleware)\n"
+                "install_middleware(dynamic_argument)\n"
+            ),
+        }
+        for case, installer in installers.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "requirements.txt").write_text(
+                    "fastapi\nstarlette\n",
+                    encoding="utf-8",
+                )
+                (repo / "app.py").write_text(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "from moolabs.middleware import AttributionMiddleware\n"
+                    "from starlette.middleware.authentication import "
+                    "AuthenticationMiddleware\n"
+                    "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                    "    return uuid.UUID(auth.customer_id)\n"
+                    "app = FastAPI(dependencies=[Depends(resolve_customer)])\n"
+                    "app.add_middleware(AuthenticationMiddleware, backend=backend)\n"
+                    f"{installer}"
+                    "@app.get('/orders')\n"
+                    "def orders(): return {}\n",
+                    encoding="utf-8",
+                )
+                self._commit_fixture(repo)
+                output = repo / ".moolabs" / "attribution" / "map.json"
+
+                run = self._discover(repo, output)
+
+                self.assertEqual(run.returncode, 0, run.stderr)
+                service = self._load(output)["services"][0]
+                self.assertFalse(service["middleware_detected"])
+                self.assertEqual(
+                    service["routes"][0]["auth_scope"],
+                    "global",
+                )
+                self.assertIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+                signoff = output.with_name("signoff.json")
+                created = self._create_signoff(
+                    repo,
+                    output,
+                    signoff,
+                    review_evidence=f"review://{case}-installer",
+                )
+                self.assertEqual(created.returncode, 2, created.stderr)
+                self.assertIn("unsafe or unresolved", created.stderr)
+                self.assertFalse(signoff.exists())
+
+    def test_directly_invoked_python_middleware_installer_is_coverage(self):
+        service = self._discover_python_source(
+            "from fastapi import FastAPI\n"
+            "from moolabs.middleware import AttributionMiddleware\n"
+            "app = FastAPI()\n"
+            "def install_middleware():\n"
+            "    app.add_middleware(AttributionMiddleware)\n"
+            "install_middleware()\n"
+            "@app.get('/orders')\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertTrue(service["middleware_detected"])
+        self.assertNotIn(
+            "middleware_missing",
+            {finding["code"] for finding in service["findings"]},
+        )
+
     def test_middleware_name_lookalikes_remain_untrusted_and_unsignable(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -2881,6 +3233,66 @@ class DiscoveryContractTests(unittest.TestCase):
             go_paths = [route["path_template"] for route in services["services/go"]["routes"]]
             self.assertIn("/inline/nested/ok", go_paths)
             self.assertNotIn("/inline-ambiguous", go_paths)
+
+    def test_unresolved_js_parent_receiver_cannot_fabricate_a_mount_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "server.js").write_text(
+                "const api = express.Router();\n"
+                "api.use(authMiddleware);\n"
+                "api.use(attributionMiddleware);\n"
+                "unresolvedParent.use('/v1', api);\n"
+                "api.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            route = service["routes"][0]
+            mount = service["mounts"][0]
+            with self.subTest("route"):
+                self.assertIsNone(route["path_template"])
+                self.assertEqual(route["confidence"], "low")
+            with self.subTest("mount"):
+                self.assertIsNone(mount["prefix"])
+                self.assertEqual(mount["confidence"], "low")
+                self.assertIn(
+                    "mount_unresolved",
+                    {finding["code"] for finding in service["findings"]},
+                )
+
+            service["resolver"] = {
+                "state": "proposed",
+                "identity_kind": "moolabs_uuid",
+                "expression": "req.auth.customerId",
+                "template": "reject empty values and validate before binding attribution context",
+                "evidence": {"file": "server.js", "line": 1},
+            }
+            output.write_text(
+                json.dumps(document, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(document["findings"]),
+                review_evidence="review://unresolved-js-parent",
+            )
+            with self.subTest("signoff"):
+                self.assertEqual(created.returncode, 2, created.stderr)
+                self.assertIn("unsafe or unresolved", created.stderr)
+                self.assertFalse(signoff.exists())
 
     def test_arbitrary_send_calls_are_not_verified_async_boundaries(self):
         with tempfile.TemporaryDirectory() as directory:

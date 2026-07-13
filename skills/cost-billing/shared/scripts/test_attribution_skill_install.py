@@ -316,6 +316,7 @@ class AttributionSkillInstallTests(unittest.TestCase):
             marketplace = json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8"))
             marketplace_plugin = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == root_plugin["name"])
             self.assertEqual(packaged_plugin["version"], root_plugin["version"])
+            self.assertEqual(packaged_plugin["version"], marketplace["metadata"]["version"])
             self.assertEqual(packaged_plugin["version"], marketplace_plugin["version"])
 
     def test_plugin_zip_falls_back_without_rsync_and_keeps_attribution_skill_runnable(self) -> None:

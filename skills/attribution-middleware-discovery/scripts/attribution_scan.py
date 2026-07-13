@@ -27,6 +27,7 @@ RUNTIME_IGNORED_PART = re.compile(
 )
 SOURCE_SUFFIXES = {".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs"}
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+WORKER_EXTRACTION_KINDS = {"consume", "subscribe"}
 SUPPORTED_JS_FRAMEWORKS = {"express", "hono", "nextjs"}
 SUPPORTED_PYTHON_FRAMEWORKS = {"fastapi"}
 GENERATED_SOURCE_NAME = re.compile(r"(?:^|[._-])gen(?:erated)?(?:[._-]|$)", re.I)
@@ -82,9 +83,18 @@ def _repo_scan_inputs(repo: Path) -> Iterator[Path]:
     yield from sorted(candidates, key=lambda path: path.relative_to(repo).as_posix())
 
 
-def iter_runtime_files(repo: Path, service_path: str) -> Iterator[Path]:
+def iter_runtime_files(
+    repo: Path,
+    service_path: str,
+    excluded_service_paths: tuple[str, ...] = (),
+) -> Iterator[Path]:
     """Yield regular, in-repo runtime sources in stable repo-relative order."""
     root = repo / service_path if service_path else repo
+    excluded_roots = tuple(
+        Path(path)
+        for path in excluded_service_paths
+        if path not in {"", "."}
+    )
     candidates: list[Path] = []
     for path in root.rglob("*"):
         if path.is_symlink() or not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
@@ -92,6 +102,8 @@ def iter_runtime_files(repo: Path, service_path: str) -> Iterator[Path]:
         try:
             relative = path.relative_to(repo)
         except ValueError:
+            continue
+        if any(excluded in relative.parents for excluded in excluded_roots):
             continue
         name = path.name.lower()
         if any(
@@ -429,19 +441,25 @@ def _boundary_kind(name: str) -> str | None:
     return None
 
 
-def _propagation_status(call_text: str) -> str:
+def _propagation_status(call_text: str, boundary_kind: str) -> str:
     code = _without_string_literals(call_text)
-    operation = re.search(
+    operations = re.findall(
         r"\b((?:inject|extract|bind|propagat)\w*)\s*\(",
         code,
         re.I,
     )
+    if boundary_kind in WORKER_EXTRACTION_KINDS:
+        operations = [
+            operation
+            for operation in operations
+            if operation.casefold().startswith("extract")
+        ]
     has_thread_id = re.search(r"\bthread[_-]?id\b", code, re.I)
-    operation_names_thread_id = bool(
-        operation
-        and "threadid" in re.sub(r"[^a-z0-9]", "", operation.group(1).lower())
+    operation_names_thread_id = any(
+        "threadid" in re.sub(r"[^a-z0-9]", "", operation.casefold())
+        for operation in operations
     )
-    return "verified" if operation and (has_thread_id or operation_names_thread_id) else "missing"
+    return "verified" if operations and (has_thread_id or operation_names_thread_id) else "missing"
 
 
 def _without_string_literals(text: str) -> str:
@@ -480,7 +498,7 @@ def _async_boundaries(repo: Path, path: Path, text: str) -> list[dict[str, Any]]
             call_text = ast.get_source_segment(text, node) or ""
             boundaries.append({
                 "kind": kind,
-                "propagation": _propagation_status(call_text),
+                "propagation": _propagation_status(call_text, kind),
                 "evidence": _location(repo, path, node.lineno),
             })
         return boundaries
@@ -509,7 +527,7 @@ def _async_boundaries(repo: Path, path: Path, text: str) -> list[dict[str, Any]]
         call_text = _balanced_call_text(code, match.start(2))
         boundaries.append({
             "kind": kind,
-            "propagation": _propagation_status(call_text),
+            "propagation": _propagation_status(call_text, kind),
             "evidence": _location(repo, path, code.count("\n", 0, match.start()) + 1),
         })
     return boundaries
@@ -723,6 +741,180 @@ def _python_scope_context(
     }
 
 
+def _python_execution_evidence(
+    tree: ast.Module,
+    context: dict[str, Any],
+    dead_nodes: set[int],
+) -> tuple[set[int], set[int]]:
+    """Return calls and function definitions proven to execute from module scope."""
+    definitions: dict[
+        tuple[str, str],
+        list[ast.FunctionDef | ast.AsyncFunctionDef],
+    ] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defining_scope = context["node_scopes"].get(
+                id(node),
+                context["module_scope"],
+            )
+            definitions.setdefault((defining_scope, node.name), []).append(node)
+
+    executed_calls: set[int] = set()
+    executed_definitions: set[int] = set()
+    executed_function_scopes: set[str] = set()
+
+    class EagerCallVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.calls: list[ast.Call] = []
+
+        def visit_Call(self, node: ast.Call) -> None:
+            self.calls.append(node)
+            self.generic_visit(node)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+            return
+
+        def visit_ListComp(self, node: ast.ListComp) -> None:
+            return
+
+        def visit_SetComp(self, node: ast.SetComp) -> None:
+            return
+
+        def visit_DictComp(self, node: ast.DictComp) -> None:
+            return
+
+    def has_required_arguments(
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        positional = len(function.args.posonlyargs) + len(function.args.args)
+        required_positional = positional - len(function.args.defaults)
+        required_keywords = any(
+            default is None for default in function.args.kw_defaults
+        )
+        return required_positional > 0 or required_keywords
+
+    def resolve_function(
+        scope: str,
+        call: ast.Call,
+    ) -> ast.FunctionDef | None:
+        if not isinstance(call.func, ast.Name):
+            return None
+        name = call.func.id
+        current: str | None = scope
+        while current is not None:
+            scoped_bindings = context["bindings"].get(current, {})
+            if name not in scoped_bindings:
+                current = context["scope_parents"].get(current)
+                continue
+            candidates = definitions.get((current, name), [])
+            if (
+                len(candidates) != 1
+                or len(scoped_bindings[name]) != 1
+                or id(candidates[0]) not in executed_definitions
+                or candidates[0].lineno > call.lineno
+                or isinstance(candidates[0], ast.AsyncFunctionDef)
+                or candidates[0].decorator_list
+                or has_required_arguments(candidates[0])
+                or call.args
+                or call.keywords
+            ):
+                return None
+            return candidates[0]
+        return None
+
+    def function_scope(function: ast.FunctionDef) -> str:
+        defining_scope = context["node_scopes"].get(
+            id(function),
+            context["module_scope"],
+        )
+        return f"{defining_scope}.<function:{function.name}@{function.lineno}>"
+
+    def record_expression(expression: ast.AST | None, scope: str) -> None:
+        if expression is None:
+            return
+        visitor = EagerCallVisitor()
+        visitor.visit(expression)
+        for call in visitor.calls:
+            if id(call) in dead_nodes:
+                continue
+            executed_calls.add(id(call))
+            target = resolve_function(scope, call)
+            if target is not None:
+                execute_function(target)
+
+    def process_statements(statements: list[ast.stmt], scope: str) -> None:
+        for statement in statements:
+            if id(statement) in dead_nodes:
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                executed_definitions.add(id(statement))
+                for expression in (
+                    *statement.decorator_list,
+                    *statement.args.defaults,
+                    *statement.args.kw_defaults,
+                ):
+                    record_expression(expression, scope)
+                continue
+            if isinstance(statement, ast.ClassDef):
+                for expression in (
+                    *statement.decorator_list,
+                    *statement.bases,
+                    *(keyword.value for keyword in statement.keywords),
+                ):
+                    record_expression(expression, scope)
+                continue
+            if isinstance(statement, ast.If):
+                record_expression(statement.test, scope)
+                if isinstance(statement.test, ast.Constant):
+                    branch = statement.body if bool(statement.test.value) else statement.orelse
+                    process_statements(branch, scope)
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor)):
+                record_expression(statement.iter, scope)
+                continue
+            if isinstance(statement, ast.While):
+                record_expression(statement.test, scope)
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                for item in statement.items:
+                    record_expression(item.context_expr, scope)
+                continue
+            if isinstance(statement, ast.Match):
+                record_expression(statement.subject, scope)
+                continue
+            if isinstance(statement, ast.Expr):
+                record_expression(statement.value, scope)
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                record_expression(statement.value, scope)
+            elif isinstance(statement, ast.AugAssign):
+                record_expression(statement.value, scope)
+            elif isinstance(statement, ast.Return):
+                record_expression(statement.value, scope)
+                return
+            elif isinstance(statement, ast.Raise):
+                record_expression(statement.exc, scope)
+                record_expression(statement.cause, scope)
+                return
+            elif isinstance(statement, ast.Assert):
+                record_expression(statement.test, scope)
+                record_expression(statement.msg, scope)
+            elif isinstance(statement, (ast.Break, ast.Continue)):
+                return
+
+    def execute_function(function: ast.FunctionDef) -> None:
+        scope = function_scope(function)
+        if scope in executed_function_scopes:
+            return
+        executed_function_scopes.add(scope)
+        process_statements(function.body, scope)
+
+    process_statements(tree.body, context["module_scope"])
+    return executed_calls, executed_definitions
+
+
 def _python_scoped_binding(
     context: dict[str, Any],
     name: str,
@@ -758,6 +950,11 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
         module, is_package = _python_module_name(service_root, path)
         dead_nodes = _dead_python_nodes(tree)
         scopes = _python_scope_context(tree, module, is_package)
+        executed_calls, executed_definitions = _python_execution_evidence(
+            tree,
+            scopes,
+            dead_nodes,
+        )
         receivers.update(scopes["receivers"])
         local_prefixes.update(scopes["prefixes"])
         file_contexts[path] = {
@@ -765,6 +962,8 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             "dead_nodes": dead_nodes,
             "module": module,
             "aliases": _python_import_aliases(tree, module, is_package),
+            "executed_calls": executed_calls,
+            "executed_definitions": executed_definitions,
             **scopes,
         }
 
@@ -926,6 +1125,8 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
     for path, context in file_contexts.items():
         tree = context["tree"]
         dead_nodes = context["dead_nodes"]
+        executed_calls = context["executed_calls"]
+        executed_definitions = context["executed_definitions"]
         for node in ast.walk(tree):
             if id(node) in dead_nodes:
                 continue
@@ -999,6 +1200,8 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                         else:
                             authenticated_routers.add(receiver)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if id(node) not in executed_definitions:
+                    continue
                 for decorator in node.decorator_list:
                     if (
                         isinstance(decorator, ast.Call)
@@ -1018,7 +1221,11 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             parent = canonical(path, _dotted_name(node.func.value), node)
             if parent not in receivers:
                 continue
-            if node.func.attr == "add_middleware" and node.args:
+            if (
+                node.func.attr == "add_middleware"
+                and node.args
+                and id(node) in executed_calls
+            ):
                 middleware_name = canonical(
                     path,
                     _dotted_name(node.args[0]),
@@ -1117,12 +1324,20 @@ def _scan_python(
     if context is not None:
         tree = context["tree"]
         dead_nodes = context["dead_nodes"]
+        executed_calls = context["executed_calls"]
+        executed_definitions = context["executed_definitions"]
     else:
         try:
             tree = ast.parse(text)
         except SyntaxError:
             return routes, False, mounts
         dead_nodes = _dead_python_nodes(tree)
+        scope_context = _python_scope_context(tree, "", False)
+        executed_calls, executed_definitions = _python_execution_evidence(
+            tree,
+            scope_context,
+            dead_nodes,
+        )
     framework = "fastapi" if any(
         isinstance(node, (ast.Name, ast.Attribute)) and _dotted_name(node).rsplit(".", 1)[-1] in {"FastAPI", "APIRouter"}
         for node in ast.walk(tree)
@@ -1168,7 +1383,11 @@ def _scan_python(
         receiver = canonical(_dotted_name(node.func.value), node)
         if receiver not in receivers:
             continue
-        if node.func.attr == "add_middleware" and node.args:
+        if (
+            node.func.attr == "add_middleware"
+            and node.args
+            and id(node) in executed_calls
+        ):
             middleware_name = canonical(
                 _dotted_name(node.args[0]),
                 node.args[0],
@@ -1205,7 +1424,11 @@ def _scan_python(
             mounts.append(mount)
 
     for node in ast.walk(tree):
-        if id(node) in dead_nodes or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if (
+            id(node) in dead_nodes
+            or id(node) not in executed_definitions
+            or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ):
             continue
         for decorator in node.decorator_list:
             if (
@@ -1228,7 +1451,7 @@ def _scan_python(
                 receiver = canonical(_dotted_name(decorator.func.value), decorator)
                 decorator_name = decorator.func.attr
                 if decorator.func.attr == "middleware" and _attribution_name(node.name):
-                    if receiver in receivers:
+                    if id(node) in executed_definitions and receiver in receivers:
                         attribution_receivers.add(receiver)
                     continue
                 path_node = _call_argument(decorator, 0, "path")
@@ -1796,7 +2019,8 @@ def _scan_js(
         if parent_receiver is None and child_receiver is None:
             continue
         resolved = (
-            child_receiver is not None
+            parent_receiver is not None
+            and child_receiver is not None
             and child_receiver[0] in local_receiver_ids
         )
         if resolved:
@@ -3718,6 +3942,36 @@ def _ignored_service_path(service_path: str) -> bool:
     return any(parts[index:index + 2] == ["api", "client"] for index in range(len(parts) - 1))
 
 
+def _nested_service_paths(
+    service_path: str,
+    service_paths: list[str],
+) -> tuple[str, ...]:
+    owner = Path(service_path) if service_path else None
+    return tuple(
+        candidate
+        for candidate in service_paths
+        if candidate
+        and candidate != service_path
+        and (owner is None or owner in Path(candidate).parents)
+    )
+
+
+def _root_profile_has_direct_runtime_evidence(
+    repo: Path,
+    root_profile: Any,
+    service_paths: list[str],
+) -> bool:
+    if not (root_profile.frameworks_detected or root_profile.execution_runtimes):
+        return False
+    return any(
+        iter_runtime_files(
+            repo,
+            "",
+            _nested_service_paths("", service_paths),
+        )
+    )
+
+
 def select_services(repo: Path, selector: str | None) -> list[Any]:
     profile = _load_repo_scan().scan(repo)
     services = sorted(
@@ -3725,7 +3979,17 @@ def select_services(repo: Path, selector: str | None) -> list[Any]:
         key=lambda service: service.path,
     )
     if selector is None and len(services) > 1 and any(service.path for service in services):
-        services = [service for service in services if service.path]
+        service_paths = [service.path for service in services]
+        services = [
+            service
+            for service in services
+            if service.path
+            or _root_profile_has_direct_runtime_evidence(
+                repo,
+                service,
+                service_paths,
+            )
+        ]
     if selector is None:
         return services
     normalized = selector.strip("/")
@@ -3745,9 +4009,17 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         raise DiscoveryError(f"repo not found: {repo}")
     services: list[dict[str, Any]] = []
     all_findings: list[dict[str, Any]] = []
-    for profile in select_services(repo, service_selector):
+    selected_profiles = select_services(repo, service_selector)
+    selected_paths = [profile.path for profile in selected_profiles]
+    for profile in selected_profiles:
         service_path = profile.path
-        files = list(iter_runtime_files(repo, service_path))
+        files = list(
+            iter_runtime_files(
+                repo,
+                service_path,
+                _nested_service_paths(service_path, selected_paths),
+            )
+        )
         python_context = _python_service_context(repo, service_path, files)
         js_imported_receivers = _js_imported_route_receivers(files)
         service_root = repo / service_path if service_path else repo
@@ -3840,6 +4112,17 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             else "no-middleware-inherits-thread-id" if profile.execution_runtimes and not profile.frameworks_detected
             else "unknown"
         )
+        if ingress_state == "no-middleware-inherits-thread-id" and not any(
+            hop["kind"] in WORKER_EXTRACTION_KINDS
+            and hop["propagation"] == "verified"
+            for hop in async_hops
+        ):
+            findings.append({
+                "code": "async_extraction_missing",
+                "severity": "high",
+                "message": "worker-only service has no verified queue or stream thread-ID extraction",
+                "evidence": None,
+            })
         if ingress_state == "no-middleware-inherits-thread-id":
             resolver = {
                 "state": "not-required",

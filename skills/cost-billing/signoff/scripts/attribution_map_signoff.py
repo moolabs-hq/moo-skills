@@ -93,6 +93,7 @@ ROUTE_FIELDS = {
 FEATURE_PROPOSAL_FIELDS = {"slug", "confidence", "requires_engineer_signoff"}
 MOUNT_FIELDS = {"framework", "target", "prefix", "confidence", "evidence"}
 ASYNC_HOP_FIELDS = {"kind", "propagation", "evidence"}
+WORKER_EXTRACTION_KINDS = {"consume", "subscribe"}
 UNSAFE_FINDING_CODES = {"raw_identity_header"}
 
 
@@ -406,6 +407,12 @@ def _map_review(document: dict[str, Any]) -> tuple[int, tuple[str, ...]]:
                 raise ValueError("instrumentation map contains a malformed async hop")
             if hop["propagation"] != "verified":
                 unsafe.append(f"{service_path}:unresolved-async-propagation")
+        if worker_only and not any(
+            hop["kind"].casefold() in WORKER_EXTRACTION_KINDS
+            and hop["propagation"] == "verified"
+            for hop in service["async_hops"]
+        ):
+            unsafe.append(f"{service_path}:missing-worker-async-extraction")
 
     actual_findings = sorted(_canonical_value(finding) for finding in findings)
     expected_findings = sorted(

@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow, testing blueprints, feature-flag patterns, and architect/reviewer personas.",
-    "version": "0.1.0"
+    "version": "0.3.1"
   },
   "plugins": [
     {
