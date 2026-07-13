@@ -1,2 +1,2 @@
 def consume(message):
-    process(message)
+    process(message)  # noqa: F821

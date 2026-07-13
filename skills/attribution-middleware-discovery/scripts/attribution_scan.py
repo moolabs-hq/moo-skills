@@ -205,6 +205,28 @@ def _call_argument(
     )
 
 
+def _python_route_methods(
+    node: ast.Call,
+    fixed_method: str | None = None,
+) -> list[str | None]:
+    if fixed_method is not None:
+        return [fixed_method]
+    methods_node = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "methods"),
+        None,
+    )
+    if not isinstance(methods_node, (ast.List, ast.Tuple, ast.Set)):
+        return [None]
+    methods: list[str | None] = []
+    for item in methods_node.elts:
+        if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+            methods.append(None)
+            continue
+        method = item.value.upper()
+        methods.append(method if method in METHODS else None)
+    return list(dict.fromkeys(methods or [None]))
+
+
 def _auth_name(value: str) -> bool:
     leaf = value.rsplit(".", 1)[-1]
     return bool(re.search(
@@ -658,7 +680,7 @@ def _python_scope_context(
                 self.visit(target)
                 for name in target_names(target):
                     identity = None
-                    if constructor in {"FastAPI", "APIRouter"}:
+                    if constructor in {"FastAPI", "APIRouter", "Starlette"}:
                         identity = receiver_identity(self.scope, name)
                         receivers.add(identity)
                         local_prefixes[identity] = (
@@ -792,14 +814,24 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
                     global_auth_roots.add(parent)
                 if _attribution_name(middleware_name):
                     attribution_receivers.add(parent)
-            elif node.func.attr == "include_router" and node.args:
-                child = canonical(path, _dotted_name(node.args[0]), node.args[0])
+            elif node.func.attr in {"include_router", "mount"}:
+                if node.func.attr == "include_router":
+                    child_node = _call_argument(node, 0, "router")
+                    prefix_node = _call_argument(node, 1, "prefix")
+                else:
+                    child_node = _call_argument(node, 1, "app")
+                    prefix_node = _call_argument(node, 0, "path")
+                if child_node is None:
+                    continue
+                child = canonical(path, _dotted_name(child_node), child_node)
                 if child not in receivers:
                     continue
-                prefix_node = next((keyword.value for keyword in node.keywords if keyword.arg == "prefix"), None)
                 mount_prefix = _path_value(_literal_source(prefix_node))[0] if prefix_node else ""
                 parents.setdefault(child, []).append((parent, mount_prefix))
-                mounted_auth.setdefault(child, []).append(_has_auth_dependency(node))
+                if node.func.attr == "include_router":
+                    mounted_auth.setdefault(child, []).append(
+                        _has_auth_dependency(node)
+                    )
 
     authenticated_routers.update(
         child for child, auth_sites in mounted_auth.items() if auth_sites and all(auth_sites)
@@ -823,10 +855,12 @@ def _python_service_context(repo: Path, service_path: str, files: list[Path]) ->
             if parent_prefix is None or mount_prefix is None or local_prefix is None:
                 values.add(None)
             else:
-                values.add(
-                    (parent_prefix.rstrip("/") + "/" + mount_prefix.strip("/") + "/" + local_prefix.lstrip("/")).rstrip("/")
-                    or "/"
-                )
+                parts = [
+                    part.strip("/")
+                    for part in (parent_prefix, mount_prefix, local_prefix)
+                    if part.strip("/")
+                ]
+                values.add(f"/{'/'.join(parts)}" if parts else "")
         effective_prefixes[receiver] = next(iter(values)) if len(values) == 1 else None
         return effective_prefixes[receiver]
 
@@ -898,7 +932,7 @@ def _scan_python(
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if isinstance(value, ast.Call) and _call_name(value.func).rsplit(".", 1)[-1] in {"FastAPI", "APIRouter"}:
+            if isinstance(value, ast.Call) and _call_name(value.func).rsplit(".", 1)[-1] in {"FastAPI", "APIRouter", "Starlette"}:
                 for target in targets:
                     if not isinstance(target, ast.Name):
                         continue
@@ -922,19 +956,30 @@ def _scan_python(
                 global_auth.add(receiver)
             if _attribution_name(middleware_name):
                 attribution_receivers.add(receiver)
-        if node.func.attr == "include_router" and node.args:
-            target = _dotted_name(node.args[0])
-            router_name = canonical(target, node.args[0])
-            prefix_node = next((keyword.value for keyword in node.keywords if keyword.arg == "prefix"), None)
+        if node.func.attr in {"include_router", "mount"}:
+            if node.func.attr == "include_router":
+                target_node = _call_argument(node, 0, "router")
+                prefix_node = _call_argument(node, 1, "prefix")
+            else:
+                target_node = _call_argument(node, 1, "app")
+                prefix_node = _call_argument(node, 0, "path")
+            target = _dotted_name(target_node) or "<unknown>"
+            router_name = canonical(target, target_node)
             raw_prefix = _literal_source(prefix_node) if prefix_node else None
             resolved = router_name in prefixes
             mount_path = _path_value(raw_prefix)[0] if raw_prefix is not None else ""
             child = prefixes.get(router_name)
             if resolved and service_context is None:
                 prefixes[router_name] = None if mount_path is None or child is None else mount_path.rstrip("/") + "/" + child.lstrip("/")
-                if _has_auth_dependency(node):
+                if node.func.attr == "include_router" and _has_auth_dependency(node):
                     authenticated_routers.add(router_name)
-            mount = _mount("fastapi", target, raw_prefix, _location(repo, path, node.lineno), resolved)
+            mount = _mount(
+                "fastapi" if node.func.attr == "include_router" else framework,
+                target,
+                raw_prefix,
+                _location(repo, path, node.lineno),
+                resolved,
+            )
             mount["_target_receiver"] = router_name
             mounts.append(mount)
 
@@ -960,13 +1005,16 @@ def _scan_python(
                 if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
                     continue
                 receiver = canonical(_dotted_name(decorator.func.value), decorator)
-                method = decorator.func.attr.upper()
+                decorator_name = decorator.func.attr
                 if decorator.func.attr == "middleware" and _attribution_name(node.name):
                     if receiver in receivers:
                         attribution_receivers.add(receiver)
                     continue
                 path_node = _call_argument(decorator, 0, "path")
-                if method not in METHODS or path_node is None:
+                if (
+                    decorator_name.upper() not in METHODS
+                    and decorator_name != "api_route"
+                ) or path_node is None:
                     continue
                 if receiver not in receivers:
                     continue
@@ -976,12 +1024,19 @@ def _scan_python(
                     else "global" if receiver in global_auth
                     else "unknown"
                 )
-                routes.append(_route(
-                    service_path, framework, method,
-                    _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(path_node)),
-                    _location(repo, path, decorator.lineno), scope, receiver,
-                    receiver in attribution_covered,
-                ))
+                methods = _python_route_methods(
+                    decorator,
+                    decorator_name.upper()
+                    if decorator_name.upper() in METHODS
+                    else None,
+                )
+                for method in methods:
+                    routes.append(_route(
+                        service_path, framework, method,
+                        _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(path_node)),
+                        _location(repo, path, decorator.lineno), scope, receiver,
+                        receiver in attribution_covered,
+                    ))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route":
             receiver = canonical(_dotted_name(node.func.value), node)
             if receiver not in receivers:
@@ -992,11 +1047,9 @@ def _scan_python(
                 continue
             handler_name = _dotted_name(endpoint_node).rsplit(".", 1)[-1]
             handler = function_defs.get(handler_name)
-            methods_node = next((keyword.value for keyword in node.keywords if keyword.arg == "methods"), None)
-            methods = [item.value for item in methods_node.elts if isinstance(item, ast.Constant)] if isinstance(methods_node, (ast.List, ast.Tuple)) else [None]
-            for method in methods:
+            for method in _python_route_methods(node):
                 routes.append(_route(
-                    service_path, framework, str(method).upper() if method else None,
+                    service_path, framework, method,
                     _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(path_node)),
                     _location(repo, path, node.lineno),
                     "handler" if _has_auth_dependency(node) or (handler is not None and _has_auth_dependency(handler))
@@ -1014,10 +1067,8 @@ def _scan_python(
             )
             if not imported or constructor != "starlette.routing.Route":
                 continue
-            methods_node = next((keyword.value for keyword in node.keywords if keyword.arg == "methods"), None)
-            methods = [item.value for item in methods_node.elts if isinstance(item, ast.Constant)] if isinstance(methods_node, (ast.List, ast.Tuple)) else [None]
-            for method in methods:
-                routes.append(_route(service_path, "starlette", str(method).upper() if method else None, _literal_source(node.args[0]), _location(repo, path, node.lineno)))
+            for method in _python_route_methods(node):
+                routes.append(_route(service_path, "starlette", method, _literal_source(node.args[0]), _location(repo, path, node.lineno)))
     return routes, bool(attribution_receivers), mounts
 
 
@@ -2219,7 +2270,7 @@ def _python_ingress_reachable_functions(
                 )
                 if receiver in receivers and (
                     decorator.func.attr.upper() in METHODS
-                    or decorator.func.attr == "middleware"
+                    or decorator.func.attr in {"api_route", "middleware"}
                 ):
                     roots.add(identity)
         for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
@@ -2430,7 +2481,7 @@ def _resolver_and_async(
                 "aliases": {},
                 "resolver_candidates": {},
             }
-            terminal_states: list[dict[str, Any]] = []
+            terminal_states: list[tuple[str, dict[str, Any]]] = []
             positional = list(function.args.posonlyargs) + list(function.args.args)
             defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
             argument_defaults = [
@@ -2634,6 +2685,15 @@ def _resolver_and_async(
                 for equivalent_context in equivalent_contexts:
                     current["verified_contexts"].pop(equivalent_context, None)
                     current["resolver_candidates"].pop(equivalent_context, None)
+                current["aliases"] = {
+                    name: provenance
+                    for name, provenance in current["aliases"].items()
+                    if provenance[0] != "trusted"
+                    or not (
+                        equivalent_trusted_contexts(provenance[1], root_aliases)
+                        & equivalent_contexts
+                    )
+                }
 
             def taint_context_root(
                 expression: str,
@@ -2691,11 +2751,32 @@ def _resolver_and_async(
                             "object.__setattr__",
                             "object.__delattr__",
                         }
-                    if call_name in mutation_calls and len(call.args) >= 2:
-                        mutated_root = _dotted_name(call.args[0])
+                    bound_dunder = (
+                        isinstance(call.func, ast.Attribute)
+                        and call.func.attr in {"__setattr__", "__delattr__"}
+                        and call_name not in {
+                            "object.__setattr__",
+                            "object.__delattr__",
+                        }
+                    )
+                    if call_name in mutation_calls or bound_dunder:
+                        argument_offset = 0 if bound_dunder else 1
+                        mutated_root_node = (
+                            call.func.value
+                            if bound_dunder
+                            else call.args[0] if call.args else None
+                        )
+                        if mutated_root_node is None:
+                            continue
+                        mutated_root = _dotted_name(mutated_root_node)
+                        field = (
+                            call.args[argument_offset]
+                            if len(call.args) > argument_offset
+                            else None
+                        )
                         if not (
-                            isinstance(call.args[1], ast.Constant)
-                            and isinstance(call.args[1].value, str)
+                            isinstance(field, ast.Constant)
+                            and isinstance(field.value, str)
                         ):
                             taint_context_root(
                                 mutated_root,
@@ -2703,7 +2784,7 @@ def _resolver_and_async(
                                 current["trusted_root_aliases"],
                             )
                             continue
-                        mutated_expression = f"{mutated_root}.{call.args[1].value}"
+                        mutated_expression = f"{mutated_root}.{field.value}"
                         if is_context_expression(
                             mutated_expression,
                             current["trusted_root_aliases"],
@@ -2717,8 +2798,10 @@ def _resolver_and_async(
                                 "delattr",
                                 "builtins.delattr",
                                 "object.__delattr__",
-                            } and len(call.args) >= 3:
-                                value = call.args[2]
+                            } and not (
+                                bound_dunder and call.func.attr == "__delattr__"
+                            ) and len(call.args) > argument_offset + 1:
+                                value = call.args[argument_offset + 1]
                                 source_line = _verified_identity_source_line(
                                     value,
                                     text,
@@ -3040,13 +3123,39 @@ def _resolver_and_async(
                             statement, (ast.For, ast.AsyncFor)
                         ) else statement.test
                         record_calls(expression, current)
+                        terminal_start = len(terminal_states)
                         body_state = process_statements(statement.body, clone(current))
-                        result = merge([current, body_state])
+                        loop_terminals = terminal_states[terminal_start:]
+                        del terminal_states[terminal_start:]
+                        terminal_states.extend(
+                            terminal
+                            for terminal in loop_terminals
+                            if terminal[0] not in {"break", "continue"}
+                        )
+                        break_states = [
+                            path_state
+                            for kind, path_state in loop_terminals
+                            if kind == "break"
+                        ]
+                        continue_states = [
+                            path_state
+                            for kind, path_state in loop_terminals
+                            if kind == "continue"
+                        ]
+                        looping_result = merge([
+                            current,
+                            body_state,
+                            *continue_states,
+                        ])
+                        result = merge([looping_result, *break_states])
                         if result is None:
                             return None
                         if statement.orelse:
-                            else_state = process_statements(statement.orelse, clone(result))
-                            result = merge([result, else_state])
+                            else_state = process_statements(
+                                statement.orelse,
+                                clone(looping_result),
+                            )
+                            result = merge([else_state, *break_states])
                             if result is None:
                                 return None
                         current = result
@@ -3058,6 +3167,7 @@ def _resolver_and_async(
                             return None
                         current = result
                     elif isinstance(statement, ast.Try):
+                        terminal_start = len(terminal_states)
                         normal = process_statements(statement.body, clone(current))
                         if normal is not None and statement.orelse:
                             normal = process_statements(statement.orelse, normal)
@@ -3066,13 +3176,28 @@ def _resolver_and_async(
                             process_statements(handler.body, clone(current))
                             for handler in statement.handlers
                         )
+                        if statement.finalbody:
+                            pending_terminals = terminal_states[terminal_start:]
+                            del terminal_states[terminal_start:]
+                            paths = [
+                                process_statements(
+                                    statement.finalbody,
+                                    clone(path_state),
+                                )
+                                if path_state is not None
+                                else None
+                                for path_state in paths
+                            ]
+                            for kind, path_state in pending_terminals:
+                                resumed = process_statements(
+                                    statement.finalbody,
+                                    clone(path_state),
+                                )
+                                if resumed is not None:
+                                    terminal_states.append((kind, resumed))
                         result = merge(paths)
                         if result is None:
                             return None
-                        if statement.finalbody:
-                            result = process_statements(statement.finalbody, result)
-                            if result is None:
-                                return None
                         current = result
                     elif isinstance(statement, ast.Match):
                         record_calls(statement.subject, current)
@@ -3097,13 +3222,18 @@ def _resolver_and_async(
                     elif isinstance(statement, ast.Return):
                         for child in ast.iter_child_nodes(statement):
                             record_calls(child, current)
-                        terminal_states.append(clone(current))
+                        terminal_states.append(("return", clone(current)))
                         return None
                     elif isinstance(statement, ast.Raise):
                         for child in ast.iter_child_nodes(statement):
                             record_calls(child, current)
+                        terminal_states.append(("raise", clone(current)))
                         return None
-                    elif isinstance(statement, (ast.Break, ast.Continue)):
+                    elif isinstance(statement, ast.Break):
+                        terminal_states.append(("break", clone(current)))
+                        return None
+                    elif isinstance(statement, ast.Continue):
+                        terminal_states.append(("continue", clone(current)))
                         return None
                     else:
                         record_calls(statement, current)
@@ -3111,7 +3241,11 @@ def _resolver_and_async(
 
             fallthrough_state = process_statements(function.body, state)
             final_state = merge([
-                *terminal_states,
+                *(
+                    path_state
+                    for kind, path_state in terminal_states
+                    if kind == "return"
+                ),
                 fallthrough_state,
             ])
             if final_state is not None:
@@ -3360,6 +3494,24 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             for mount in mounts
             if mount["prefix"] is None or mount["confidence"] == "low"
         }
+        unresolved_mounts = [
+            mount
+            for mount in mounts
+            if mount["prefix"] is None or mount["confidence"] == "low"
+        ]
+        if unresolved_mounts:
+            findings.append({
+                "code": "mount_unresolved",
+                "severity": "high",
+                "message": "mount target or path could not be resolved statically",
+                "evidence": sorted(
+                    unresolved_mounts,
+                    key=lambda item: (
+                        item["evidence"]["file"],
+                        item["evidence"]["line"],
+                    ),
+                )[0]["evidence"],
+            })
         for route in routes:
             if route.get("_receiver") not in unresolved_mount_targets:
                 continue

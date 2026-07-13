@@ -320,6 +320,22 @@ class AttributionMapSignoffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "resolver"):
             self._build()
 
+    def test_unresolved_mount_cannot_produce_a_clean_signoff(self) -> None:
+        service = self._service()
+        service["mounts"] = [
+            {
+                "framework": "fastapi",
+                "target": "create_external_asgi_app()",
+                "prefix": None,
+                "confidence": "low",
+                "evidence": {"file": "app.py", "line": 4},
+            }
+        ]
+        self._write_map(services=[service], findings=[])
+
+        with self.assertRaisesRegex(ValueError, "unsafe or unresolved"):
+            self._build()
+
     def test_unsupported_ingress_requires_an_exact_reviewed_resolver_edit(self) -> None:
         unsupported = self._finding("resolver_provenance_unsupported", "info")
         unresolved = self._service(

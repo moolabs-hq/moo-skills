@@ -396,6 +396,11 @@ def _map_review(document: dict[str, Any]) -> tuple[int, tuple[str, ...]]:
                 unsafe.append(f"{service_path}:unresolved-route")
         if not all(_mount(mount) for mount in service["mounts"]):
             raise ValueError("instrumentation map contains a malformed mount")
+        if any(
+            mount["prefix"] is None or mount["confidence"] == "low"
+            for mount in service["mounts"]
+        ):
+            unsafe.append(f"{service_path}:unresolved-mount")
         for hop in service["async_hops"]:
             if not _async_hop(hop):
                 raise ValueError("instrumentation map contains a malformed async hop")

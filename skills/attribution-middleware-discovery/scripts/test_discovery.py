@@ -1237,6 +1237,313 @@ class DiscoveryContractTests(unittest.TestCase):
 
         self.assertEqual(service["resolver"]["state"], "unresolved")
 
+    def test_bound_dunder_mutations_fail_closed_for_aliases_and_stale_provenance(self):
+        cases = {
+            "stale-local": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    customer_id = auth.customer_id\n"
+                "    auth.__setattr__('customer_id', load_untrusted_identity())\n"
+                "    return uuid.UUID(customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(customer=Depends(resolve_customer)): return {}\n"
+            ),
+            "alias-dynamic": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    claims = auth\n"
+                "    field = choose_customer_feature_or_tenant_field()\n"
+                "    claims.__setattr__(field, load_untrusted_identity())\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(customer=Depends(resolve_customer)): return {}\n"
+            ),
+            "auth-delete": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
+                "    auth.__delattr__('customer_id')\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(customer=Depends(resolve_customer)): return {}\n"
+            ),
+            "request-state-delete": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID'))\n"
+                "    request.state.__delattr__('customer_id')\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders', dependencies=[Depends(resolve_customer)])\n"
+                "def orders(): return {}\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(source)
+
+                self.assertEqual(service["resolver"]["state"], "unresolved")
+
+    def test_bound_dunder_verified_setter_and_unrelated_receiver_controls(self):
+        cases = {
+            "verified-request-state": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(request):\n"
+                "    request.state.__setattr__(\n"
+                "        'customer_id', verify_signed_customer_identity(\n"
+                "            request.headers.get('X-Customer-ID')))\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders', dependencies=[Depends(resolve_customer)])\n"
+                "def orders(): return {}\n"
+            ),
+            "unrelated-receiver": (
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def resolve_customer(profile, auth=Depends(verify_jwt)):\n"
+                "    field = choose_customer_feature_or_tenant_field()\n"
+                "    profile.__setattr__(field, load_untrusted_identity())\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(customer=Depends(resolve_customer)): return {}\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(source)
+
+                self.assertEqual(service["resolver"]["state"], "proposed")
+
+    def test_finally_overwrite_reaches_return_break_and_continue_paths(self):
+        terminal_blocks = {
+            "normal": (
+                "    try:\n"
+                "        metrics.started = True\n"
+                "    finally:\n"
+                "        request.state.customer_id = load_untrusted_identity()\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+            ),
+            "return": (
+                "    try:\n"
+                "        return uuid.UUID(request.state.customer_id)\n"
+                "    finally:\n"
+                "        request.state.customer_id = load_untrusted_identity()\n"
+            ),
+            "break": (
+                "    for item in items:\n"
+                "        try:\n"
+                "            break\n"
+                "        finally:\n"
+                "            request.state.customer_id = load_untrusted_identity()\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+            ),
+            "continue": (
+                "    for item in items:\n"
+                "        try:\n"
+                "            continue\n"
+                "        finally:\n"
+                "            request.state.customer_id = load_untrusted_identity()\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+            ),
+        }
+        for name, terminal_block in terminal_blocks.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "app = FastAPI()\n"
+                    "def resolve_customer(request, items=()):\n"
+                    "    request.state.customer_id = verify_signed_customer_identity(\n"
+                    "        request.headers.get('X-Customer-ID'))\n"
+                    f"{terminal_block}"
+                    "@app.get('/orders', dependencies=[Depends(resolve_customer)])\n"
+                    "def orders(): return {}\n"
+                )
+
+                self.assertEqual(service["resolver"]["state"], "unresolved")
+
+    def test_finally_preserves_verified_paths_and_can_override_raise(self):
+        cases = {
+            "return-cleanup": (
+                "    try:\n"
+                "        return uuid.UUID(request.state.customer_id)\n"
+                "    finally:\n"
+                "        metrics.closed = True\n"
+            ),
+            "normal-cleanup": (
+                "    try:\n"
+                "        metrics.started = True\n"
+                "    finally:\n"
+                "        metrics.closed = True\n"
+                "    return uuid.UUID(request.state.customer_id)\n"
+            ),
+            "raise-overridden-by-return": (
+                "    try:\n"
+                "        raise RuntimeError('retry')\n"
+                "    finally:\n"
+                "        return uuid.UUID(request.state.customer_id)\n"
+            ),
+        }
+        for name, control_flow in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "app = FastAPI()\n"
+                    "def resolve_customer(request):\n"
+                    "    request.state.customer_id = verify_signed_customer_identity(\n"
+                    "        request.headers.get('X-Customer-ID'))\n"
+                    f"{control_flow}"
+                    "@app.get('/orders', dependencies=[Depends(resolve_customer)])\n"
+                    "def orders(): return {}\n"
+                )
+
+                self.assertEqual(service["resolver"]["state"], "proposed")
+
+    def test_fastapi_and_starlette_mounts_compose_child_route_evidence(self):
+        parent_declarations = {
+            "fastapi-positional": (
+                "parent = FastAPI()\n"
+                "parent.add_middleware(AttributionMiddleware)\n"
+                "parent.mount('/api', child)\n"
+            ),
+            "starlette-keyword": (
+                "parent = Starlette()\n"
+                "parent.add_middleware(AttributionMiddleware)\n"
+                "parent.mount(path='/api', app=child)\n"
+            ),
+        }
+        for name, parent_declaration in parent_declarations.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "from starlette.applications import Starlette\n"
+                    "def resolve_customer(*, auth=Depends(verify_jwt)):\n"
+                    "    return uuid.UUID(auth.customer_id)\n"
+                    "child = FastAPI(dependencies=[\n"
+                    "    Depends(require_auth), Depends(resolve_customer)])\n"
+                    "@child.get('/orders')\n"
+                    "def orders(): return {}\n"
+                    f"{parent_declaration}"
+                )
+
+                self.assertEqual(service["resolver"]["state"], "proposed")
+                self.assertEqual(
+                    [
+                        (
+                            route["path_template"],
+                            route["auth_scope"],
+                            route["confidence"],
+                        )
+                        for route in service["routes"]
+                    ],
+                    [("/api/orders", "global", "high")],
+                )
+                self.assertEqual(
+                    [
+                        (mount["target"], mount["prefix"], mount["confidence"])
+                        for mount in service["mounts"]
+                    ],
+                    [("child", "/api", "high")],
+                )
+                self.assertNotIn(
+                    "middleware_missing",
+                    {finding["code"] for finding in service["findings"]},
+                )
+
+    def test_dynamic_and_unsupported_python_mounts_are_explicitly_unresolved(self):
+        cases = {
+            "dynamic-prefix": (
+                "child = FastAPI()\n"
+                "@child.get('/orders')\n"
+                "def orders(): return {}\n"
+                "prefix = load_mount_prefix()\n"
+                "parent.mount(prefix, child)\n",
+                True,
+            ),
+            "unsupported-target": (
+                "@parent.get('/health')\n"
+                "def health(auth=Depends(verify_jwt)):\n"
+                "    return uuid.UUID(auth.customer_id)\n"
+                "parent.mount('/external', create_external_asgi_app())\n",
+                False,
+            ),
+        }
+        for name, (registration, has_child_route) in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "parent = FastAPI()\n"
+                    "parent.add_middleware(AttributionMiddleware)\n"
+                    f"{registration}"
+                )
+
+                self.assertEqual(
+                    [(mount["prefix"], mount["confidence"]) for mount in service["mounts"]],
+                    [(None, "low")],
+                )
+                self.assertIn(
+                    ("mount_unresolved", "high"),
+                    {
+                        (finding["code"], finding["severity"])
+                        for finding in service["findings"]
+                    },
+                )
+                if has_child_route:
+                    self.assertEqual(
+                        [
+                            (route["path_template"], route["confidence"])
+                            for route in service["routes"]
+                        ],
+                        [(None, "low")],
+                    )
+
+    def test_fastapi_api_route_methods_are_expanded_or_explicitly_unknown(self):
+        service = self._discover_python_source(
+            "from fastapi import APIRouter, FastAPI\n"
+            "app = FastAPI()\n"
+            "app.add_middleware(AttributionMiddleware)\n"
+            "router = APIRouter(prefix='/v1')\n"
+            "app.include_router(router)\n"
+            "@app.api_route(path='/multi', methods=['GET', 'POST'])\n"
+            "def multi(): return {}\n"
+            "@router.api_route(path='/single', methods=('PATCH',))\n"
+            "def single(): return {}\n"
+            "dynamic_methods = load_methods()\n"
+            "@app.api_route(path='/dynamic', methods=dynamic_methods)\n"
+            "def dynamic(): return {}\n"
+            "@app.api_route(path='/absent')\n"
+            "def absent(): return {}\n"
+            "@app.api_route(path='/unsupported', methods=['TRACE'])\n"
+            "def unsupported(): return {}\n"
+        )
+
+        self.assertEqual(
+            {
+                (route["method"], route["path_template"], route["confidence"])
+                for route in service["routes"]
+            },
+            {
+                ("GET", "/multi", "high"),
+                ("POST", "/multi", "high"),
+                ("PATCH", "/v1/single", "high"),
+                (None, "/dynamic", "high"),
+                (None, "/absent", "high"),
+                (None, "/unsupported", "high"),
+            },
+        )
+
     def test_resolver_accepts_verified_tenant_crosswalk(self):
         service = self._discover_python_source(
             "from fastapi import Depends, FastAPI\n"
