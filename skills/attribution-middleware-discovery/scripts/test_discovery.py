@@ -1015,6 +1015,228 @@ class DiscoveryContractTests(unittest.TestCase):
             ["verified_identity_header"],
         )
 
+    def test_request_object_alias_mutation_revokes_canonical_verified_context(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    request.state.customer_id = verify_signed_customer_identity(\n"
+            "        request.headers.get('X-Customer-ID'))\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "    req = request\n"
+            "    req.state.customer_id = load_untrusted_identity()\n"
+            "    uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "unresolved")
+        self.assertEqual(
+            [
+                finding["code"]
+                for finding in service["findings"]
+                if finding["code"]
+                in {"raw_identity_header", "verified_identity_header"}
+            ],
+            ["verified_identity_header"],
+        )
+
+    def test_dynamic_sensitive_setattr_fails_closed_but_unrelated_receiver_does_not(self):
+        cases = {
+            "trusted-root": (
+                "    field = choose_customer_feature_or_tenant_field()\n"
+                "    setattr(auth, field, load_untrusted_identity())\n",
+                "unresolved",
+            ),
+            "unrelated-root": (
+                "    field = choose_customer_feature_or_tenant_field()\n"
+                "    setattr(profile, field, load_untrusted_identity())\n",
+                "proposed",
+            ),
+        }
+        for name, (mutation, expected_state) in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "app = FastAPI()\n"
+                    "def resolve_customer(profile, auth=Depends(verify_jwt)):\n"
+                    f"{mutation}"
+                    "    return uuid.UUID(auth.customer_id)\n"
+                    "@app.get('/orders')\n"
+                    "def orders(customer=Depends(resolve_customer)): return {}\n"
+                )
+
+                self.assertEqual(service["resolver"]["state"], expected_state)
+
+    def test_verified_rebind_restores_field_after_dynamic_sensitive_setattr(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def resolve_customer(request, auth=Depends(verify_jwt)):\n"
+            "    field = choose_customer_feature_or_tenant_field()\n"
+            "    setattr(auth, field, load_untrusted_identity())\n"
+            "    auth.customer_id = verify_signed_customer_identity(\n"
+            "        request.headers.get('X-Customer-ID'))\n"
+            "    return uuid.UUID(auth.customer_id)\n"
+            "@app.get('/orders')\n"
+            "def orders(customer=Depends(resolve_customer)): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(service["resolver"]["expression"], "auth.customer_id")
+
+    def test_dynamic_sensitive_setattr_revokes_stale_local_field_provenance(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def resolve_customer(auth=Depends(verify_jwt)):\n"
+            "    customer_id = auth.customer_id\n"
+            "    field = choose_customer_feature_or_tenant_field()\n"
+            "    setattr(auth, field, load_untrusted_identity())\n"
+            "    return uuid.UUID(customer_id)\n"
+            "@app.get('/orders')\n"
+            "def orders(customer=Depends(resolve_customer)): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "unresolved")
+
+    def test_object_delattr_revokes_verified_auth_field(self):
+        service = self._discover_python_source(
+            self._verified_auth_mutation_source(
+                "object.__delattr__(auth, 'customer_id')"
+            )
+        )
+
+        self.assertEqual(service["resolver"]["state"], "unresolved")
+
+    def test_keyword_only_depends_parameter_is_a_trusted_root(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def resolve_customer(*, auth=Depends(verify_jwt)):\n"
+            "    return uuid.UUID(auth.customer_id)\n"
+            "@app.get('/orders')\n"
+            "def orders(customer=Depends(resolve_customer)): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(service["resolver"]["expression"], "auth.customer_id")
+
+    def test_app_router_and_mount_dependencies_are_ingress_reachable(self):
+        cases = {
+            "app": (
+                "app = FastAPI(dependencies=[Depends(resolve_customer)])\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n"
+            ),
+            "router": (
+                "router = APIRouter(dependencies=[Depends(resolve_customer)])\n"
+                "@router.get('/orders')\n"
+                "def orders(): return {}\n"
+                "app = FastAPI()\n"
+                "app.include_router(router)\n"
+            ),
+            "mount": (
+                "router = APIRouter()\n"
+                "@router.get('/orders')\n"
+                "def orders(): return {}\n"
+                "app = FastAPI()\n"
+                "app.include_router(\n"
+                "    router, dependencies=[Depends(resolve_customer)])\n"
+            ),
+        }
+        for name, registration in cases.items():
+            with self.subTest(name=name):
+                service = self._discover_python_source(
+                    "import uuid\n"
+                    "from fastapi import APIRouter, Depends, FastAPI\n"
+                    "def resolve_customer(*, auth=Depends(verify_jwt)):\n"
+                    "    return uuid.UUID(auth.customer_id)\n"
+                    f"{registration}"
+                )
+
+                self.assertEqual(service["resolver"]["state"], "proposed")
+                self.assertEqual(
+                    service["resolver"]["expression"],
+                    "auth.customer_id",
+                )
+
+    def test_fastapi_keyword_route_arguments_preserve_paths_and_endpoint_reachability(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "def resolve_customer(*, auth=Depends(verify_jwt)):\n"
+            "    return uuid.UUID(auth.customer_id)\n"
+            "def registered(customer=Depends(resolve_customer)): return {}\n"
+            "app = FastAPI()\n"
+            "app.add_middleware(AttributionMiddleware)\n"
+            "@app.get(path='/decorated')\n"
+            "def decorated(): return {}\n"
+            "app.add_api_route(\n"
+            "    path='/registered', endpoint=registered, methods=['POST'])\n"
+            "dynamic_path = load_route_path()\n"
+            "@app.get(path=dynamic_path)\n"
+            "def dynamic(): return {}\n"
+        )
+
+        self.assertEqual(
+            {
+                (route["method"], route["path_template"], route["confidence"])
+                for route in service["routes"]
+            },
+            {
+                ("GET", "/decorated", "high"),
+                ("POST", "/registered", "high"),
+                ("GET", None, "low"),
+            },
+        )
+        self.assertEqual(service["resolver"]["state"], "proposed")
+
+    def test_try_with_always_raising_except_preserves_verified_fallthrough(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def trusted(request):\n"
+            "    try:\n"
+            "        request.state.customer_id = verify_signed_customer_identity(\n"
+            "            request.headers.get('X-Customer-ID'))\n"
+            "    except ValueError:\n"
+            "        raise\n"
+            "    return uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(trusted)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "proposed")
+        self.assertEqual(
+            service["resolver"]["expression"],
+            "request.state.customer_id",
+        )
+
+    def test_try_with_fallthrough_untrusted_except_remains_unresolved(self):
+        service = self._discover_python_source(
+            "import uuid\n"
+            "from fastapi import Depends, FastAPI\n"
+            "app = FastAPI()\n"
+            "def poisoned(request):\n"
+            "    try:\n"
+            "        request.state.customer_id = verify_signed_customer_identity(\n"
+            "            request.headers.get('X-Customer-ID'))\n"
+            "    except ValueError:\n"
+            "        request.state.customer_id = load_untrusted_identity()\n"
+            "    return uuid.UUID(request.state.customer_id)\n"
+            "@app.get('/orders', dependencies=[Depends(poisoned)])\n"
+            "def orders(): return {}\n"
+        )
+
+        self.assertEqual(service["resolver"]["state"], "unresolved")
+
     def test_resolver_accepts_verified_tenant_crosswalk(self):
         service = self._discover_python_source(
             "from fastapi import Depends, FastAPI\n"

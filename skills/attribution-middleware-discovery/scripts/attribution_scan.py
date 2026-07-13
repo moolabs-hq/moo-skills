@@ -192,6 +192,19 @@ def _call_name(node: ast.AST | None) -> str:
     return _dotted_name(node)
 
 
+def _call_argument(
+    node: ast.Call,
+    position: int,
+    keyword: str,
+) -> ast.AST | None:
+    if len(node.args) > position:
+        return node.args[position]
+    return next(
+        (item.value for item in node.keywords if item.arg == keyword),
+        None,
+    )
+
+
 def _auth_name(value: str) -> bool:
     leaf = value.rsplit(".", 1)[-1]
     return bool(re.search(
@@ -210,7 +223,8 @@ def _attribution_name(value: str) -> bool:
 def _has_auth_dependency(node: ast.AST) -> bool:
     for child in ast.walk(node):
         if isinstance(child, ast.Call) and _call_name(child.func).rsplit(".", 1)[-1] == "Depends":
-            if child.args and _auth_name(_dotted_name(child.args[0])):
+            dependency = _call_argument(child, 0, "dependency")
+            if dependency is not None and _auth_name(_dotted_name(dependency)):
                 return True
     return False
 
@@ -951,7 +965,8 @@ def _scan_python(
                     if receiver in receivers:
                         attribution_receivers.add(receiver)
                     continue
-                if method not in METHODS or not decorator.args:
+                path_node = _call_argument(decorator, 0, "path")
+                if method not in METHODS or path_node is None:
                     continue
                 if receiver not in receivers:
                     continue
@@ -963,22 +978,26 @@ def _scan_python(
                 )
                 routes.append(_route(
                     service_path, framework, method,
-                    _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(decorator.args[0])),
+                    _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(path_node)),
                     _location(repo, path, decorator.lineno), scope, receiver,
                     receiver in attribution_covered,
                 ))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route" and node.args:
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route":
             receiver = canonical(_dotted_name(node.func.value), node)
             if receiver not in receivers:
                 continue
-            handler_name = _dotted_name(node.args[1]).rsplit(".", 1)[-1] if len(node.args) > 1 else ""
+            path_node = _call_argument(node, 0, "path")
+            endpoint_node = _call_argument(node, 1, "endpoint")
+            if path_node is None:
+                continue
+            handler_name = _dotted_name(endpoint_node).rsplit(".", 1)[-1]
             handler = function_defs.get(handler_name)
             methods_node = next((keyword.value for keyword in node.keywords if keyword.arg == "methods"), None)
             methods = [item.value for item in methods_node.elts if isinstance(item, ast.Constant)] if isinstance(methods_node, (ast.List, ast.Tuple)) else [None]
             for method in methods:
                 routes.append(_route(
                     service_path, framework, str(method).upper() if method else None,
-                    _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(node.args[0])),
+                    _prefixed_raw_path(prefixes.get(receiver, ""), _literal_source(path_node)),
                     _location(repo, path, node.lineno),
                     "handler" if _has_auth_dependency(node) or (handler is not None and _has_auth_dependency(handler))
                     else "router" if receiver in authenticated_routers
@@ -2204,11 +2223,12 @@ def _python_ingress_reachable_functions(
                 ):
                     roots.add(identity)
         for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
-            target_node = (
-                call.args[0]
-                if _call_name(call.func).rsplit(".", 1)[-1] == "Depends" and call.args
-                else call.func
-            )
+            target_node = call.func
+            if _call_name(call.func).rsplit(".", 1)[-1] == "Depends":
+                dependency = _call_argument(call, 0, "dependency")
+                if dependency is None:
+                    continue
+                target_node = dependency
             target = resolve_function(path, target_node)
             if target is not None:
                 edges[identity].add(target)
@@ -2221,15 +2241,42 @@ def _python_ingress_reachable_functions(
                     _dotted_name(call.func.value),
                     call,
                 )
-                if receiver in receivers and call.func.attr == "add_api_route" and len(call.args) > 1:
-                    target = resolve_function(path, call.args[1])
-                    if target is not None:
-                        roots.add(target)
+                if receiver in receivers and call.func.attr == "add_api_route":
+                    endpoint = _call_argument(call, 1, "endpoint")
+                    if endpoint is not None:
+                        target = resolve_function(path, endpoint)
+                        if target is not None:
+                            roots.add(target)
             constructor = service_context["canonical"](
                 path,
                 _dotted_name(call.func),
                 call,
             )
+            dependency_site = (
+                constructor.rsplit(".", 1)[-1] in {"FastAPI", "APIRouter"}
+                or (
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr in {"add_api_route", "include_router"}
+                    and receiver in receivers
+                )
+            )
+            if dependency_site:
+                for dependency_call in (
+                    child
+                    for child in ast.walk(call)
+                    if isinstance(child, ast.Call)
+                    and _call_name(child.func).rsplit(".", 1)[-1] == "Depends"
+                ):
+                    dependency = _call_argument(
+                        dependency_call,
+                        0,
+                        "dependency",
+                    )
+                    if dependency is None:
+                        continue
+                    target = resolve_function(path, dependency)
+                    if target is not None:
+                        roots.add(target)
             if constructor != "starlette.routing.Route" or len(call.args) < 2:
                 continue
             target = resolve_function(path, call.args[1])
@@ -2373,22 +2420,28 @@ def _resolver_and_async(
         ):
             state: dict[str, Any] = {
                 "trusted_roots": set(),
-                "trusted_root_aliases": {},
+                "trusted_root_aliases": {"request": "request"},
                 "raw_variables": {},
                 "verified_variables": {},
                 "verified_contexts": {},
                 "verified_binding_source_lines": set(),
                 "tainted_contexts": set(),
+                "tainted_context_roots": set(),
                 "aliases": {},
                 "resolver_candidates": {},
             }
             terminal_states: list[dict[str, Any]] = []
             positional = list(function.args.posonlyargs) + list(function.args.args)
             defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
-            for argument, default in zip(positional, defaults):
+            argument_defaults = [
+                *zip(positional, defaults),
+                *zip(function.args.kwonlyargs, function.args.kw_defaults),
+            ]
+            for argument, default in argument_defaults:
                 if isinstance(default, ast.Call) and _call_name(default.func).rsplit(".", 1)[-1] == "Depends":
-                    if default.args and _trusted_identity_provider_name(
-                        _dotted_name(default.args[0])
+                    dependency = _call_argument(default, 0, "dependency")
+                    if dependency is not None and _trusted_identity_provider_name(
+                        _dotted_name(dependency)
                     ):
                         state["trusted_roots"].add(argument.arg)
                         state["trusted_root_aliases"][argument.arg] = argument.arg
@@ -2413,6 +2466,9 @@ def _resolver_and_async(
                     )
                 merged["tainted_contexts"].update(
                     *(path_state["tainted_contexts"] for path_state in reachable[1:])
+                )
+                merged["tainted_context_roots"].update(
+                    *(path_state["tainted_context_roots"] for path_state in reachable[1:])
                 )
                 for key in (
                     "raw_variables",
@@ -2440,11 +2496,13 @@ def _resolver_and_async(
                 if context_identity is None:
                     return {expression}
                 canonical_root, suffix = context_identity
-                equivalents = {
-                    f"{alias}.{suffix}"
-                    for alias, canonical in root_aliases.items()
-                    if canonical == canonical_root
-                }
+                equivalents = set()
+                for alias, canonical in root_aliases.items():
+                    if canonical == canonical_root:
+                        equivalents.add(f"{alias}.{suffix}")
+                    elif canonical_root.startswith(f"{canonical}."):
+                        relative_root = canonical_root[len(canonical) + 1 :]
+                        equivalents.add(f"{alias}.{relative_root}.{suffix}")
                 if canonical_root in {"request.state", "request.context"}:
                     equivalents.add(f"{canonical_root}.{suffix}")
                 return equivalents
@@ -2461,7 +2519,35 @@ def _resolver_and_async(
                 canonical_root = root_aliases.get(root_name)
                 if not separator or canonical_root is None:
                     return None
+                if canonical_root == "request":
+                    request_part, nested_separator, nested_suffix = suffix.partition(".")
+                    if nested_separator and request_part in {"state", "context"}:
+                        return f"request.{request_part}", nested_suffix
                 return canonical_root, suffix
+
+            def canonical_mutation_root(
+                expression: str,
+                root_aliases: dict[str, str],
+            ) -> str | None:
+                if expression in {"request", "request.state", "request.context"}:
+                    return expression
+                root_name, separator, suffix = expression.partition(".")
+                canonical = root_aliases.get(root_name)
+                if canonical is None:
+                    return None
+                expanded = (
+                    f"{canonical}.{suffix}"
+                    if separator
+                    else canonical
+                )
+                if expanded == "request":
+                    return expanded
+                for request_root in ("request.state", "request.context"):
+                    if expanded == request_root or expanded.startswith(
+                        f"{request_root}."
+                    ):
+                        return request_root
+                return canonical
 
             def trusted_context_expression(
                 expression: str,
@@ -2520,9 +2606,18 @@ def _resolver_and_async(
                     root_aliases,
                     current["verified_contexts"],
                 )
+                context_identity = trusted_context_identity(expression, root_aliases)
+                canonical_root = context_identity[0] if context_identity else None
+                root_tainted = canonical_root in current["tainted_context_roots"] or (
+                    "request" in current["tainted_context_roots"]
+                    and canonical_root in {"request.state", "request.context"}
+                )
                 return (
-                    root_name in current["trusted_roots"]
-                    or source_line is not None,
+                    source_line is not None
+                    or (
+                        root_name in current["trusted_roots"]
+                        and not root_tainted
+                    ),
                     source_line,
                 )
 
@@ -2540,25 +2635,74 @@ def _resolver_and_async(
                     current["verified_contexts"].pop(equivalent_context, None)
                     current["resolver_candidates"].pop(equivalent_context, None)
 
+            def taint_context_root(
+                expression: str,
+                current: dict[str, Any],
+                root_aliases: dict[str, str],
+            ) -> None:
+                canonical_root = canonical_mutation_root(expression, root_aliases)
+                if canonical_root is None:
+                    return
+                current["tainted_context_roots"].add(canonical_root)
+
+                def affected(context_expression: str) -> bool:
+                    identity = trusted_context_identity(
+                        context_expression,
+                        root_aliases,
+                    )
+                    if identity is None:
+                        return False
+                    context_root = identity[0]
+                    return context_root == canonical_root or (
+                        canonical_root == "request"
+                        and context_root in {"request.state", "request.context"}
+                    )
+
+                current["verified_contexts"] = {
+                    context_expression: source_line
+                    for context_expression, source_line in current[
+                        "verified_contexts"
+                    ].items()
+                    if not affected(context_expression)
+                }
+                current["resolver_candidates"] = {
+                    context_expression: candidate
+                    for context_expression, candidate in current[
+                        "resolver_candidates"
+                    ].items()
+                    if not affected(context_expression)
+                }
+                current["aliases"] = {
+                    name: provenance
+                    for name, provenance in current["aliases"].items()
+                    if provenance[0] != "trusted" or not affected(provenance[1])
+                }
+
             def record_calls(root: ast.AST | None, current: dict[str, Any]) -> None:
                 if root is None:
                     return
                 for call in (child for child in ast.walk(root) if isinstance(child, ast.Call)):
                     call_name = _call_name(call.func)
-                    if (
-                        call_name
-                        in {
+                    mutation_calls = {
                             "setattr",
                             "builtins.setattr",
                             "delattr",
                             "builtins.delattr",
                             "object.__setattr__",
+                            "object.__delattr__",
                         }
-                        and len(call.args) >= 2
-                        and isinstance(call.args[1], ast.Constant)
-                        and isinstance(call.args[1].value, str)
-                    ):
+                    if call_name in mutation_calls and len(call.args) >= 2:
                         mutated_root = _dotted_name(call.args[0])
+                        if not (
+                            isinstance(call.args[1], ast.Constant)
+                            and isinstance(call.args[1].value, str)
+                        ):
+                            taint_context_root(
+                                mutated_root,
+                                current,
+                                current["trusted_root_aliases"],
+                            )
+                            continue
                         mutated_expression = f"{mutated_root}.{call.args[1].value}"
                         if is_context_expression(
                             mutated_expression,
@@ -2569,9 +2713,11 @@ def _resolver_and_async(
                                 current,
                                 current["trusted_root_aliases"],
                             )
-                            if call_name not in {"delattr", "builtins.delattr"} and len(
-                                call.args
-                            ) >= 3:
+                            if call_name not in {
+                                "delattr",
+                                "builtins.delattr",
+                                "object.__delattr__",
+                            } and len(call.args) >= 3:
                                 value = call.args[2]
                                 source_line = _verified_identity_source_line(
                                     value,
@@ -2690,6 +2836,9 @@ def _resolver_and_async(
                         "trusted_root_aliases": trusted_root_aliases_before,
                         "verified_contexts": verified_contexts_before,
                         "tainted_contexts": tainted_contexts_before,
+                        "tainted_context_roots": set(
+                            current["tainted_context_roots"]
+                        ),
                     }
                     trusted, trusted_source_line = context_is_trusted(
                         expression,
@@ -2912,7 +3061,7 @@ def _resolver_and_async(
                         normal = process_statements(statement.body, clone(current))
                         if normal is not None and statement.orelse:
                             normal = process_statements(statement.orelse, normal)
-                        paths = [current, normal]
+                        paths = [normal]
                         paths.extend(
                             process_statements(handler.body, clone(current))
                             for handler in statement.handlers
@@ -2945,10 +3094,14 @@ def _resolver_and_async(
                     elif isinstance(statement, ast.Delete):
                         for target in statement.targets:
                             clear_target(target, current)
-                    elif isinstance(statement, (ast.Return, ast.Raise)):
+                    elif isinstance(statement, ast.Return):
                         for child in ast.iter_child_nodes(statement):
                             record_calls(child, current)
                         terminal_states.append(clone(current))
+                        return None
+                    elif isinstance(statement, ast.Raise):
+                        for child in ast.iter_child_nodes(statement):
+                            record_calls(child, current)
                         return None
                     elif isinstance(statement, (ast.Break, ast.Continue)):
                         return None
