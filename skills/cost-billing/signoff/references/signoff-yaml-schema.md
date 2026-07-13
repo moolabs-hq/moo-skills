@@ -196,11 +196,14 @@ and recomputes `sha256` over the current map bytes. Reformatting the map changes
 those bytes and invalidates the signoff. It copies `source_commit`
 only from a scanner map whose `source_revision.state` is `clean`; the commit
 must be a full lowercase 40-character SHA-1 or 64-character SHA-256 Git object
-ID that exists in that repository. Dirty and unversioned maps are ineligible
-for block approval. A
+ID that exists in that repository. Creation and verification also recompute the
+scanner's live source revision: the bound commit must remain the current `HEAD`
+with clean relevant source. Tests, generated output, vendored code, and other
+scanner-ignored paths do not make that revision dirty. Dirty relevant source, a
+later commit, and unversioned repositories are ineligible for block approval. A
 changed map/path/revision, non-engineer signer, missing or blocked review,
-identical normalized codegen and reviewer models, malformed review evidence, or an
-inconsistent accepted-risk list and review counts invalidates approval. The
+identical normalized codegen and reviewer models, malformed review evidence,
+or an inconsistent accepted-risk list and review counts invalidates approval. The
 helper derives `cross_model_violated` from the two model IDs and never accepts a
 self-review. Review counts are non-negative integers (booleans are rejected),
 their outcomes sum to `findings_total`, and accepted risks match

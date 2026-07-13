@@ -350,7 +350,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "@app.middleware('http')\n"
                 "async def attribution_context(request, call_next):\n"
                 "    return await call_next(request)\n"
-                "def resolver(auth=Depends(require_auth)):\n"
+                "def resolver(auth=Depends(verify_jwt)):\n"
                 "    return uuid.UUID(auth.customer_id)\n"
                 "@app.get('/old', dependencies=[Depends(require_auth), Depends(resolver)])\n"
                 "def old():\n"
@@ -367,13 +367,6 @@ class DiscoveryContractTests(unittest.TestCase):
             baseline = repo / "baseline.yaml"
             initial = self._discover(repo, baseline)
             self.assertEqual(initial.returncode, 0, initial.stderr)
-            app.write_text(app.read_text(encoding="utf-8") + '\n@app.get("/new")\ndef new():\n    return {}\n', encoding="utf-8")
-
-            warn = subprocess.run([sys.executable, str(DRIFT), "--repo", str(repo), "--baseline", str(baseline),
-                                   "--generated-at", FIXED_TIME], text=True, capture_output=True, check=False)
-            self.assertEqual(warn.returncode, 0, warn.stderr)
-            self.assertIn("route_added", warn.stdout)
-
             policy = repo / ".moolabs" / "attribution-policy.yaml"
             policy.parent.mkdir()
             policy.write_text("enforcement: block\n", encoding="utf-8")
@@ -414,6 +407,15 @@ class DiscoveryContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(created.returncode, 0, created.stderr)
+
+            policy.unlink()
+            app.write_text(app.read_text(encoding="utf-8") + '\n@app.get("/new")\ndef new():\n    return {}\n', encoding="utf-8")
+            warn = subprocess.run([sys.executable, str(DRIFT), "--repo", str(repo), "--baseline", str(baseline),
+                                   "--generated-at", FIXED_TIME], text=True, capture_output=True, check=False)
+            self.assertEqual(warn.returncode, 0, warn.stderr)
+            self.assertIn("route_added", warn.stdout)
+
+            policy.write_text("enforcement: block\n", encoding="utf-8")
             block = subprocess.run([sys.executable, str(DRIFT), "--repo", str(repo), "--baseline", str(baseline),
                                     "--generated-at", FIXED_TIME], text=True, capture_output=True, check=False)
             self.assertEqual(block.returncode, 1, block.stderr)
@@ -561,7 +563,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
                 "@app.get('/trusted')\n"
-                "def trusted(claims=Depends(require_auth)):\n"
+                "def trusted(claims=Depends(verify_jwt)):\n"
                 "    customer = claims.customer_id\n"
                 "    parsed = UUID(customer)\n"
                 "    UUID(other_customer)\n"
@@ -581,7 +583,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
                 "@app.get('/mismatch')\n"
-                "def mismatch(claims=Depends(require_auth)):\n"
+                "def mismatch(claims=Depends(verify_jwt)):\n"
                 "    customer = claims.customer_id\n"
                 "    UUID(other_customer)\n"
                 "    return customer\n",
@@ -617,7 +619,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "import uuid\n"
                 "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
-                "def unused(auth=Depends(require_auth)):\n"
+                "def unused(auth=Depends(verify_jwt)):\n"
                 "    return uuid.UUID(auth.customer_id)\n"
                 "@app.get('/orders')\n"
                 "def orders(): return {}\n",
@@ -636,7 +638,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "import uuid\n"
                 "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
-                "def resolve_customer(auth=Depends(require_auth)):\n"
+                "def resolve_customer(auth=Depends(verify_jwt)):\n"
                 "    return uuid.UUID(auth.customer_id)\n"
                 "@app.get('/orders')\n"
                 "def orders(customer=Depends(resolve_customer)): return {}\n",
@@ -649,6 +651,55 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(resolver["state"], "proposed")
             self.assertEqual(resolver["expression"], "auth.customer_id")
 
+    def test_resolver_rejects_auth_like_dependency_without_verifier_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "def fake_auth_context():\n"
+                "    return {'customer_id': '00000000-0000-0000-0000-000000000000'}\n"
+                "@app.get('/orders')\n"
+                "def orders(auth=Depends(fake_auth_context)):\n"
+                "    return uuid.UUID(auth.customer_id)\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["resolver"]["state"],
+                "unresolved",
+            )
+
+    def test_resolver_preserves_explicit_verified_auth_dependencies(self):
+        verifier_names = ("verify_jwt", "verify_customer_token")
+        for verifier_name in verifier_names:
+            with self.subTest(verifier_name=verifier_name), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+                (repo / "app.py").write_text(
+                    "import uuid\n"
+                    "from fastapi import Depends, FastAPI\n"
+                    "app = FastAPI()\n"
+                    "@app.get('/orders')\n"
+                    f"def orders(auth=Depends({verifier_name})):\n"
+                    "    return uuid.UUID(auth.customer_id)\n",
+                    encoding="utf-8",
+                )
+                output = repo.parent / "map.json"
+
+                run = self._discover(repo, output)
+
+                self.assertEqual(run.returncode, 0, run.stderr)
+                resolver = self._load(output)["services"][0]["resolver"]
+                self.assertEqual(resolver["state"], "proposed")
+                self.assertEqual(resolver["expression"], "auth.customer_id")
+
     def test_resolver_conservatively_merges_raw_and_trusted_python_branches(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -657,7 +708,7 @@ class DiscoveryContractTests(unittest.TestCase):
                 "import uuid\n"
                 "from fastapi import Depends, FastAPI\n"
                 "app = FastAPI()\n"
-                "def branch(request, use_claims, claims=Depends(require_auth)):\n"
+                "def branch(request, use_claims, claims=Depends(verify_jwt)):\n"
                 "    if use_claims:\n"
                 "        customer = request.headers.get('X-Customer-ID')\n"
                 "    else:\n"

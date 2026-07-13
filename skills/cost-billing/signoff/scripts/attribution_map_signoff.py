@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -36,7 +37,11 @@ TOP_LEVEL_FIELDS = {
     "artifact",
 }
 SIGNED_BY_REQUIRED = {"role", "name", "signed_at"}
-SIGNED_BY_FIELDS = SIGNED_BY_REQUIRED | {"signed_method"}
+SIGNED_BY_FIELDS = SIGNED_BY_REQUIRED | {
+    "contact",
+    "machine_fingerprint",
+    "signed_method",
+}
 REVIEW_FIELDS = {
     "phase",
     "verdict",
@@ -432,7 +437,62 @@ def _commit_exists(repo: Path, commit: str) -> bool:
     return run.returncode == 0
 
 
-def _map_binding(repo: Path, map_path: Path) -> tuple[str, str, dict[str, Any]]:
+def _attribution_scan_candidates() -> list[Path]:
+    script = Path(__file__).resolve()
+    return [
+        script.parent / "vendor" / "attribution_scan.py",
+        script.parents[2]
+        / "attribution-middleware-discovery"
+        / "scripts"
+        / "attribution_scan.py",
+        script.parents[3]
+        / "attribution-middleware-discovery"
+        / "scripts"
+        / "attribution_scan.py",
+        script.parents[2] / "scripts" / "attribution_scan.py",
+    ]
+
+
+def _load_attribution_scan():
+    scanner_path = next(
+        (path for path in _attribution_scan_candidates() if path.is_file()),
+        None,
+    )
+    if scanner_path is None:
+        checked = ", ".join(str(path) for path in _attribution_scan_candidates())
+        raise ValueError(
+            "unable to locate attribution discovery scanner; checked: " + checked
+        )
+    spec = importlib.util.spec_from_file_location(
+        "attribution_discovery_revision", scanner_path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError(f"unable to load attribution discovery scanner: {scanner_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _current_source_revision(
+    repo: Path,
+    document: dict[str, Any],
+) -> dict[str, str | None]:
+    scanner = _load_attribution_scan()
+    source_revision = scanner._source_revision(repo, document["services"])
+    if (
+        not isinstance(source_revision, dict)
+        or set(source_revision) != {"git_commit", "state"}
+    ):
+        raise ValueError("attribution discovery scanner returned an invalid revision")
+    return source_revision
+
+
+def _map_binding(
+    repo: Path,
+    map_path: Path,
+    *,
+    require_current_source: bool = True,
+) -> tuple[str, str, dict[str, Any]]:
     repo = repo.resolve()
     map_path = map_path.resolve()
     if not repo.is_dir():
@@ -460,6 +520,10 @@ def _map_binding(repo: Path, map_path: Path) -> tuple[str, str, dict[str, Any]]:
     if not _commit_exists(repo, source_commit):
         raise ValueError(
             "map source_revision git_commit does not exist in the repository"
+        )
+    if require_current_source and _current_source_revision(repo, document) != revision:
+        raise ValueError(
+            "map source_revision does not match current HEAD and clean relevant source"
         )
     return artifact_path, source_commit, document
 
@@ -566,10 +630,20 @@ def build_signoff(
     }
 
 
-def verify_signoff(repo: Path, map_path: Path, signoff: dict[str, Any]) -> bool:
+def verify_signoff(
+    repo: Path,
+    map_path: Path,
+    signoff: dict[str, Any],
+    *,
+    require_current_source: bool = True,
+) -> bool:
     """Return whether ``signoff`` approves the exact map bytes and source revision."""
     try:
-        artifact_path, source_commit, document = _map_binding(repo, map_path)
+        artifact_path, source_commit, document = _map_binding(
+            repo,
+            map_path,
+            require_current_source=require_current_source,
+        )
         map_findings_total, unsafe = _map_review(document)
         if unsafe:
             return False
@@ -588,6 +662,10 @@ def verify_signoff(repo: Path, map_path: Path, signoff: dict[str, Any]) -> bool:
             or signed_by["role"] != "team-engineer"
             or not _nonempty_string(signed_by["name"])
             or not _timestamp(signed_by["signed_at"])
+            or any(
+                field in signed_by and not isinstance(signed_by[field], str)
+                for field in ("contact", "machine_fingerprint")
+            )
             or (
                 "signed_method" in signed_by
                 and signed_by["signed_method"] not in SIGNED_METHODS

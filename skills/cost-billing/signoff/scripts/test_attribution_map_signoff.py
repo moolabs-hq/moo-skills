@@ -190,6 +190,51 @@ class AttributionMapSignoffTests(unittest.TestCase):
 
         self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
+    def test_verification_rejects_dirty_relevant_source(self) -> None:
+        self._write_map(services=[self._service()])
+        signoff = self._build()
+        (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
+
+        self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_verification_rejects_new_head_after_map_generation(self) -> None:
+        self._write_map(services=[self._service()])
+        signoff = self._build()
+        (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "change source",
+            ],
+            check=True,
+        )
+
+        self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+    def test_verification_ignores_generated_and_test_source_changes(self) -> None:
+        self._write_map(services=[self._service()])
+        signoff = self._build()
+        generated = self.repo / "generated" / "client.py"
+        generated.parent.mkdir()
+        generated.write_text("print('generated')\n", encoding="utf-8")
+        tests = self.repo / "tests" / "test_app.py"
+        tests.parent.mkdir()
+        tests.write_text("def test_generated(): pass\n", encoding="utf-8")
+        (self.repo / "client.generated.py").write_text(
+            "print('generated')\n", encoding="utf-8"
+        )
+
+        self.assertTrue(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
     def test_build_rejects_unresolved_resolver_and_raw_identity_header(self) -> None:
         raw_header = self._finding("raw_identity_header", severity="high")
         self._write_map(
@@ -373,6 +418,31 @@ class AttributionMapSignoffTests(unittest.TestCase):
 
         self.assertFalse(self.module.verify_signoff(self.repo, self.map_path, signoff))
 
+    def test_verification_accepts_schema_supported_manual_signer_metadata(self) -> None:
+        schema = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
+        signer_properties = schema["properties"]["signed_by"]["properties"]
+        self.assertIn("contact", signer_properties)
+        self.assertIn("machine_fingerprint", signer_properties)
+
+        signoff = self._build()
+        signoff["signed_by"].update(
+            {
+                "contact": "engineer@example.test",
+                "machine_fingerprint": "sha256:workstation-01",
+                "signed_method": "manual-yaml-edit",
+            }
+        )
+
+        self.assertTrue(self.module.verify_signoff(self.repo, self.map_path, signoff))
+
+        for field in ("contact", "machine_fingerprint"):
+            with self.subTest(field=field):
+                invalid = self._build()
+                invalid["signed_by"][field] = 42
+                self.assertFalse(
+                    self.module.verify_signoff(self.repo, self.map_path, invalid)
+                )
+
     def test_build_records_every_review_finding_outcome(self) -> None:
         findings = [self._finding(f"review-{index}", "info") for index in range(12)]
         self._write_map(services=[self._service(findings=findings)])
@@ -409,6 +479,8 @@ class AttributionMapSignoffTests(unittest.TestCase):
         self.assertIn("accepted-risk list and review counts", documented_contract)
         self.assertIn("Ingress `unresolved` resolvers cannot be accepted", documented_contract)
         self.assertIn("exact edited map bytes", documented_contract)
+        self.assertIn("current `HEAD`", documented_contract)
+        self.assertIn("clean relevant source", documented_contract)
 
     def test_schema_declares_attribution_map_stage_and_artifact(self) -> None:
         schema = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))

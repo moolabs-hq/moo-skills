@@ -139,14 +139,17 @@ python3 scripts/attribution_map_signoff.py verify \
 
 Create and verify derive the artifact path relative to `--repo`; callers cannot
 assert a label or source commit. Both commands require the map's
-`source_revision` to be `state: clean`, bind its full `git_commit`, and verify
-that commit exists in the repository. Dirty and unversioned maps cannot receive
-block approval. They also reject a missing or blocked review, identical codegen
-and reviewer models, review evidence that is not a `review://` URI, HTTP(S) URL,
-or structured uppercase ID, and any mismatch between the
-accepted-risk list and review counts. Any map-byte, path, or source-revision
-change invalidates the signoff and requires a new review; never update the
-binding in place without re-review.
+`source_revision` to be `state: clean`, bind its full `git_commit`, and match
+the scanner's live source revision: the same commit must be the current `HEAD`
+with clean relevant source. The scanner's normal exclusions keep tests,
+generated output, vendored code, and other ignored paths from blocking signoff.
+Dirty relevant source, a later commit, and unversioned repositories cannot
+receive block approval. The helper also rejects a missing or blocked review,
+identical codegen and reviewer models, review evidence that is not a
+`review://` URI, HTTP(S) URL, or structured uppercase ID, and any mismatch
+between the accepted-risk list and review counts. Any map-byte, path, or
+source-revision change invalidates the signoff and requires a new review; never
+update the binding in place without re-review.
 
 The helper is stdlib-only and writes JSON-form YAML, so it runs in a clean
 Python environment without installing PyYAML. Do not manually reformat its

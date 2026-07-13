@@ -73,7 +73,12 @@ def _require_block_signoff(repo: Path, baseline_path: Path, baseline: dict) -> N
     if not signoff_path.is_file():
         raise DiscoveryError(f"block enforcement requires instrumentation-map signoff: {signoff_path}")
     signoff = load_document(signoff_path)
-    if not _load_signoff_verifier().verify_signoff(repo, baseline_path, signoff):
+    if not _load_signoff_verifier().verify_signoff(
+        repo,
+        baseline_path,
+        signoff,
+        require_current_source=False,
+    ):
         raise DiscoveryError("block enforcement signoff does not approve the exact baseline map")
 
 

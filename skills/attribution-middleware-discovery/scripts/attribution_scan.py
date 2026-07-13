@@ -2065,6 +2065,24 @@ IDENTITY_VERIFIER_PATTERN = re.compile(
     r"authenticate_(?:customer|tenant)_identity)",
     re.I,
 )
+AUTH_TOKEN_VERIFIER_PATTERN = re.compile(r"verify_?(?:jwt|token)", re.I)
+IDENTITY_CROSSWALK_PATTERN = re.compile(
+    r"(?:(?:customer|tenant)_crosswalk|crosswalk_(?:customer|tenant)|"
+    r"(?:resolve|lookup)_(?:customer|tenant)(?:_(?:identity|id|key))?)",
+    re.I,
+)
+
+
+def _trusted_identity_provider_name(value: str) -> bool:
+    leaf = value.rsplit(".", 1)[-1]
+    return any(
+        pattern.fullmatch(leaf) is not None
+        for pattern in (
+            IDENTITY_VERIFIER_PATTERN,
+            AUTH_TOKEN_VERIFIER_PATTERN,
+            IDENTITY_CROSSWALK_PATTERN,
+        )
+    )
 
 
 def _verified_identity_source_line(
@@ -2362,7 +2380,9 @@ def _resolver_and_async(
             defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
             for argument, default in zip(positional, defaults):
                 if isinstance(default, ast.Call) and _call_name(default.func).rsplit(".", 1)[-1] == "Depends":
-                    if default.args and _auth_name(_dotted_name(default.args[0])):
+                    if default.args and _trusted_identity_provider_name(
+                        _dotted_name(default.args[0])
+                    ):
                         state["trusted_roots"].add(argument.arg)
 
             def clone(current: dict[str, Any]) -> dict[str, Any]:
@@ -2549,7 +2569,9 @@ def _resolver_and_async(
                         and context_source_line is not None
                     ):
                         current["verified_contexts"][context_expression] = context_source_line
-                    if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
+                    if isinstance(value, ast.Call) and _trusted_identity_provider_name(
+                        _call_name(value.func)
+                    ):
                         current["trusted_roots"].update(target_names)
                     if direct_raw_source:
                         for target_name in target_names:

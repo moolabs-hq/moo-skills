@@ -197,7 +197,7 @@ class AttributionSkillInstallTests(unittest.TestCase):
                 "app = FastAPI()\n"
                 "app.add_middleware(AttributionMiddleware)\n"
                 "@app.get('/orders')\n"
-                "def orders(claims=Depends(require_auth)):\n"
+                "def orders(claims=Depends(verify_jwt)):\n"
                 "    customer = claims.customer_id\n"
                 "    parsed = UUID(customer)\n"
                 "    return {'customer': str(parsed)}\n",
