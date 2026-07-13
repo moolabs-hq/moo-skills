@@ -12,8 +12,8 @@
     {
       "name": "moo-skills",
       "source": "./",
-      "description": "Adversarial PR review, grooming chain (requirements → HLD → contracts → BE/FE → task breakdown), frontend/backend unit + API testing blueprints, feature-flag patterns, Senior-Architect / Sparring-Partner / Design-Reviewer personas, and the cost-billing suite (finance → CPO → team-product → engineering four-stage chain).",
-      "version": "0.3.0",
+      "description": "Adversarial PR review, grooming chain, testing blueprints, attribution middleware discovery, engineering personas, and the cost-billing suite.",
+      "version": "0.3.1",
       "author": {
         "name": "Moolabs",
         "email": "kritivasrocks@gmail.com"

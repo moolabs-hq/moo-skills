@@ -92,6 +92,8 @@ Non-interactive:
 ```
 
 Honors `CLAUDE_CONFIG_DIR` for Claude Code installs.
+The installer and packaged discovery scripts require Python 3.11 or later; set
+`PYTHON_BIN` when the supported interpreter is not available as `python3`.
 
 ---
 

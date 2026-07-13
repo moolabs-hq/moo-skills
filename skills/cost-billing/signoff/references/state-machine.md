@@ -88,3 +88,20 @@ Each writes its own `engineer-stage3-signoff-<S>.yaml`. The codemod per `--servi
 If CPO re-runs Q11 and adds a new product mid-chain (rare but possible), the state machine detects the new slug, marks the new product's pm-stage2-signoff-<new>.yaml as MISSING, and routes the relevant team-PM to start their signoff. Existing per-product signoffs are NOT invalidated (CPO's add doesn't retroactively change other products' decisions).
 
 If CPO REMOVES a product, existing per-product signoffs become orphaned — the skill warns but doesn't delete them (audit trail).
+
+## Attribution-map artifact branch
+
+The attribution instrumentation map has a separate engineering-owned branch:
+
+```text
+instrumentation-map generated with clean source_revision
+  -> independent adversarial review
+  -> engineer-attribution-map signoff bound to bytes + repo path + existing source commit
+  -> attribution middleware rollout and optional blocking drift policy
+```
+
+It does not wait for or synthesize CFO/PM inventory stages. Any map-byte or
+repo-relative-path/source-commit change invalidates only this artifact signoff
+and requires review again; it does not rewrite the main inventory audit trail.
+Dirty and unversioned map revisions cannot enter the blocking state. Approval
+also requires distinct codegen/reviewer model IDs and non-empty review evidence.

@@ -74,6 +74,20 @@ For each stage, the skill loads the questions, then asks them ONE AT A TIME (per
 
 After all questions, the skill invokes Skill R (Phase 4), surfaces R's findings ONE AT A TIME for human resolution (accept / risk-accept / reject), then writes the signed YAML.
 
+## Engineer attribution-map artifact (`engineer-attribution-map`)
+
+| # | Question |
+|---|---|
+| 1 | "Which ingress routes have unknown auth scope or unresolved dynamic mounts, and are any acceptable for rollout?" |
+| 2 | "Does every proposed customer resolver originate from verified auth/request context and return a non-empty UUID or crosswalk external key?" |
+| 3 | "Are any raw inbound identity headers listed as rejected evidence rather than trusted resolvers?" |
+| 4 | "Which async boundaries are missing or unknown for thread propagation?" |
+| 5 | "Do route-to-feature proposals match product intent, with low-confidence entries explicitly accepted or corrected?" |
+| 6 | "Is the discovery projection being treated only as static coverage, with runtime and financial coverage still unclaimed?" |
+
+After these answers and Skill R, use the signoff helper to bind approval to the
+exact map SHA-256 and customer source commit.
+
 ## Customer-specific questions
 
 If `customer-context/terminology.yaml` has overrides, the skill substitutes terms in the questions (e.g., "completion" → "generation" for a customer who uses that term). The canonical list here uses defaults; runtime substitution preserves intent.

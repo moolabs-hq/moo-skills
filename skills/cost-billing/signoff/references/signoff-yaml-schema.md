@@ -156,6 +156,67 @@ The codemod loads each signoff file and verifies:
 
 Any failure → refuse-to-run with a precise message naming the failing field + file.
 
+## Example: attribution instrumentation-map artifact
+
+This engineering-only branch is independent of CFO/PM inventory signoff. Its
+digest approves one exact scanner output and customer-repo commit:
+
+```yaml
+$schema: https://moolabs.com/schemas/cost-billing-signoff/0.1.0
+stage: engineer-attribution-map
+status: approved
+generated_at: 2026-07-13T12:00:00Z
+signed_by:
+  role: team-engineer
+  name: Dan Engineer
+  signed_at: 2026-07-13T12:00:00Z
+  signed_method: agent-mediated
+adversarial_review:
+  phase: post-signoff-engineer-attribution-map
+  verdict: clean
+  codegen_model: implementation-model
+  reviewer_model: independent-reviewer
+  review_evidence: review://ws5/independent-review-123
+  ran_at: 2026-07-13T11:55:00Z
+  findings_total: 0
+  findings_human_accepted: 0
+  findings_resolved: 0
+  findings_rejected_as_false_positive: 0
+  cross_model_violated: false
+artifact:
+  kind: attribution-instrumentation-map
+  path: .moolabs/attribution/instrumentation-map.yaml
+  sha256: <64 lowercase hex characters>
+  source_commit: <customer repo commit>
+  accepted_risks: []
+```
+
+The helper derives `artifact.path` from the map's exact location under `--repo`
+and recomputes `sha256` over the current map bytes. It copies `source_commit`
+only from a scanner map whose `source_revision.state` is `clean`; the commit
+must be a full lowercase 40-character SHA-1 or 64-character SHA-256 Git object
+ID that exists in that repository. Dirty and unversioned maps are ineligible
+for block approval. A
+changed map/path/revision, non-engineer signer, missing or blocked review,
+identical normalized codegen and reviewer models, malformed review evidence, or an
+inconsistent accepted-risk list and review counts invalidates approval. The
+helper derives `cross_model_violated` from the two model IDs and never accepts a
+self-review. Review counts are non-negative integers (booleans are rejected),
+their outcomes sum to `findings_total`, and accepted risks match
+`findings_human_accepted`. The creation command requires explicit resolved and
+false-positive counts, derives the accepted count from `--accepted-risk`, and
+computes `findings_total`; a review that fixed findings must not be recorded as
+zero-finding clean.
+
+`attribution_map_signoff.py` writes this document as JSON-form YAML and reads
+that same portable representation during verification. JSON is valid YAML, so
+the `.yaml` filename and downstream YAML consumers remain compatible while the
+helper requires no third-party Python package.
+
+`review_evidence` must be a concrete `review://` URI, an HTTP(S) URL, or a
+structured uppercase evidence ID such as `WS5-REVIEW-123`. Free-form review
+notes are not evidence identifiers and fail both create and verify.
+
 ## v0.2 → v0.3 migration
 
 **No back-compat.** v0.3's signoff schema requires fields v0.2 didn't have (`product_slug`, `service_slug`, schema-versioned `adversarial_review` block). Customers with in-flight v0.2 chains must restart from `/cost-billing-bootstrap-finance`. The codemod refuses any signoff file lacking the v0.3 `$schema` URL. **(F6 fix — clean break.)**
