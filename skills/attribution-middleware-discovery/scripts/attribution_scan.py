@@ -436,7 +436,17 @@ def _async_boundaries(repo: Path, path: Path, text: str) -> list[dict[str, Any]]
             })
         return boundaries
 
-    code = _without_js_comments(text) if path.suffix.lower() in {".js", ".jsx", ".mjs", ".ts", ".tsx"} else _without_line_comments(text)
+    js_suffixes = {".js", ".jsx", ".mjs", ".ts", ".tsx"}
+    code = (
+        _without_js_comments(text)
+        if path.suffix.lower() in js_suffixes
+        else _without_line_comments(text)
+    )
+    if path.suffix.lower() in js_suffixes and re.match(
+        r"^\s*(['\"])use client\1\s*;?",
+        code,
+    ):
+        return boundaries
     pattern = re.compile(
         r"\b((?:axios|httpx|requests)\.\w+|fetch|publish|produce|(?:\w+\.)?send|delay|enqueue|consume|subscribe)\s*(\()",
         re.I,
@@ -786,7 +796,7 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
     routes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     code = _without_js_comments(text)
-    route_receivers = {"app", "router"}
+    route_receivers: set[str] = set()
     declared_receivers: set[str] = set()
     parents: dict[str, list[tuple[str, str | None]]] = {}
     unsupported_receivers = set(
@@ -819,7 +829,7 @@ def _scan_js(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
         if not _outside_js_string(code, match.start()):
             continue
         parent, mount_kind, mount, child = match.groups()
-        if parent not in route_receivers:
+        if parent not in route_receivers and child not in declared_receivers:
             continue
         resolved = child in declared_receivers
         if resolved:
@@ -1027,6 +1037,33 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
     return routes, bool(attribution_receivers), mounts
 
 
+IDENTITY_VERIFIER_PATTERN = re.compile(
+    r"(?:verify_signed_(?:(?:customer|tenant)_identity|(?:customer|tenant|identity)(?:_id)?)|"
+    r"verify_(?:customer|tenant)_(?:jwt|token)|"
+    r"authenticate_(?:customer|tenant)_identity)",
+    re.I,
+)
+
+
+def _verified_identity_source_line(
+    value: ast.AST,
+    text: str,
+    raw_pattern: re.Pattern[str],
+    raw_variables: dict[str, int],
+) -> int | None:
+    if not isinstance(value, ast.Call) or not IDENTITY_VERIFIER_PATTERN.fullmatch(
+        _call_name(value.func).rsplit(".", 1)[-1]
+    ):
+        return None
+    if not value.args:
+        return None
+    source = value.args[0]
+    if isinstance(source, ast.Name):
+        return raw_variables.get(source.id)
+    source_text = ast.get_source_segment(text, source) or _dotted_name(source)
+    return source.lineno if raw_pattern.search(source_text) else None
+
+
 def _verified_python_identity_header_lines(text: str, raw_pattern: re.Pattern[str]) -> set[int]:
     try:
         tree = ast.parse(text)
@@ -1036,12 +1073,6 @@ def _verified_python_identity_header_lines(text: str, raw_pattern: re.Pattern[st
     dead_nodes = _dead_python_nodes(tree)
     context_target = re.compile(
         r"request\.(?:state|context)\.[A-Za-z_]*(?:customer|tenant|account)[A-Za-z_]*",
-        re.I,
-    )
-    verifier = re.compile(
-        r"(?:verify_signed_(?:(?:customer|tenant)_identity|(?:customer|tenant|identity)(?:_id)?)|"
-        r"verify_(?:customer|tenant)_(?:jwt|token)|"
-        r"authenticate_(?:customer|tenant)_identity)",
         re.I,
     )
     for function in (
@@ -1068,15 +1099,17 @@ def _verified_python_identity_header_lines(text: str, raw_pattern: re.Pattern[st
             targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
             names = [target.id for target in targets if isinstance(target, ast.Name)]
             expression = _dotted_name(value)
-            if raw_pattern.search(expression):
+            source_line = _verified_identity_source_line(
+                value,
+                text,
+                raw_pattern,
+                raw_variables,
+            )
+            if source_line is None and raw_pattern.search(expression):
                 for name in names:
                     raw_variables[name] = assignment.lineno
                 continue
 
-            source_line: int | None = None
-            if isinstance(value, ast.Call) and verifier.fullmatch(_call_name(value.func).rsplit(".", 1)[-1]):
-                if value.args and isinstance(value.args[0], ast.Name):
-                    source_line = raw_variables.get(value.args[0].id)
             if source_line is not None:
                 for name in names:
                     verified_variables[name] = source_line
@@ -1129,6 +1162,9 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(node) not in dead_nodes
         ):
             trusted_roots: set[str] = set()
+            raw_variables: dict[str, int] = {}
+            verified_variables: set[str] = set()
+            verified_contexts: set[str] = set()
             positional = list(function.args.posonlyargs) + list(function.args.args)
             defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
             for argument, default in zip(positional, defaults):
@@ -1144,14 +1180,37 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
                 value = node.value
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 target_names = [target.id for target in targets if isinstance(target, ast.Name)]
+                expression = _dotted_name(value)
+                if raw_pattern.search(expression):
+                    for target_name in target_names:
+                        raw_variables[target_name] = node.lineno
+                verified_source_line = _verified_identity_source_line(
+                    value,
+                    text,
+                    raw_pattern,
+                    raw_variables,
+                )
+                if verified_source_line is not None:
+                    verified_variables.update(target_names)
+                for target in targets:
+                    context_expression = _dotted_name(target)
+                    if not context_pattern.fullmatch(context_expression):
+                        continue
+                    if verified_source_line is not None or (
+                        isinstance(value, ast.Name)
+                        and value.id in verified_variables
+                    ):
+                        verified_contexts.add(context_expression)
                 if not target_names:
                     continue
                 if isinstance(value, ast.Call) and _auth_name(_call_name(value.func)):
                     trusted_roots.update(target_names)
                     continue
-                expression = _dotted_name(value)
                 root = expression.split(".", 1)[0]
-                trusted_context = bool(context_pattern.fullmatch(expression) and root in trusted_roots)
+                trusted_context = bool(
+                    context_pattern.fullmatch(expression)
+                    and (root in trusted_roots or expression in verified_contexts)
+                )
                 raw_source = bool(raw_pattern.search(expression))
                 if isinstance(value, ast.Name) and value.id in aliases:
                     provenance = aliases[value.id]
@@ -1175,7 +1234,12 @@ def _resolver_and_async(repo: Path, files: list[Path]) -> tuple[dict[str, Any], 
                 else:
                     expression = _dotted_name(argument)
                     root = expression.split(".", 1)[0]
-                    provenance = ("trusted", expression) if context_pattern.fullmatch(expression) and root in trusted_roots else None
+                    provenance = (
+                        ("trusted", expression)
+                        if context_pattern.fullmatch(expression)
+                        and (root in trusted_roots or expression in verified_contexts)
+                        else None
+                    )
                 if not provenance or provenance[0] != "trusted":
                     continue
                 if re.fullmatch(r"(?:UUID|uuid\.UUID|uuid\.Parse|validate_uuid|is_uuid|parse_uuid)", validator, re.I):
@@ -1352,6 +1416,7 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
         routes: list[dict[str, Any]] = []
         mounts: list[dict[str, Any]] = []
         middleware = False
+        go_middleware_files: set[str] = set()
         for path in files:
             text = path.read_text(encoding="utf-8", errors="replace")
             if path.suffix == ".py" and profile.frameworks_detected and not (
@@ -1373,6 +1438,8 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             routes.extend(detected)
             mounts.extend(detected_mounts)
             middleware = middleware or present
+            if path.suffix == ".go" and present:
+                go_middleware_files.add(path.relative_to(repo).as_posix())
         resolver, findings, async_hops = _resolver_and_async(repo, files)
         findings.extend(_python_parse_findings(repo, files))
         unresolved_mount_targets = {
@@ -1400,7 +1467,26 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
                 route_keys.add(key)
                 unique_routes.append(route)
         covered_routes = sum(bool(route.get("_middleware_covered")) for route in unique_routes)
-        if routes and covered_routes < len(unique_routes):
+        unresolved_go_coverage = [
+            route for route in unique_routes
+            if route["framework"] == "chi"
+            and not route.get("_middleware_covered")
+            and go_middleware_files
+            and route["evidence"]["file"] not in go_middleware_files
+        ]
+        known_uncovered_routes = [
+            route for route in unique_routes
+            if not route.get("_middleware_covered")
+            and route not in unresolved_go_coverage
+        ]
+        if unresolved_go_coverage:
+            findings.append({
+                "code": "middleware_coverage_unresolved",
+                "severity": "info",
+                "message": "cross-file Go router coverage requires call-flow confirmation",
+                "evidence": unresolved_go_coverage[0]["evidence"],
+            })
+        if known_uncovered_routes:
             findings.append({"code": "middleware_missing", "severity": "warning", "message": "one or more route receivers have no static attribution middleware registration", "evidence": None})
         slugs: dict[str, list[dict[str, Any]]] = {}
         for route in unique_routes:

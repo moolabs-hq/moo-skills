@@ -1308,6 +1308,136 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertIn(("raw_identity_header", "high", 8), observed)
             self.assertIn(("raw_identity_header", "high", 12), observed)
 
+    def test_js_route_receiver_requires_framework_construction_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}', encoding="utf-8"
+            )
+            (repo / "server.ts").write_text(
+                "const app = new Map();\n"
+                "app.get('/cache-key');\n"
+                "const router = { get() {} };\n"
+                "router.get('/also-not-a-route');\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(service["routes"], [])
+            self.assertFalse(
+                any(item["code"] == "middleware_missing" for item in service["findings"])
+            )
+
+    def test_split_file_chi_middleware_coverage_is_unresolved_not_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func main() {\n"
+                "  r := chi.NewRouter()\n"
+                "  r.Use(AttributionMiddleware)\n"
+                "  register(r)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "routes.go").write_text(
+                "package main\n"
+                "import \"github.com/go-chi/chi/v5\"\n"
+                "func register(r chi.Router) { r.Get(\"/orders\", handler) }\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            result = self._load(output)
+            service = result["services"][0]
+            codes = {item["code"] for item in service["findings"]}
+            self.assertNotIn("middleware_missing", codes)
+            self.assertIn("middleware_coverage_unresolved", codes)
+            self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 0)
+            self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_inline_verified_header_binding_is_trusted_resolver_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "import uuid\n"
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "def trusted(request):\n"
+                "    request.state.customer_id = verify_signed_customer_identity(\n"
+                "        request.headers.get('X-Customer-ID')\n"
+                "    )\n"
+                "    uuid.UUID(request.state.customer_id)\n"
+                "@app.get('/orders')\n"
+                "def orders(): return {}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            header_findings = [
+                item for item in service["findings"]
+                if item["code"] in {"raw_identity_header", "verified_identity_header"}
+            ]
+            self.assertEqual(
+                [(item["code"], item["evidence"]["line"]) for item in header_findings],
+                [("verified_identity_header", 6)],
+            )
+            self.assertEqual(service["resolver"]["state"], "proposed")
+            self.assertEqual(service["resolver"]["identity_kind"], "moolabs_uuid")
+            self.assertEqual(
+                service["resolver"]["expression"],
+                "request.state.customer_id",
+            )
+
+    def test_client_component_fetch_is_not_a_trusted_async_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"next":"1"}}', encoding="utf-8"
+            )
+            client = repo / "app" / "orders" / "page.tsx"
+            client.parent.mkdir(parents=True)
+            client.write_text(
+                "'use client';\n"
+                "export async function loadOrders() {\n"
+                "  return fetch('/api/orders');\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "server.ts").write_text(
+                "export async function syncOrders() {\n"
+                "  return fetch('https://backend.example/orders');\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(
+                self._load(output)["services"][0]["async_hops"],
+                [{
+                    "kind": "fetch",
+                    "propagation": "missing",
+                    "evidence": {"file": "server.ts", "line": 2},
+                }],
+            )
+
     def test_default_output_rejects_parent_symlink_and_replaces_target_without_following(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
