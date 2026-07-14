@@ -144,12 +144,15 @@ def _route(
 ) -> dict[str, Any]:
     path_template, confidence = _path_value(raw_path)
     stable_path = path_template if path_template is not None else f"dynamic:{raw_path.strip()}"
-    route_id = hashlib.sha256(
-        (
-            f"{service_path}|{framework}|{method}|{stable_path}|"
-            f"{evidence['file']}|{receiver or '<unattached>'}"
-        ).encode()
-    ).hexdigest()[:16]
+
+    route_id = _route_id(
+        service_path,
+        framework,
+        method,
+        stable_path,
+        evidence,
+        receiver,
+    )
     slug_source = path_template or f"unresolved-{route_id}"
     slug = re.sub(r"[^a-z0-9]+", "-", slug_source.strip("/").replace("{", "").replace("}", "").lower()).strip("-")
     return {
@@ -168,6 +171,22 @@ def _route(
         "_receiver": receiver,
         "_middleware_covered": middleware_covered,
     }
+
+
+def _route_id(
+    service_path: str,
+    framework: str,
+    method: str | None,
+    stable_path: str,
+    evidence: dict[str, Any],
+    receiver: str | None,
+) -> str:
+    return hashlib.sha256(
+        (
+            f"{service_path}|{framework}|{method}|{stable_path}|"
+            f"{evidence['file']}|{receiver or '<unattached>'}"
+        ).encode()
+    ).hexdigest()[:16]
 
 
 def _mount(
@@ -449,11 +468,21 @@ def _propagation_status(call_text: str, boundary_kind: str) -> str:
         re.I,
     )
     if boundary_kind in WORKER_EXTRACTION_KINDS:
-        operations = [
-            operation
-            for operation in operations
-            if operation.casefold().startswith("extract")
-        ]
+        nested_extractions: list[str] = []
+        binding_pattern = re.compile(
+            r"\b(?:bind|propagat)\w*\s*(\()",
+            re.I,
+        )
+        for binding in binding_pattern.finditer(code):
+            binding_call = _balanced_call_text(code, binding.start(1))
+            nested_extractions.extend(
+                re.findall(
+                    r"\b(extract\w*)\s*\(",
+                    binding_call,
+                    re.I,
+                )
+            )
+        operations = nested_extractions
     has_thread_id = re.search(r"\bthread[_-]?id\b", code, re.I)
     operation_names_thread_id = any(
         "threadid" in re.sub(r"[^a-z0-9]", "", operation.casefold())
@@ -1678,12 +1707,57 @@ def _js_receiver_state(
             function_scopes.append(scope)
             function_matches.append((match, scope, parameters))
 
+    named_function_pattern = re.compile(
+        r"\bfunction\s+([A-Za-z_$]\w*)\s*\(([^)]*)\)\s*\{"
+    )
+    named_functions: dict[str, list[tuple[tuple[int, int], int]]] = {}
+    declaration_name_positions: set[int] = set()
+    for match in named_function_pattern.finditer(code):
+        if not _outside_js_string(code, match.start()):
+            continue
+        scope = brace_ranges.get(match.end() - 1)
+        if scope is None or match.group(2).strip():
+            continue
+        if any(start < match.start() < end for start, end in function_scopes):
+            continue
+        if re.search(r"\basync\s*$", code[max(0, match.start() - 16):match.start()]):
+            continue
+        named_functions.setdefault(match.group(1), []).append(
+            (scope, match.start(1))
+        )
+        declaration_name_positions.add(match.start(1))
+
     def containing_scope(
         position: int,
         scopes: list[tuple[int, int]],
     ) -> tuple[int, int]:
         containing = [scope for scope in scopes if scope[0] < position < scope[1]]
         return min(containing, key=lambda scope: scope[1] - scope[0]) if containing else module_scope
+
+    function_execution_positions: dict[tuple[int, int], list[int]] = {}
+    direct_call_pattern = re.compile(r"(?<![\w.$])([A-Za-z_$]\w*)\s*(\()")
+    for call in direct_call_pattern.finditer(code):
+        functions = named_functions.get(call.group(1), [])
+        call_text = _balanced_call_text(code, call.start(2))
+        line_start = code.rfind("\n", 0, call.start()) + 1
+        line_end = code.find("\n", call.start(2) + len(call_text))
+        if line_end < 0:
+            line_end = len(code)
+        prefix = code[line_start:call.start()].strip()
+        suffix = code[call.start(2) + len(call_text):line_end].strip()
+        if (
+            len(functions) != 1
+            or call.start(1) in declaration_name_positions
+            or not _outside_js_string(code, call.start())
+            or containing_scope(call.start(), lexical_scopes) != module_scope
+            or prefix
+            or suffix not in {"", ";"}
+            or _split_call_arguments(call_text)
+        ):
+            continue
+        function_execution_positions.setdefault(functions[0][0], []).append(
+            call.start()
+        )
 
     states: dict[str, dict[str, Any]] = {}
     bindings: dict[str, list[tuple[tuple[int, int], int, str | None]]] = {}
@@ -1793,9 +1867,26 @@ def _js_receiver_state(
         for match in pattern.finditer(code):
             if not _outside_js_string(code, match.start()):
                 continue
+            function_scope = containing_scope(match.start(), function_scopes)
+            lexical_scope = containing_scope(match.start(), lexical_scopes)
+            if function_scope == module_scope:
+                execution_positions = (
+                    [match.start()]
+                    if lexical_scope == module_scope
+                    else []
+                )
+            elif lexical_scope == function_scope:
+                execution_positions = function_execution_positions.get(
+                    function_scope,
+                    [],
+                )
+            else:
+                execution_positions = []
             resolved = resolve(match.group(1), match.start())
             if resolved is not None:
-                resolved[1][f"{state_key}_positions"].append(match.start())
+                resolved[1][f"{state_key}_positions"].extend(
+                    execution_positions
+                )
 
     return states, resolve, local_receiver_ids
 
@@ -2274,59 +2365,104 @@ def _go_import_package_keys(code: str, module_path: str) -> dict[str, str]:
     return imports
 
 
-def _go_attributed_call_targets(
+def _go_router_call_surfaces(
     path: Path,
     text: str,
     service_root: Path,
     module_path: str,
-) -> set[tuple[str, str, int]]:
+) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
     code = _without_js_comments(text)
-    blocks = _go_function_blocks(code, _go_chi_aliases(code))
-    dead_ranges = _go_dead_ranges(code)
+    _, resolve_receiver, blocks, dead_ranges = _go_receiver_state(
+        code,
+        _go_chi_aliases(code),
+    )
     package_key = path.parent.relative_to(service_root).as_posix() or "."
     import_packages = _go_import_package_keys(code, module_path)
-    targets: set[tuple[str, str, int]] = set()
-    for middleware in GO_ATTRIBUTION_PATTERN.finditer(code):
-        if not _outside_js_string(code, middleware.start()) or any(
-            start <= middleware.start() < end for start, end in dead_ranges
+    relative_path = path.relative_to(service_root).as_posix()
+    declaration_name_positions = {
+        match.start(1)
+        for match in re.finditer(
+            r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(",
+            code,
+        )
+        if _outside_js_string(code, match.start())
+    }
+    surfaces: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    call_pattern = re.compile(
+        r"(?<![\w.])((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(\()"
+    )
+    for call in call_pattern.finditer(code):
+        if (
+            call.start(1) in declaration_name_positions
+            or not _outside_js_string(code, call.start())
+            or any(start <= call.start() < end for start, end in dead_ranges)
         ):
             continue
         containing = [
-            block for block in blocks if block[0] <= middleware.start() < block[1]
+            block for block in blocks if block[0] <= call.start() < block[1]
         ]
         if not containing:
             continue
-        block = min(containing, key=lambda item: item[1] - item[0])
-        receiver = middleware.group(1)
-        call_pattern = re.compile(
-            r"(?<![\w.])((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(\()"
-        )
-        for call in call_pattern.finditer(code, middleware.end(), block[1]):
-            if not _outside_js_string(code, call.start()):
+        target = call.group(1)
+        if "." in target:
+            alias, function_name = target.split(".", 1)
+            target_package = import_packages.get(alias)
+            if target_package is None:
                 continue
-            target = call.group(1)
-            if "." in target:
-                alias, function_name = target.split(".", 1)
-                target_package = import_packages.get(alias)
-                if target_package is None:
-                    continue
-            else:
-                target_package = package_key
-                function_name = target
-            arguments = _split_call_arguments(_balanced_call_text(code, call.start(2)))
-            targets.update(
-                (target_package, function_name, position)
-                for position, argument in enumerate(arguments)
-                if argument == receiver
+        else:
+            target_package = package_key
+            function_name = target
+        arguments = _split_call_arguments(
+            _balanced_call_text(code, call.start(2))
+        )
+        for position, argument in enumerate(arguments):
+            receiver = (
+                resolve_receiver(argument, call.start())
+                if re.fullmatch(r"[A-Za-z_]\w*", argument)
+                else None
             )
-    return targets
+            identity = (
+                f"{relative_path}:{receiver[0]}"
+                if receiver is not None
+                else f"{relative_path}:unresolved"
+            )
+            state = receiver[1] if receiver is not None else {}
+            surface = {
+                "receiver": f"{identity}:call:{call.start()}",
+                "attribution": _go_middleware_enabled(
+                    state,
+                    "attribution",
+                    call.start(),
+                ),
+                "auth": _go_middleware_enabled(
+                    state,
+                    "auth",
+                    call.start(),
+                ),
+            }
+            surfaces.setdefault(
+                (target_package, function_name, position),
+                [],
+            ).append(surface)
+    return surfaces
+
+
+def _go_middleware_enabled(
+    metadata: dict[str, Any],
+    state_key: str,
+    position: int,
+) -> bool:
+    return any(
+        registration <= position
+        for registration in metadata.get(f"{state_key}_positions", [])
+    )
 
 
 def _go_receiver_state(
     code: str,
     chi_aliases: set[str],
 ) -> tuple[
-    dict[str, dict[str, bool]],
+    dict[str, dict[str, Any]],
     Any,
     list[tuple[int, int, str, dict[str, int]]],
     list[tuple[int, int]],
@@ -2335,7 +2471,7 @@ def _go_receiver_state(
     dead_ranges = _go_dead_ranges(code)
     brace_scopes = list(_js_brace_ranges(code).values())
     module_scope = (0, len(code) + 1)
-    states: dict[str, dict[str, bool]] = {}
+    states: dict[str, dict[str, Any]] = {}
     bindings: dict[str, list[tuple[tuple[int, int], int, str | None]]] = {}
 
     def is_dead(position: int) -> bool:
@@ -2357,7 +2493,10 @@ def _go_receiver_state(
         position: int,
         identity: str,
     ) -> None:
-        states[identity] = {"attribution": False, "auth": False}
+        states[identity] = {
+            "attribution_positions": [],
+            "auth_positions": [],
+        }
         bindings.setdefault(name, []).append((scope, position, identity))
 
     for start, end, function_name, parameters in function_blocks:
@@ -2431,7 +2570,7 @@ def _go_receiver_state(
             (containing_scope(match.start()), match.start(), None)
         )
 
-    def resolve(name: str, position: int) -> tuple[str, dict[str, bool]] | None:
+    def resolve(name: str, position: int) -> tuple[str, dict[str, Any]] | None:
         if is_dead(position):
             return None
         candidate_scopes = sorted(
@@ -2470,7 +2609,7 @@ def _go_receiver_state(
                 continue
             receiver = resolve(match.group(1), match.start())
             if receiver is not None:
-                receiver[1][state_key] = True
+                receiver[1][f"{state_key}_positions"].append(match.start())
 
     return states, resolve, function_blocks, dead_ranges
 
@@ -2649,8 +2788,13 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
             service_path, framework, method,
             _prefixed_raw_path(route_prefix, raw_path.strip()),
             _location(repo, path, number),
-            "global" if receiver_state["auth"] else "unknown", receiver_identity,
-            receiver_state["attribution"],
+            (
+                "global"
+                if _go_middleware_enabled(receiver_state, "auth", position)
+                else "unknown"
+            ),
+            receiver_identity,
+            _go_middleware_enabled(receiver_state, "attribution", position),
         )
         containing_function = [
             block for block in function_blocks
@@ -2666,7 +2810,9 @@ def _scan_go(repo: Path, service_path: str, path: Path, text: str) -> tuple[list
             route["_go_function"] = function_block[2]
             route["_go_router_parameter"] = function_block[3][receiver_name]
         routes.append(route)
-    return routes, any(state["attribution"] for state in states.values()), mounts
+    return routes, any(
+        state["attribution_positions"] for state in states.values()
+    ), mounts
 
 
 IDENTITY_VERIFIER_PATTERN = re.compile(
@@ -4031,16 +4177,21 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             else "",
         )
         go_module_path = module_match.group(1) if module_match else ""
-        go_attributed_call_targets = set().union(*(
-            _go_attributed_call_targets(
+        go_call_surfaces: dict[
+            tuple[str, str, int],
+            list[dict[str, Any]],
+        ] = {}
+        for path in files:
+            if path.suffix != ".go":
+                continue
+            discovered_surfaces = _go_router_call_surfaces(
                 path,
                 path.read_text(encoding="utf-8", errors="replace"),
                 service_root,
                 go_module_path,
             )
-            for path in files
-            if path.suffix == ".go"
-        ))
+            for target, surfaces in discovered_surfaces.items():
+                go_call_surfaces.setdefault(target, []).extend(surfaces)
         routes: list[dict[str, Any]] = []
         mounts: list[dict[str, Any]] = []
         middleware = False
@@ -4071,6 +4222,54 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
             routes.extend(detected)
             mounts.extend(detected_mounts)
             middleware = middleware or present
+        expanded_routes: list[dict[str, Any]] = []
+        for route in routes:
+            target = (
+                route.get("_go_package"),
+                route.get("_go_function"),
+                route.get("_go_router_parameter"),
+            )
+            call_surfaces = (
+                go_call_surfaces.get(target, [])
+                if route["framework"] == "chi"
+                and all(item is not None for item in target)
+                else []
+            )
+            if not call_surfaces:
+                expanded_routes.append(route)
+                continue
+            for surface in call_surfaces:
+                call_receiver = (
+                    f"{route.get('_receiver') or '<unattached>'}|"
+                    f"{surface['receiver']}"
+                )
+                expanded = {
+                    **route,
+                    "evidence": dict(route["evidence"]),
+                    "feature_proposal": dict(route["feature_proposal"]),
+                    "_receiver": call_receiver,
+                    "_middleware_covered": bool(
+                        route.get("_middleware_covered")
+                        or surface["attribution"]
+                    ),
+                }
+                if expanded["auth_scope"] == "unknown" and surface["auth"]:
+                    expanded["auth_scope"] = "global"
+                stable_path = (
+                    expanded["path_template"]
+                    if expanded["path_template"] is not None
+                    else f"dynamic:{route['route_id']}"
+                )
+                expanded["route_id"] = _route_id(
+                    service_path,
+                    expanded["framework"],
+                    expanded["method"],
+                    stable_path,
+                    expanded["evidence"],
+                    call_receiver,
+                )
+                expanded_routes.append(expanded)
+        routes = expanded_routes
         resolver, findings, async_hops = _resolver_and_async(
             repo,
             files,
@@ -4144,16 +4343,6 @@ def discover(repo: Path, generated_at: str, service_selector: str | None = None)
                 item["evidence"]["line"],
             ),
         ):
-            if (
-                route["framework"] == "chi"
-                and not route.get("_middleware_covered")
-                and (
-                    route.get("_go_package"),
-                    route.get("_go_function"),
-                    route.get("_go_router_parameter"),
-                ) in go_attributed_call_targets
-            ):
-                route["_middleware_covered"] = True
             key = (
                 route["framework"],
                 route["method"],

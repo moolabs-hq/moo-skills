@@ -233,7 +233,7 @@ class DiscoveryContractTests(unittest.TestCase):
             ),
             "verified": (
                 "def consume_message(message):\n"
-                "    queue.consume(extract_thread_id(message))\n",
+                "    queue.consume(bind_thread_id(extract_thread_id(message)))\n",
                 True,
             ),
         }
@@ -334,6 +334,87 @@ class DiscoveryContractTests(unittest.TestCase):
             self.assertEqual(created.returncode, 2, created.stderr)
             self.assertIn("unsafe or unresolved", created.stderr)
             self.assertFalse(signoff.exists())
+
+    def test_worker_discarded_extraction_is_not_verified_or_signable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "celery\n",
+                encoding="utf-8",
+            )
+            (repo / "worker.py").write_text(
+                'consumer.subscribe("jobs", lambda message: '
+                "extract_thread_id(message.headers))\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            self.assertEqual(
+                service["async_hops"],
+                [
+                    {
+                        "kind": "subscribe",
+                        "propagation": "missing",
+                        "evidence": {"file": "worker.py", "line": 1},
+                    }
+                ],
+            )
+            self.assertIn(
+                "async_extraction_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(document["findings"]),
+                review_evidence="review://discarded-worker-extraction",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
+
+    def test_worker_extraction_must_feed_the_context_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "celery\n",
+                encoding="utf-8",
+            )
+            (repo / "worker.py").write_text(
+                'consumer.subscribe("jobs", lambda message: (\n'
+                "    extract_thread_id(message.headers),\n"
+                "    bind_thread_id(existing_thread_id),\n"
+                "))\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            service = self._load(output)["services"][0]
+            self.assertEqual(
+                service["async_hops"],
+                [
+                    {
+                        "kind": "subscribe",
+                        "propagation": "missing",
+                        "evidence": {"file": "worker.py", "line": 1},
+                    }
+                ],
+            )
+            self.assertIn(
+                "async_extraction_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
 
     def test_schema_restricts_not_required_resolvers_to_worker_ingress(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2462,6 +2543,126 @@ class DiscoveryContractTests(unittest.TestCase):
             {finding["code"] for finding in service["findings"]},
         )
 
+    def test_js_middleware_installer_requires_statically_executed_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "server.js").write_text(
+                "const app = express();\n"
+                "app.use(authMiddleware);\n"
+                "function installLater() {\n"
+                "  app.use(AttributionMiddleware);\n"
+                "}\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            self.assertFalse(service["middleware_detected"])
+            self.assertEqual(
+                document["discovery_projection"],
+                {
+                    "routes_discovered": 1,
+                    "routes_statically_covered": 0,
+                    "routes_unknown": 1,
+                },
+            )
+            self.assertIn(
+                "middleware_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
+            service["resolver"] = {
+                "state": "proposed",
+                "identity_kind": "moolabs_uuid",
+                "expression": "req.auth.customerId",
+                "template": (
+                    "reject empty values and validate before binding "
+                    "attribution context"
+                ),
+                "evidence": {"file": "server.js", "line": 2},
+            }
+            output.write_text(
+                json.dumps(document, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(document["findings"]),
+                review_evidence="review://uncalled-js-installer",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
+
+    def test_directly_invoked_js_middleware_installer_is_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "server.js").write_text(
+                "const app = express();\n"
+                "function installNow() {\n"
+                "  app.use(AttributionMiddleware);\n"
+                "}\n"
+                "installNow();\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            self.assertTrue(service["middleware_detected"])
+            self.assertEqual(
+                document["discovery_projection"]["routes_statically_covered"],
+                1,
+            )
+
+    def test_dynamic_js_middleware_installer_call_is_not_execution_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "package.json").write_text(
+                '{"dependencies":{"express":"1"}}',
+                encoding="utf-8",
+            )
+            (repo / "server.js").write_text(
+                "const app = express();\n"
+                "function installLater() {\n"
+                "  app.use(AttributionMiddleware);\n"
+                "}\n"
+                "if (enabled) installLater();\n"
+                "app.get('/orders', handler);\n",
+                encoding="utf-8",
+            )
+            output = repo.parent / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            self.assertFalse(document["services"][0]["middleware_detected"])
+            self.assertEqual(
+                document["discovery_projection"]["routes_unknown"],
+                1,
+            )
+
     def test_middleware_name_lookalikes_remain_untrusted_and_unsignable(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -3620,6 +3821,88 @@ class DiscoveryContractTests(unittest.TestCase):
             )
             self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 1)
             self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_chi_reused_helper_preserves_call_site_coverage_and_blocks_signoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "go.mod").write_text(
+                "module example.test/go\n\n"
+                "require github.com/go-chi/chi/v5 v5.0.0\n",
+                encoding="utf-8",
+            )
+            (repo / "main.go").write_text(
+                "package main\n"
+                'import "github.com/go-chi/chi/v5"\n'
+                "func register(r chi.Router) {\n"
+                "  r.Use(AuthMiddleware)\n"
+                '  r.Get("/orders", handler)\n'
+                "}\n"
+                "func main() {\n"
+                "  public := chi.NewRouter()\n"
+                "  private := chi.NewRouter()\n"
+                "  register(public)\n"
+                "  private.Use(AttributionMiddleware)\n"
+                "  register(private)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            self.assertEqual(
+                [route["path_template"] for route in service["routes"]],
+                ["/orders", "/orders"],
+            )
+            self.assertEqual(
+                len({route["route_id"] for route in service["routes"]}),
+                2,
+            )
+            self.assertEqual(
+                {route["auth_scope"] for route in service["routes"]},
+                {"global"},
+            )
+            self.assertEqual(
+                document["discovery_projection"],
+                {
+                    "routes_discovered": 2,
+                    "routes_statically_covered": 1,
+                    "routes_unknown": 1,
+                },
+            )
+            self.assertIn(
+                "middleware_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
+            service["resolver"] = {
+                "state": "proposed",
+                "identity_kind": "moolabs_uuid",
+                "expression": "claims.customer_id",
+                "template": (
+                    "reject empty values and validate before binding "
+                    "attribution context"
+                ),
+                "evidence": {"file": "main.go", "line": 4},
+            }
+            output.write_text(
+                json.dumps(document, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(document["findings"]),
+                review_evidence="review://reused-chi-helper",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
 
     def test_imported_exported_express_receiver_preserves_route_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
