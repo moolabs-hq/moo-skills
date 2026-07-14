@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import hashlib
 import importlib.util
 import json
@@ -363,10 +364,13 @@ def _without_js_comments(text: str) -> str:
     return "".join(output)
 
 
-def _outside_js_string(text: str, position: int) -> bool:
+@functools.lru_cache(maxsize=8)
+def _outside_js_string_index(text: str) -> bytes:
+    outside = bytearray(len(text) + 1)
+    outside[0] = 1
     quote: str | None = None
     escaped = False
-    for character in text[:position]:
+    for index, character in enumerate(text):
         if escaped:
             escaped = False
         elif character == "\\":
@@ -376,7 +380,16 @@ def _outside_js_string(text: str, position: int) -> bool:
                 quote = None
         elif character in {"'", '"', "`"}:
             quote = character
-    return quote is None
+        outside[index + 1] = quote is None
+    return bytes(outside)
+
+
+def _outside_js_string(text: str, position: int) -> bool:
+    if position < 0:
+        position = max(0, len(text) + position)
+    else:
+        position = min(position, len(text))
+    return bool(_outside_js_string_index(text)[position])
 
 
 def _prefixed_raw_path(prefix: str | None, raw_path: str) -> str:

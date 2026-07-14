@@ -56,6 +56,22 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _legacy_outside_js_string(text: str, position: int) -> bool:
+    quote: str | None = None
+    escaped = False
+    for character in text[:position]:
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif quote:
+            if character == quote:
+                quote = None
+        elif character in {"'", '"', "`"}:
+            quote = character
+    return quote is None
+
+
 class DiscoveryContractTests(unittest.TestCase):
     maxDiff = None
 
@@ -3741,6 +3757,75 @@ class DiscoveryContractTests(unittest.TestCase):
             )
             self.assertEqual(result["discovery_projection"]["routes_statically_covered"], 0)
             self.assertEqual(result["discovery_projection"]["routes_unknown"], 1)
+
+    def test_large_go_call_surface_string_checks_have_linear_operation_bound(self):
+        lexical_source = (
+            "plain 'single \\\' quote' middle \"double \\\" quote\" "
+            "`template \\` quote` trailing \\"
+        )
+        for position in range(-len(lexical_source) - 2, len(lexical_source) + 3):
+            with self.subTest(position=position):
+                self.assertEqual(
+                    SCAN_MODULE._outside_js_string(lexical_source, position),
+                    _legacy_outside_js_string(lexical_source, position),
+                )
+
+        ordinary_calls = "\n".join(
+            f"  helper{index}(value{index})" for index in range(250)
+        )
+        string_calls = "\n".join(
+            f'  _ = "ghost{index}(router)"' for index in range(50)
+        )
+        source = (
+            "package main\n"
+            'import "github.com/go-chi/chi/v5"\n'
+            'func wire(r chi.Router) { r.Get("/orders", orders) }\n'
+            "func main() {\n"
+            "  router := chi.NewRouter()\n"
+            "  router.Use(AttributionMiddleware)\n"
+            f"{ordinary_calls}\n"
+            f"{string_calls}\n"
+            "  wire(router)\n"
+            "}\n"
+        )
+        predicate_code = SCAN_MODULE._outside_js_string.__code__
+        predicate_line_events = 0
+
+        def trace_predicate(frame, event, arg):
+            del arg
+            nonlocal predicate_line_events
+            if event == "line" and frame.f_code is predicate_code:
+                predicate_line_events += 1
+            return trace_predicate
+
+        with tempfile.TemporaryDirectory() as directory:
+            service_root = Path(directory)
+            path = service_root / "main.go"
+            path.write_text(source, encoding="utf-8")
+            sys.settrace(trace_predicate)
+            try:
+                surfaces = SCAN_MODULE._go_router_call_surfaces(
+                    path,
+                    source,
+                    service_root,
+                    "example.test/large",
+                )
+            finally:
+                sys.settrace(None)
+
+        self.assertEqual(len(surfaces), 251)
+        self.assertFalse(any(name.startswith("ghost") for _, name, _ in surfaces))
+        self.assertEqual(
+            surfaces[(".", "wire", 0)],
+            [
+                {
+                    "receiver": mock.ANY,
+                    "attribution": True,
+                    "auth": False,
+                }
+            ],
+        )
+        self.assertLessEqual(predicate_line_events, len(source) * 40)
 
     def test_unrelated_split_file_chi_router_stays_missing(self):
         with tempfile.TemporaryDirectory() as directory:

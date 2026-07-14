@@ -1,6 +1,6 @@
 {
   "name": "moo-skills",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow, testing blueprints, attribution middleware discovery, feature-flag patterns, reviewer/sparring-partner/architect personas, and the cost-billing suite.",
   "author": {
     "name": "Moolabs",
