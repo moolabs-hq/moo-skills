@@ -16,6 +16,7 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SUITE_ROOT="$(cd "$HERE/.." && pwd)"
+ATTRIBUTION_SKILL_ROOT="$(cd "$SUITE_ROOT/../attribution-middleware-discovery" && pwd)"
 
 FAIL=0
 PASS=0
@@ -42,10 +43,10 @@ echo ""
 
 # ─── SKILL.md frontmatter ──────────────────────────────────────────────
 echo "[1/8] SKILL.md frontmatter present (name + description)"
-for skill_dir in "$SUITE_ROOT"/*/; do
+for skill_dir in "$SUITE_ROOT"/*/ "$ATTRIBUTION_SKILL_ROOT"/; do
   name=$(basename "$skill_dir")
   case "$name" in
-    shared|examples|scripts|docs) continue ;;
+    shared|examples|scripts|docs|cloud-bill-cli) continue ;;
   esac
   skill_md="$skill_dir/SKILL.md"
   if [[ ! -f "$skill_md" ]]; then
@@ -79,7 +80,7 @@ while IFS= read -r -d '' yaml_file; do
     red "  FAIL  $rel"
     FAIL=$((FAIL + 1))
   fi
-done < <(find "$SUITE_ROOT" -name "*.yaml" -not -path "*/node_modules/*" -not -path "*/.git/*" -print0)
+done < <(find "$SUITE_ROOT" "$ATTRIBUTION_SKILL_ROOT" -name "*.yaml" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/.venv/*" -print0)
 echo ""
 
 # ─── Python scripts parse ──────────────────────────────────────────────
@@ -93,7 +94,7 @@ while IFS= read -r -d '' py_file; do
     red "  FAIL  $rel"
     FAIL=$((FAIL + 1))
   fi
-done < <(find "$SUITE_ROOT" -name "*.py" -not -path "*/__pycache__/*" -print0)
+done < <(find "$SUITE_ROOT" "$ATTRIBUTION_SKILL_ROOT" -name "*.py" -not -path "*/__pycache__/*" -not -path "*/.venv/*" -print0)
 echo ""
 
 # ─── install.sh syntax ─────────────────────────────────────────────────
@@ -117,6 +118,7 @@ for persona in finance product team-product engineering all; do
        --skip-codegraph \
        --skip-plugins \
        --no-bootstrap-cta \
+       --no-handoff-prompt \
        --no-prune \
        2>&1 | grep -q "would copy:"; then
     green "  PASS  persona=$persona"
@@ -146,6 +148,7 @@ else
          --skip-codegraph \
          --skip-plugins \
          --no-bootstrap-cta \
+         --no-handoff-prompt \
          --no-prune \
          2>&1 | grep -q "would copy:"; then
       green "  PASS  persona=$persona (/bin/bash)"
@@ -904,16 +907,39 @@ _found_tests=0
 while IFS= read -r -d '' test_file; do
   _found_tests=1
   rel="${test_file#$SUITE_ROOT/}"
-  if python3 "$test_file" >/dev/null 2>&1; then
+  if [[ "$rel" == "instrument/scripts/test_config_wire.py" ]] && command -v uv >/dev/null 2>&1; then
+    test_command=(uv run --with jinja2 --with pyyaml python "$test_file")
+  else
+    test_command=(python3 "$test_file")
+  fi
+  if "${test_command[@]}" >/dev/null 2>&1; then
     green "  PASS  $rel"
     PASS=$((PASS + 1))
   else
     red "  FAIL  $rel"
     FAIL=$((FAIL + 1))
   fi
-done < <(find "$SUITE_ROOT" -name "test_*.py" -not -path "*/__pycache__/*" -print0)
+done < <(find "$SUITE_ROOT" "$ATTRIBUTION_SKILL_ROOT" -name "test_*.py" \
+  -not -path "*/__pycache__/*" \
+  -not -path "*/.venv/*" \
+  -not -path "*/fixtures/*" \
+  -not -path "*/cloud-bill-cli/tests/*" \
+  -print0)
 if [[ $_found_tests -eq 0 ]]; then
   yellow "  SKIP  no test_*.py files found"
+fi
+
+cloud_bill_cli="$SUITE_ROOT/cloud-bill-cli"
+if [[ -d "$cloud_bill_cli/tests" ]] && command -v uv >/dev/null 2>&1; then
+  if (cd "$cloud_bill_cli" && uv run --isolated --no-project --with '.[dev]' python -m pytest -q) >/dev/null 2>&1; then
+    green "  PASS  cloud-bill-cli pytest project suite"
+    PASS=$((PASS + 1))
+  else
+    red "  FAIL  cloud-bill-cli pytest project suite"
+    FAIL=$((FAIL + 1))
+  fi
+elif [[ -d "$cloud_bill_cli/tests" ]]; then
+  yellow "  SKIP  cloud-bill-cli pytest project suite (uv not installed)"
 fi
 echo ""
 

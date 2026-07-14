@@ -1,7 +1,7 @@
 ---
 name: cost-billing-signoff
 description: >-
-  State-aware orchestrator for the three-role review workflow that runs AFTER /cost-billing-discovery produces inventories + HTML views. Reads .moolabs/inventory/reviews/ to figure out which signoff is next, dispatches to the right persona flow (CFO Stage 1, PM Stage 2 per-product, CFO Stage 2b per-product, Engineer Stage 3 per-service, PM Stage 3b per-service, holistic Skill R). For each stage: opens the right HTML projection, asks the persona ONE question at a time, invokes Skill R adversarially, persona accepts/risk-accepts/rejects R findings, writes the signed YAML. Handles multi-product + multi-service fan-out. Refuses to run if inventories absent; refuses to advance past blocked R verdicts. Triggers on "signoff", "review the inventory", "approve inventories", "three-role review", "stage signoff", "PM review", "CFO review", "engineer review".
+  State-aware orchestrator for the three-role review workflow that runs AFTER /cost-billing-discovery produces inventories + HTML views. Reads .moolabs/inventory/reviews/ to figure out which signoff is next, dispatches to the right persona flow (CFO Stage 1, PM Stage 2 per-product, CFO Stage 2b per-product, Engineer Stage 3 per-service, PM Stage 3b per-service, holistic Skill R). For each stage: opens the right HTML projection, asks the persona ONE question at a time, invokes Skill R adversarially, persona accepts/risk-accepts/rejects R findings, writes the signed YAML. Handles multi-product + multi-service fan-out and engineer-owned attribution-map artifact approval. Refuses to advance past blocked R verdicts. Triggers on "signoff", "review the inventory", "approve inventories", "three-role review", "stage signoff", "PM review", "CFO review", "engineer review", "approve instrumentation map", or "attribution map signoff".
 license: MIT
 metadata:
   author: Moolabs
@@ -14,9 +14,11 @@ metadata:
     - .moolabs/inventory/usage-events-inventory.yaml
     - .moolabs/inventory/output-input-map.yaml
     - .moolabs/inventory/reviews/{cfo,pm,engineer}-view.html
+    - .moolabs/attribution/instrumentation-map.yaml
   produces:
     - .moolabs/inventory/reviews/{cfo-stage1,pm-stage2-<product>,cfo-stage2b-<product>,engineer-stage3-<service>,pm-stage3b-<service>}-signoff.yaml
     - .moolabs/inventory/reviews/holistic-r-review.md (via /cost-billing-adversarial-review)
+    - .moolabs/attribution/instrumentation-map-signoff.yaml
 ---
 
 # /cost-billing-signoff — Three-role review orchestrator (state-aware)
@@ -34,6 +36,7 @@ You are **state-aware**: you read what's already signed off in `.moolabs/invento
 /cost-billing-signoff --persona team-engineer --service <your-service>
 /cost-billing-signoff --status                     # just print current state machine — no actions
 /cost-billing-signoff --reset cfo-stage1           # invalidate a signoff (forces re-review)
+/cost-billing-signoff --attribution-map             # engineer-owned artifact approval
 ```
 
 Natural triggers:
@@ -44,6 +47,7 @@ Stage 1 signoff
 PM review of inventory for product acute
 Engineer review for service <your-service>
 What stage am I in?
+Approve the attribution instrumentation map
 ```
 
 ## Read first (shared/)
@@ -66,6 +70,11 @@ Refuse with a precise message if:
 - `.moolabs/inventory/reviews/{cfo,pm,engineer}-view.html` are missing → "Re-run `/cost-billing-discovery` — Phase 5 outputs incomplete."
 - The persona's chain-stage signed YAML is missing (CFO needs `01-finance.signed.yaml`, PM needs `02-cpo.signed.yaml`, etc.) → "Bootstrap chain not complete; run `/cost-billing-bootstrap-<stage>` first."
 - For multi-product: `02-cpo.signed.yaml` has no `products: []` block → "CPO must declare products before per-product PM signoffs are possible."
+
+For `--attribution-map`, use a separate precondition: require
+`.moolabs/attribution/instrumentation-map.yaml` and a completed independent
+review. Do not require CFO or PM inventory stages; this artifact is owned by the
+team engineer.
 
 ## The state machine
 
@@ -90,6 +99,61 @@ Read all files matching `.moolabs/inventory/reviews/*-signoff*.yaml` and `.moola
 ```
 
 `--persona` filter narrows which actions you'll execute (a CFO machine won't try to do PM signoffs).
+
+### Attribution-map artifact branch
+
+This branch is independent of the inventory state machine and gates attribution
+middleware rollout. The engineer must inspect unresolved routes, rejected raw
+identity headers, unknown auth scopes, async propagation gaps, and projected
+coverage before approval. Run Skill R against the map using phase
+`post-signoff-engineer-attribution-map`; a blocked verdict stops approval.
+
+After review, bind the signoff to the exact map bytes:
+
+```bash
+python3 scripts/attribution_map_signoff.py create \
+  .moolabs/attribution/instrumentation-map.yaml \
+  --repo . \
+  --output .moolabs/attribution/instrumentation-map-signoff.yaml \
+  --operator "<engineer name>" \
+  --codegen-model "<model that produced the implementation>" \
+  --reviewer-model "<independent reviewer>" \
+  --review-evidence "<review id or URL>" \
+  --review-verdict clean \
+  --findings-resolved <count> \
+  --findings-rejected-as-false-positive <count>
+```
+
+Use `clean-with-accepted-risks` only with one `--accepted-risk` per explicit
+rationale. The helper derives the accepted and total counts; resolved and
+false-positive counts are required explicit attestations, including when zero.
+Before enabling drift `block` mode or rollout, run the helper's
+`verify` command against the same repository and current map path:
+
+```bash
+python3 scripts/attribution_map_signoff.py verify \
+  .moolabs/attribution/instrumentation-map.yaml \
+  .moolabs/attribution/instrumentation-map-signoff.yaml \
+  --repo .
+```
+
+Create and verify derive the artifact path relative to `--repo`; callers cannot
+assert a label or source commit. Both commands require the map's
+`source_revision` to be `state: clean`, bind its full `git_commit`, and match
+the scanner's live source revision: the same commit must be the current `HEAD`
+with clean relevant source. The scanner's normal exclusions keep tests,
+generated output, vendored code, and other ignored paths from blocking signoff.
+Dirty relevant source, a later commit, and unversioned repositories cannot
+receive block approval. The helper also rejects a missing or blocked review,
+identical codegen and reviewer models, review evidence that is not a
+`review://` URI, HTTP(S) URL, or structured uppercase ID, and any mismatch
+between the accepted-risk list and review counts. Any map-byte, path, or
+source-revision change invalidates the signoff and requires a new review; never
+update the binding in place without re-review.
+
+The helper is stdlib-only and writes JSON-form YAML, so it runs in a clean
+Python environment without installing PyYAML. Do not manually reformat its
+output before verification.
 
 ## Per-stage workflow (same shape, different inputs)
 
@@ -235,6 +299,8 @@ cost-billing suite's documented handoff for iterative code revision.
 - **Never** delete a signoff file (use `--reset` for explicit invalidation; logs the reset).
 - **Never** edit the inventory directly — only WRITE signoff files. Inventory edits come from re-running `/cost-billing-discovery` with new context, OR from re-running the bootstrap chain stage that owns the contradiction.
 - **Never** write the holistic-r-review.md — that's `/cost-billing-adversarial-review --phase holistic-pre-codemod`'s job. You just call that skill and wait.
+- **Never** approve an instrumentation map from a stale digest or treat projected discovery coverage as runtime/financial coverage.
+- **Never** let the code-generation model approve its own map; preserve a distinct reviewer model and review evidence ID/URL.
 
 ## Reference files
 
@@ -248,3 +314,4 @@ cost-billing suite's documented handoff for iterative code revision.
 
 - `assets/state-machine.yaml` — declarative state-machine config.
 - `assets/signoff.schema.yaml` — JSON-Schema for the signed YAMLs.
+- `scripts/attribution_map_signoff.py` — exact-byte artifact signoff helper.

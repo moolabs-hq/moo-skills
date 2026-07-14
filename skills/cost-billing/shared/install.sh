@@ -100,6 +100,7 @@ SKILLS_ENGINEERING=(
   cost-billing-bootstrap-team-engineer    # Stage 4: repo + telemetry + MCP + SDK key (PER SERVICE)
   cost-billing-signoff                    # NEW: Engineer Stage 3 signoff (per service)
   cost-billing-discovery                  # post-chain: produce inventories
+  attribution-middleware-discovery        # attribution ingress + propagation map
   cost-billing-cloud-bill                 # post-chain: wire cloud-bill exports
   cost-billing-instrument                 # post-chain: codemod (--service per engineer)
   cost-billing-drift-lint                 # post-chain: CI drift
@@ -115,6 +116,7 @@ SKILLS_ALL=(
   cost-billing-bootstrap-team-engineer
   cost-billing-signoff                    # NEW
   cost-billing-discovery
+  attribution-middleware-discovery
   cost-billing-cloud-bill
   cost-billing-instrument
   cost-billing-drift-lint
@@ -154,6 +156,66 @@ select_skills_for_persona() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITE_SRC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_PLUGIN_MANIFEST="$SUITE_SRC_DIR/../../.claude-plugin/plugin.json"
+MIN_PYTHON_VERSION="3.11"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+require_supported_python() {
+  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "ERROR: Python ${MIN_PYTHON_VERSION}+ is required to install and run the cost-billing discovery skills; '$PYTHON_BIN' was not found." >&2
+    exit 1
+  fi
+  if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+    echo "ERROR: Python ${MIN_PYTHON_VERSION}+ is required to install and run the cost-billing discovery skills. Set PYTHON_BIN to a supported interpreter." >&2
+    exit 1
+  fi
+}
+
+root_plugin_version() {
+  local version
+  if [[ ! -f "$ROOT_PLUGIN_MANIFEST" ]]; then
+    echo "ERROR: root plugin manifest not found at $ROOT_PLUGIN_MANIFEST" >&2
+    exit 1
+  fi
+  version="$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)"[[:space:]]*,?[[:space:]]*$/\1/p' "$ROOT_PLUGIN_MANIFEST")"
+  if [[ -z "$version" ]]; then
+    echo "ERROR: could not read plugin version from $ROOT_PLUGIN_MANIFEST" >&2
+    exit 1
+  fi
+  printf '%s\n' "$version"
+}
+
+copy_skill_tree() {
+  local source="$1"
+  local destination="$2"
+
+  rm -rf "$destination"
+  mkdir -p "$destination"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a \
+      --exclude='.pytest_cache' --exclude='__pycache__' \
+      --exclude='.ruff_cache'   --exclude='*.pyc' \
+      --exclude='.git'          --exclude='.DS_Store' \
+      "$source/" "$destination/"
+    return
+  fi
+
+  # macOS ships Bash 3.2 and may not have rsync; cp/find keeps the archive portable.
+  cp -R "$source"/. "$destination"/
+  find "$destination" -type d \( -name '.pytest_cache' -o -name '__pycache__' -o -name '.ruff_cache' -o -name '.git' \) -prune -exec rm -rf {} \;
+  find "$destination" -type f \( -name '*.pyc' -o -name '.DS_Store' \) -exec rm -f {} \;
+}
+
+skill_source_dir() {
+  case "$1" in
+    attribution-middleware-discovery)
+      (cd "$SUITE_SRC_DIR/../attribution-middleware-discovery" && pwd)
+      ;;
+    *)
+      printf '%s\n' "$SUITE_SRC_DIR/${1#cost-billing-}"
+      ;;
+  esac
+}
 
 # Capture original argv before parsing so we can forward to per-platform
 # self-recursion in the multi-target install path below.
@@ -1005,7 +1067,8 @@ package_skills() {
     # INTO each chain-stage zip below as references/chain-handoff.md.
     if [[ "$skill" == "cost-billing-shared" ]]; then continue; fi
 
-    local src="$SUITE_SRC_DIR/${skill#cost-billing-}"
+    local src
+    src="$(skill_source_dir "$skill")"
     if [[ ! -d "$src" ]]; then
       echo "  SKIP $skill (not found)" >&2
       continue
@@ -1019,25 +1082,34 @@ package_skills() {
     local stage="$dist/_staging/$skill"
     rm -rf "$stage"
     mkdir -p "$stage"
-    cp -R "$src"/. "$stage"/
+
+    local payload_dir="$stage"
+    cp -R "$src"/. "$payload_dir"/
+    # The source install reuses the sibling discovery skill. A standalone ZIP
+    # instead carries only the scanner module as a private runtime dependency,
+    # preserving the required flat SKILL.md archive root.
+    if [[ "$skill" == "attribution-middleware-discovery" ]]; then
+      mkdir -p "$payload_dir/scripts/vendor"
+      cp "$(skill_source_dir cost-billing-discovery)/scripts/repo_scan.py" \
+        "$payload_dir/scripts/vendor/repo_scan.py"
+    fi
 
     # Bundle shared docs into every skill's references/ so the upload is self-contained
     # (cross-skill `../cost-billing-shared/*.md` references would break in the cloud sandbox).
-    mkdir -p "$stage/references"
+    mkdir -p "$payload_dir/references"
     if [[ -f "$shared_principles" ]]; then
-      cp "$shared_principles" "$stage/references/operating-principles.md"
+      cp "$shared_principles" "$payload_dir/references/operating-principles.md"
     fi
     # chain-handoff.md only into the 4 chain-stage skills (the others don't reference it).
     case "$skill" in
       cost-billing-bootstrap-finance|cost-billing-bootstrap-cpo|cost-billing-bootstrap-team-product|cost-billing-bootstrap-team-engineer)
         if [[ -f "$shared_handoff" ]]; then
-          cp "$shared_handoff" "$stage/references/chain-handoff.md"
+          cp "$shared_handoff" "$payload_dir/references/chain-handoff.md"
         fi
         ;;
     esac
 
-    # Zip with FLAT root (no top-level dir wrapper) — Claude's upload looks for SKILL.md
-    # at the root of the archive.
+    # Zip with a flat root so SKILL.md remains directly uploadable.
     local zip_path="$dist/${skill}.zip"
     ( cd "$stage" && zip -rq "$zip_path" . \
         -x ".DS_Store" -x "*/.DS_Store" \
@@ -1173,32 +1245,37 @@ build_plugin_zip() {
 
   local shared_handoff="$SUITE_SRC_DIR/shared/chain-handoff.md"
   local shared_principles="$SUITE_SRC_DIR/shared/operating-principles.md"
+  local plugin_version
+  plugin_version="$(root_plugin_version)"
   local skills_added=()
 
   for skill in "${SUITE_SKILLS[@]}"; do
     [[ "$skill" == "cost-billing-shared" ]] && continue
     local skill_name="${skill#cost-billing-}"
-    local src="$SUITE_SRC_DIR/$skill_name"
+    local src
+    src="$(skill_source_dir "$skill")"
     if [[ ! -d "$src" || ! -f "$src/SKILL.md" ]]; then
       echo "  SKIP $skill" >&2
       continue
     fi
 
     # Claude app expects skills under skills/ subdirectory (mirrors repo layout).
-    rsync -a \
-      --exclude='.pytest_cache' --exclude='__pycache__' \
-      --exclude='.ruff_cache'   --exclude='*.pyc' \
-      --exclude='.git'          --exclude='.DS_Store' \
-      "$src/" "$staging/skills/$skill_name/"
+    local payload_dir="$staging/skills/$skill_name"
+    copy_skill_tree "$src" "$payload_dir"
+    if [[ "$skill" == "attribution-middleware-discovery" ]]; then
+      mkdir -p "$payload_dir/scripts/vendor"
+      cp "$(skill_source_dir cost-billing-discovery)/scripts/repo_scan.py" \
+        "$payload_dir/scripts/vendor/repo_scan.py"
+    fi
 
     # Bundle shared docs so the plugin is self-contained (same as --package).
-    mkdir -p "$staging/skills/$skill_name/references"
+    mkdir -p "$payload_dir/references"
     [[ -f "$shared_principles" ]] && \
-      cp "$shared_principles" "$staging/skills/$skill_name/references/operating-principles.md"
+      cp "$shared_principles" "$payload_dir/references/operating-principles.md"
     case "$skill" in
       cost-billing-bootstrap-finance|cost-billing-bootstrap-cpo|cost-billing-bootstrap-team-product|cost-billing-bootstrap-team-engineer)
         [[ -f "$shared_handoff" ]] && \
-          cp "$shared_handoff" "$staging/skills/$skill_name/references/chain-handoff.md" ;;
+          cp "$shared_handoff" "$payload_dir/references/chain-handoff.md" ;;
     esac
 
     skills_added+=("./skills/$skill_name")
@@ -1224,7 +1301,7 @@ build_plugin_zip() {
   cat > "$staging/.claude-plugin/plugin.json" <<EOF
 {
   "name": "cost-billing",
-  "version": "1.0.0",
+  "version": "$plugin_version",
   "description": "Cost-billing suite — four-stage chain: finance bootstrap → CPO → team-product → engineering. Covers cloud cost attribution, tagging governance, spend discovery, and signed handoff between chain personas.",
   "author": {
     "name": "Moolabs",
@@ -1265,11 +1342,13 @@ INSTRUCTIONS
 
 # Dispatch BEFORE the local-install path so --package/--plugin-zip short-circuit early.
 if [[ $PACKAGE_MODE -eq 1 ]]; then
+  require_supported_python
   package_skills
   exit 0
 fi
 
 if [[ $PLUGIN_ZIP_MODE -eq 1 ]]; then
+  require_supported_python
   build_plugin_zip
   exit 0
 fi
@@ -1559,7 +1638,7 @@ fi
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[dry-run] would create: $DEST_DIR"
   for skill in "${SUITE_SKILLS[@]}"; do
-    echo "[dry-run] would copy:   $SUITE_SRC_DIR/${skill#cost-billing-}  →  $DEST_DIR/$skill"
+    echo "[dry-run] would copy:   $(skill_source_dir "$skill")  →  $DEST_DIR/$skill"
   done
   if [[ "$PERSONA" == "engineering" || "$PERSONA" == "all" ]] && [[ $SKIP_CODEGRAPH -eq 0 ]]; then
     echo "[dry-run] would install codegraph + run codegraph init -i in ${REPO:-<no-repo>}"
@@ -1598,14 +1677,16 @@ if [[ $UNINSTALL -eq 1 ]]; then
   exit 0
 fi
 
-# Auto-prune stale cost-billing-* skills NOT in this persona's install list.
+require_supported_python
+
+# Auto-prune stale suite skills NOT in this persona's install list.
 # Catches: deprecated v0.1-0.2 cost-billing-bootstrap; legacy cost-billing-reconcile;
 # anything from a prior persona install (e.g., user switched from 'all' to 'finance').
 # Opt out via --no-prune.
 mkdir -p "$DEST_DIR"
 if [[ $NO_PRUNE -eq 0 ]]; then
   pruned_count=0
-  for existing in "$DEST_DIR"/cost-billing-*; do
+  for existing in "$DEST_DIR"/cost-billing-* "$DEST_DIR"/attribution-middleware-discovery; do
     [[ -d "$existing" ]] || continue
     name="$(basename "$existing")"
     in_list=0
@@ -1628,7 +1709,7 @@ fi
 
 # Copy skills
 for skill in "${SUITE_SKILLS[@]}"; do
-  src="$SUITE_SRC_DIR/${skill#cost-billing-}"
+  src="$(skill_source_dir "$skill")"
   dest="$DEST_DIR/$skill"
   if [[ ! -d "$src" ]]; then
     echo "  SKIP $skill (not found at $src)" >&2
@@ -1690,6 +1771,8 @@ for skill in "${SUITE_SKILLS[@]}"; do
       echo "  /cost-billing-bootstrap                — DEPRECATED (prints redirect to chain stages)" ;;
     cost-billing-discovery)
       echo "  /cost-billing-discovery                — Skill A: scan repo, produce inventories (post-chain)" ;;
+    attribution-middleware-discovery)
+      echo "  /attribution-middleware-discovery      — map ingress, identity resolvers, and async propagation" ;;
     cost-billing-cloud-bill)
       echo "  /cost-billing-cloud-bill               — Skill B: wire AWS / GCP / Azure exports (post-chain)" ;;
     cost-billing-instrument)
@@ -2140,6 +2223,7 @@ PRECONDITION: you should have all three upstream signed docs:
 
 5. AFTER your stage signs off, the downstream pipeline unblocks:
      /cost-billing-discovery <repo>                  # 3 inventories
+     /attribution-middleware-discovery --repo <repo> # attribution instrumentation map
      /cost-billing-cloud-bill --cloud aws|gcp|azure   # if wiring cloud
      /cost-billing-adversarial-review --phase holistic-pre-codemod
      /cost-billing-instrument <repo>                  # codemod
@@ -2176,10 +2260,11 @@ Run the chain in order. Each stage's output becomes the next stage's input.
 POST-CHAIN (downstream pipeline):
   5. /cost-billing-cloud-bill --cloud aws|gcp|azure   (if cloud-bill needed)
   6. /cost-billing-discovery <repo>                    (produce inventories)
-  7. /cost-billing-adversarial-review --phase holistic-pre-codemod
-  8. /cost-billing-instrument <repo>                   (codemod)
-  9. /cost-billing-adversarial-review --phase post-codemod
- 10. Wire /cost-billing-drift-lint to CI
+  7. /attribution-middleware-discovery --repo <repo>   (ingress + propagation map)
+  8. /cost-billing-adversarial-review --phase holistic-pre-codemod
+  9. /cost-billing-instrument <repo>                   (codemod)
+ 10. /cost-billing-adversarial-review --phase post-codemod
+ 11. Wire /cost-billing-drift-lint to CI
 
 (Skill C — attribution validation harness — is Moolabs-internal and NOT
 in this customer-portable suite.)

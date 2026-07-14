@@ -181,3 +181,24 @@ persona_stage_table:
   any:
     stages: [holistic-pre-codemod]
     notes: "Holistic R gate is invoked by any persona; typically the team-engineer about to run the codemod."
+
+# Independent engineering artifact approvals. These do not fabricate finance
+# or product review stages and do not alter the inventory-signoff chain above.
+artifact_branches:
+  attribution_instrumentation_map:
+    owner: team-engineer
+    stage: engineer-attribution-map
+    input: .moolabs/attribution/instrumentation-map.yaml
+    output: .moolabs/attribution/instrumentation-map-signoff.yaml
+    approval_requires:
+      - sha256
+      - exact_repo_relative_path
+      - clean_map_source_revision
+      - existing_source_commit
+      - independent_review
+      - codegen_model
+      - review_evidence
+      - explicit_accepted_risks
+    blocks:
+      - attribution-middleware-rollout
+      - attribution-drift-enforcement-block

@@ -1,0 +1,1 @@
+r.Get("/vendor", handler)

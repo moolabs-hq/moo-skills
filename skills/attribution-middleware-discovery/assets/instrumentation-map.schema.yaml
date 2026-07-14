@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moolabs.com/schemas/instrumentation-map/1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scanner_version", "generated_at", "source_revision", "source_fingerprint", "discovery_projection", "services", "findings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "scanner_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "generated_at": {"type": "string", "minLength": 1},
+    "source_revision": {"$ref": "#/$defs/sourceRevision"},
+    "source_fingerprint": {"$ref": "#/$defs/sourceFingerprint"},
+    "discovery_projection": {"$ref": "#/$defs/projection"},
+    "services": {"type": "array", "items": {"$ref": "#/$defs/service"}},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "sourceRevision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "git_commit"],
+          "properties": {
+            "state": {"const": "clean"},
+            "git_commit": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "git_commit"],
+          "properties": {
+            "state": {"enum": ["dirty", "unversioned"]},
+            "git_commit": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "sourceFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": {"const": "sha256"},
+        "value": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routes_discovered", "routes_statically_covered", "routes_unknown"],
+      "properties": {
+        "routes_discovered": {"type": "integer", "minimum": 0},
+        "routes_statically_covered": {"type": "integer", "minimum": 0},
+        "routes_unknown": {"type": "integer", "minimum": 0}
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "line"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "evidence"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["info", "warning", "high"]},
+        "message": {"type": "string", "minLength": 1},
+        "evidence": {"oneOf": [{"$ref": "#/$defs/location"}, {"type": "null"}]},
+        "service_path": {"type": "string"}
+      }
+    },
+    "featureProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "confidence", "requires_engineer_signoff"],
+      "properties": {
+        "slug": {"type": "string", "minLength": 1},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "requires_engineer_signoff": {"const": true}
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "framework", "method", "path_template", "confidence", "auth_scope", "evidence", "feature_proposal"],
+      "properties": {
+        "route_id": {"type": "string", "minLength": 1},
+        "framework": {"type": "string", "minLength": 1},
+        "method": {"type": ["string", "null"], "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", null]},
+        "path_template": {"type": ["string", "null"]},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "auth_scope": {"enum": ["global", "router", "handler", "unknown"]},
+        "evidence": {"$ref": "#/$defs/location"},
+        "feature_proposal": {"$ref": "#/$defs/featureProposal"}
+      }
+    },
+    "mount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["framework", "target", "prefix", "confidence", "evidence"],
+      "properties": {
+        "framework": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "prefix": {"type": ["string", "null"]},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "evidence": {"$ref": "#/$defs/location"}
+      }
+    },
+    "resolver": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "proposed"},
+            "identity_kind": {"enum": ["moolabs_uuid", "external_key_crosswalk"]},
+            "expression": {"type": "string", "minLength": 1},
+            "template": {"type": "string", "minLength": 1},
+            "evidence": {"$ref": "#/$defs/location"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "unresolved"},
+            "identity_kind": {"const": null},
+            "expression": {"const": null},
+            "template": {"const": null},
+            "evidence": {"const": null}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "identity_kind", "expression", "template", "evidence"],
+          "properties": {
+            "state": {"const": "not-required"},
+            "identity_kind": {"const": null},
+            "expression": {"const": null},
+            "template": {"const": null},
+            "evidence": {"const": null}
+          }
+        }
+      ]
+    },
+    "asyncHop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "propagation", "evidence"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "propagation": {"enum": ["verified", "missing", "unknown"]},
+        "evidence": {"$ref": "#/$defs/location"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_path", "frameworks", "ingress_state", "middleware_detected", "routes", "mounts", "resolver", "async_hops", "findings"],
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": ["ingress_state"],
+            "properties": {
+              "ingress_state": {"const": "no-middleware-inherits-thread-id"}
+            }
+          },
+          "then": {
+            "properties": {
+              "frameworks": {"const": []},
+              "middleware_detected": {"const": false},
+              "routes": {"const": []},
+              "mounts": {"const": []},
+              "resolver": {
+                "type": "object",
+                "properties": {"state": {"const": "not-required"}}
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "resolver": {
+                "type": "object",
+                "properties": {"state": {"enum": ["proposed", "unresolved"]}}
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "service_path": {"type": "string"},
+        "frameworks": {"type": "array", "items": {"type": "string"}},
+        "ingress_state": {"enum": ["http-ingress", "no-middleware-inherits-thread-id", "unknown"]},
+        "middleware_detected": {"type": "boolean"},
+        "routes": {"type": "array", "items": {"$ref": "#/$defs/route"}},
+        "mounts": {"type": "array", "items": {"$ref": "#/$defs/mount"}},
+        "resolver": {"$ref": "#/$defs/resolver"},
+        "async_hops": {"type": "array", "items": {"$ref": "#/$defs/asyncHop"}},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+      }
+    }
+  }
+}

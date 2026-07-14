@@ -19,6 +19,7 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 │   ├── backend-unit-testing/
 │   ├── backend-api-testing/
 │   ├── testing-qa-persona/
+│   ├── attribution-middleware-discovery/ # read-only ingress and propagation map
 │   ├── grooming-requirements/
 │   ├── grooming-task-breakdown/
 │   ├── grooming-contracts/
@@ -59,6 +60,10 @@ Each guide is packaged as a discoverable skill with YAML frontmatter, so the age
 - **backend-unit-testing** — pytest with mocking policy ("if you need >3 mocks, refactor").
 - **backend-api-testing** — pytest + httpx / FastAPI TestClient; BDD principles without Behave/Gherkin.
 - **testing-qa-persona** — QA-only mode that surfaces failures and fixes broken tests, never edits production code.
+
+### Attribution and cost discovery
+- **attribution-middleware-discovery** — read-only static inventory of supported HTTP ingress, trusted identity resolver candidates, feature proposals, and async propagation gaps. Its `instrumentation-map.yaml` is a discovery projection that requires independent engineering review and exact-artifact signoff.
+- **cost-billing suite** — staged finance, product, engineering, discovery, instrumentation, signoff, and drift workflows. The engineering/all installer includes attribution middleware discovery and its shared service scanner.
 
 ### Feature flags
 - **feature-flags-guide** — three correct patterns (component swap, prop variation, route-level swap), four anti-patterns, mandatory cleanup window, PR review checklist.
