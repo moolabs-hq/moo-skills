@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Internal Moolabs development skills — adversarial PR review, grooming workflow, testing blueprints, feature-flag patterns, and architect/reviewer personas.",
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "plugins": [
     {
       "name": "moo-skills",
       "source": "./",
       "description": "Adversarial PR review, grooming chain, testing blueprints, attribution middleware discovery, engineering personas, and the cost-billing suite.",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "author": {
         "name": "Moolabs",
         "email": "kritivasrocks@gmail.com"
