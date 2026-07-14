@@ -482,7 +482,15 @@ def _propagation_status(call_text: str, boundary_kind: str) -> str:
                     re.I,
                 )
             )
-        operations = nested_extractions
+        operations = [
+            operation
+            for operation in nested_extractions
+            if "threadid" in re.sub(
+                r"[^a-z0-9]",
+                "",
+                operation.casefold(),
+            )
+        ]
     has_thread_id = re.search(r"\bthread[_-]?id\b", code, re.I)
     operation_names_thread_id = any(
         "threadid" in re.sub(r"[^a-z0-9]", "", operation.casefold())
@@ -2158,19 +2166,34 @@ def _scan_js(
         effective_prefixes[receiver] = next(iter(values)) if len(values) == 1 else None
         return effective_prefixes[receiver]
     pattern = re.compile(
-        r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*\(\s*([^,\)]+)",
-        re.I | re.S,
+        r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*(\()",
+        re.I,
     )
     for match in pattern.finditer(code):
         if not _outside_js_string(code, match.start()):
+            continue
+        arguments = _split_call_arguments(
+            _balanced_call_text(code, match.start(3))
+        )
+        while arguments and not arguments[-1]:
+            arguments.pop()
+        if not arguments:
             continue
         resolved = resolve_receiver(match.group(1), match.start())
         if resolved is None:
             continue
         receiver, metadata = resolved
         line = code.count("\n", 0, match.start()) + 1
-        arguments = code[match.end():code.find(")", match.end())]
-        handler_auth = bool(re.search(r"\b(?:require[_-]?auth|authenticate\w*|verify(?:jwt|token)|withAuth)\b", arguments, re.I))
+        pre_handler_arguments = arguments[1:-1]
+        handler_auth = any(
+            re.search(
+                r"\b(?:require[_-]?auth|authenticate\w*|"
+                r"verify(?:jwt|token)|withAuth)\b",
+                _without_string_literals(argument),
+                re.I,
+            )
+            for argument in pre_handler_arguments
+        )
         scope = (
             "handler"
             if handler_auth
@@ -2181,7 +2204,7 @@ def _scan_js(
         routes.append(_route(
             service_path, metadata["framework"],
             match.group(2).upper(),
-            _prefixed_raw_path(effective_prefix(receiver), match.group(3).strip()),
+            _prefixed_raw_path(effective_prefix(receiver), arguments[0]),
             _location(repo, path, line), scope, receiver,
             _js_middleware_enabled(metadata, "attribution", match.start()),
         ))

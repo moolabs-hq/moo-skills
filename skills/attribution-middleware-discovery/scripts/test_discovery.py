@@ -416,6 +416,54 @@ class DiscoveryContractTests(unittest.TestCase):
                 {finding["code"] for finding in service["findings"]},
             )
 
+    def test_worker_non_thread_extraction_cannot_borrow_thread_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "requirements.txt").write_text(
+                "celery\n",
+                encoding="utf-8",
+            )
+            (repo / "worker.py").write_text(
+                "queue.consume(bind_context(\n"
+                "    extract_customer_id(message),\n"
+                "    thread_id=None,\n"
+                "))\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(repo)
+            output = repo / ".moolabs" / "attribution" / "map.json"
+
+            run = self._discover(repo, output)
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            document = self._load(output)
+            service = document["services"][0]
+            self.assertEqual(
+                service["async_hops"],
+                [
+                    {
+                        "kind": "consume",
+                        "propagation": "missing",
+                        "evidence": {"file": "worker.py", "line": 1},
+                    }
+                ],
+            )
+            self.assertIn(
+                "async_extraction_missing",
+                {finding["code"] for finding in service["findings"]},
+            )
+            signoff = output.with_name("signoff.json")
+            created = self._create_signoff(
+                repo,
+                output,
+                signoff,
+                findings_resolved=len(document["findings"]),
+                review_evidence="review://non-thread-worker-extraction",
+            )
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertIn("unsafe or unresolved", created.stderr)
+            self.assertFalse(signoff.exists())
+
     def test_schema_restricts_not_required_resolvers_to_worker_ingress(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -3975,6 +4023,114 @@ class DiscoveryContractTests(unittest.TestCase):
                         for finding in service["findings"]
                     )
                 )
+
+    def test_js_final_endpoint_auth_name_is_unknown_and_unsignable(self):
+        for dependency, constructor in (
+            ("express", "express()"),
+            ("hono", "new Hono()"),
+        ):
+            with self.subTest(
+                dependency=dependency
+            ), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "package.json").write_text(
+                    json.dumps({"dependencies": {dependency: "1"}}),
+                    encoding="utf-8",
+                )
+                (repo / "app.js").write_text(
+                    f"const app = {constructor};\n"
+                    "app.use(attributionMiddleware);\n"
+                    "function verifyToken(_req, res) {\n"
+                    "  res.send('verified');\n"
+                    "}\n"
+                    "app.get('/verify-token', verifyToken);\n"
+                    "app.get('/verify-token-trailing', verifyToken,);\n"
+                    "app.get(\n"
+                    "  '/auth-label',\n"
+                    "  middlewareFor('requireAuth'),\n"
+                    "  labelHandler,\n"
+                    ");\n",
+                    encoding="utf-8",
+                )
+                self._commit_fixture(repo)
+                output = repo / ".moolabs" / "attribution" / "map.json"
+
+                run = self._discover(repo, output)
+
+                self.assertEqual(run.returncode, 0, run.stderr)
+                document = self._load(output)
+                service = document["services"][0]
+                self.assertEqual(
+                    [route["auth_scope"] for route in service["routes"]],
+                    ["unknown", "unknown", "unknown"],
+                )
+                self.assertEqual(
+                    document["discovery_projection"],
+                    {
+                        "routes_discovered": 3,
+                        "routes_statically_covered": 3,
+                        "routes_unknown": 0,
+                    },
+                )
+                service["resolver"] = {
+                    "state": "proposed",
+                    "identity_kind": "moolabs_uuid",
+                    "expression": "req.auth.customerId",
+                    "template": (
+                        "reject empty values and validate before binding "
+                        "attribution context"
+                    ),
+                    "evidence": {"file": "app.js", "line": 1},
+                }
+                output.write_text(
+                    json.dumps(document, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                signoff = output.with_name("signoff.json")
+                created = self._create_signoff(
+                    repo,
+                    output,
+                    signoff,
+                    findings_resolved=len(document["findings"]),
+                    review_evidence=(
+                        f"review://{dependency}-final-handler-auth-name"
+                    ),
+                )
+                self.assertEqual(created.returncode, 2, created.stderr)
+                self.assertIn("unsafe or unresolved", created.stderr)
+                self.assertFalse(signoff.exists())
+
+    def test_js_pre_handler_auth_middleware_remains_handler_scoped(self):
+        for dependency, constructor in (
+            ("express", "express()"),
+            ("hono", "new Hono()"),
+        ):
+            with self.subTest(
+                dependency=dependency
+            ), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                (repo / "package.json").write_text(
+                    json.dumps({"dependencies": {dependency: "1"}}),
+                    encoding="utf-8",
+                )
+                (repo / "app.js").write_text(
+                    f"const app = {constructor};\n"
+                    "app.use(attributionMiddleware);\n"
+                    "app.get(\n"
+                    "  '/orders',\n"
+                    "  requireAuth(optionsFor('customer')),\n"
+                    "  ordersHandler,\n"
+                    ");\n",
+                    encoding="utf-8",
+                )
+                output = repo.parent / f"{dependency}-map.json"
+
+                run = self._discover(repo, output)
+
+                self.assertEqual(run.returncode, 0, run.stderr)
+                route = self._load(output)["services"][0]["routes"][0]
+                self.assertEqual(route["auth_scope"], "handler")
+                self.assertEqual(route["path_template"], "/orders")
 
     def test_js_ambiguous_extensionless_import_is_unresolved_and_deterministic(self):
         with tempfile.TemporaryDirectory() as directory:
