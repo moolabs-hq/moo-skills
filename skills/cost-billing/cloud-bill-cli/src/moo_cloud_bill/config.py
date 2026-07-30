@@ -11,8 +11,14 @@ from pathlib import Path
 
 from .credentials import default_config_dir
 
-# Placeholder default — confirm per deployment (PRD OQ-9 / OQ-2-deploy).
-DEFAULT_ACUTE_BASE = "https://api.moolabs.com"
+# Default Moolabs base domain when the operator leaves the `configure` prompt
+# blank. Overridable per-deployment via the "Moolabs base domain" prompt (or
+# MCB_ACUTE_BASE / ACUTE_BASE env) — this is just what an empty answer resolves to.
+DEFAULT_MOOLABS_DOMAIN = "moolabs.com"
+# acute's public ingress is acute.<domain>, NOT the BFF at api.<domain> (see
+# acute_base_from_domain below) — derive the default the same way so a blank
+# prompt answer and an explicit "moolabs.com" answer resolve identically.
+DEFAULT_ACUTE_BASE = f"https://acute.{DEFAULT_MOOLABS_DOMAIN}"
 CONFIG_FILENAME = "moo-cloud-bill.toml"
 
 
