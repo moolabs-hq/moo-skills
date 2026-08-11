@@ -145,6 +145,43 @@ resolve_api_key() {
   [[ -n "$API_KEY" ]] || { note "! No API key — run 'moo-cloud-bill init' or paste it. Aborting."; exit 1; }
 }
 
+# Lists the VPC's subnets (id, AZ, CIDR) and lets the operator pick one or more
+# by number, rather than silently lumping every subnet in the VPC together.
+# Under --yes (non-interactive), there's no one to ask, so it keeps the old
+# behavior of selecting all of them.
+choose_subnets() {  # $1 = vpc id; sets SUBNETS
+  local vpc="$1" rows
+  rows="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$vpc" \
+          --query 'Subnets[].[SubnetId,AvailabilityZone,CidrBlock]' --output text --region "$AWS_REGION" 2>/dev/null)"
+  [[ -z "$rows" ]] && return 0
+  local -a ids
+  local i=0 sid az cidr
+  note "Subnets in $vpc:"
+  while IFS=$'\t' read -r sid az cidr; do
+    [[ -z "$sid" ]] && continue
+    i=$((i + 1)); ids[$i]="$sid"
+    note "  $i) $sid  ($az, $cidr)"
+  done <<<"$rows"
+  [[ $i -eq 0 ]] && return 0
+
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    local n out=""; for n in "${!ids[@]}"; do out="$out${ids[$n]},"; done
+    SUBNETS="${out%,}"
+    return 0
+  fi
+
+  read -r -p "  Choose subnet(s) — comma-separated numbers, or 'a' for all: " sel
+  local chosen="" part
+  if [[ -z "$sel" || "$sel" == "a" || "$sel" == "A" ]]; then
+    local n; for n in "${!ids[@]}"; do chosen="$chosen${ids[$n]},"; done
+  else
+    for part in ${sel//,/ }; do
+      [[ "$part" =~ ^[0-9]+$ && -n "${ids[$part]:-}" ]] && chosen="$chosen${ids[$part]},"
+    done
+  fi
+  SUBNETS="${chosen%,}"
+}
+
 discover_network() {
   [[ -n "$SUBNETS" && -n "$SECURITY_GROUP" ]] && return 0
   note "The Fargate task needs a VPC subnet + security group with outbound internet."
@@ -152,14 +189,16 @@ discover_network() {
   vpc="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
         --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || echo None)"
   if [[ -n "$vpc" && "$vpc" != "None" ]]; then
-    local d_subnets d_sg
-    d_subnets="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$vpc" \
-                 --query 'Subnets[].SubnetId' --output text --region "$AWS_REGION" 2>/dev/null | tr '\t' ',')"
-    d_sg="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values=default \
-            --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
-    note "Default VPC $vpc → subnets [$d_subnets], default SG $d_sg."
-    if confirm "Use the default VPC's subnets + default security group?"; then
-      SUBNETS="$d_subnets"; SECURITY_GROUP="$d_sg"
+    note "Default VPC: $vpc"
+    [[ -z "$SUBNETS" ]] && choose_subnets "$vpc"
+    if [[ -z "$SECURITY_GROUP" ]]; then
+      local d_sg
+      d_sg="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values=default \
+              --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
+      if [[ -n "$d_sg" && "$d_sg" != "None" ]]; then
+        note "Default security group: $d_sg"
+        confirm "Use it?" && SECURITY_GROUP="$d_sg"
+      fi
     fi
   fi
   [[ -z "$SUBNETS" ]]        && read -r -p "  Subnet IDs (comma-separated): " SUBNETS
