@@ -164,6 +164,13 @@ discover_network() {
   fi
   [[ -z "$SUBNETS" ]]        && read -r -p "  Subnet IDs (comma-separated): " SUBNETS
   [[ -z "$SECURITY_GROUP" ]] && read -r -p "  Security group ID: " SECURITY_GROUP
+  # A blank answer here (no default VPC, or an empty Enter at the prompt) would
+  # otherwise surface much later as an opaque AWS-side error deep in Step 7/8
+  # ("subnets can not be empty") instead of a clear failure up front.
+  if [[ -z "$SUBNETS" || -z "$SECURITY_GROUP" ]]; then
+    note "! Need at least one subnet ID and a security group ID to run the Fargate task — aborting."
+    exit 1
+  fi
 }
 
 # ── Plan disclosure ───────────────────────────────────────────────────────────
@@ -291,12 +298,30 @@ step_verify() {
   confirm "Run ONE on-demand task now to verify the wiring (before scheduling)?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped verify run."; return 0; }
   local netcfg="awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=ENABLED}"
-  run aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
-    --task-definition moo-cloud-bill-push --network-configuration "$netcfg" --region "$AWS_REGION" >/dev/null
-  note "Started. Watch logs:  aws logs tail /ecs/moo-cloud-bill --follow --region $AWS_REGION"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    run aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+      --task-definition moo-cloud-bill-push --network-configuration "$netcfg" --region "$AWS_REGION" >/dev/null
+    return 0
+  fi
+  if run aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+    --task-definition moo-cloud-bill-push --network-configuration "$netcfg" --region "$AWS_REGION" >/dev/null; then
+    note "Started. Watch logs:  aws logs tail /ecs/moo-cloud-bill --follow --region $AWS_REGION"
+  else
+    note "! run-task failed (see the AWS error above) — fix it before scheduling the daily run."
+  fi
 }
 
 step_schedule() {
+  # `aws scheduler` (EventBridge Scheduler) needs a CLI/botocore new enough to know
+  # the service (added ~Nov 2022). An older install doesn't error here — the
+  # reuse-check below is 2>&1-suppressed — it errors later at create-schedule with
+  # a raw "argument command: Invalid choice" dump. Catch it here with a clear message.
+  if ! aws scheduler help >/dev/null 2>&1; then
+    note "✗ this AWS CLI doesn't recognize 'aws scheduler' (EventBridge Scheduler) — it's too old."
+    note "  Upgrade: $(pkg_install_hint awscli)   then re-run this step."
+    note "  skipped schedule."
+    return 0
+  fi
   if aws scheduler get-schedule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
     note "✓ schedule '$SCHEDULE_NAME' exists — reusing (delete it first to change cadence)."; return 0
   fi
