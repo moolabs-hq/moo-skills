@@ -297,6 +297,13 @@ has refreshed. Adjust as you like.
 
 ## 7. Teardown (when you want to stop)
 
+If your AWS CLI is too old for `aws scheduler` (it needs the EventBridge Scheduler
+service, added ~Nov 2022), `aws-fargate-setup.sh` falls back to a classic
+EventBridge Rule with the same name instead — tear that down with
+`aws events remove-targets --rule moo-cloud-bill-daily-push --ids moo-cloud-bill-push --region "$AWS_REGION"`
+followed by `aws events delete-rule --name moo-cloud-bill-daily-push --region "$AWS_REGION"`,
+in place of the `delete-schedule` call below.
+
 ```bash
 aws scheduler delete-schedule --name moo-cloud-bill-daily-push --region "$AWS_REGION"
 aws ecs deregister-task-definition --task-definition moo-cloud-bill-push --region "$AWS_REGION" >/dev/null 2>&1 || true
