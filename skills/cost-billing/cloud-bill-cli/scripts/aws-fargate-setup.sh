@@ -128,7 +128,7 @@ PY
     [[ -z "$CUR_BUCKET" ]]  && read -r -p "  CUR S3 bucket: " CUR_BUCKET
     [[ -z "$CUR_PREFIX" ]]  && read -r -p "  CUR S3 prefix (e.g. cur2): " CUR_PREFIX
     [[ -z "$REPORT_NAME" ]] && read -r -p "  CUR export name (e.g. moolabs-cur2): " REPORT_NAME
-    [[ -z "$ACUTE_BASE" ]]  && read -r -p "  Acute base URL (e.g. https://acute.moolabs.com): " ACUTE_BASE
+    [[ -z "$ACUTE_BASE" ]]  && read -r -p "  Acute base URL (e.g. https://acute.prod.moolabs.com): " ACUTE_BASE
   fi
 }
 

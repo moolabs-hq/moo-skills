@@ -73,8 +73,9 @@ def run_configure(
 
     currency = ui.ask("Reporting currency", default="USD") or "USD"
     # acute is reachable at acute.<domain> (its own ingress), NOT the BFF at
-    # api.<domain> — the BFF doesn't proxy cloud-billing.
-    base_domain = ui.ask("Moolabs base domain (e.g. moolabs.com)", default="")
+    # api.<domain> — the BFF doesn't proxy cloud-billing. The bare apex
+    # "moolabs.com" has no valid cert for this; production is "prod.moolabs.com".
+    base_domain = ui.ask("Moolabs base domain (e.g. prod.moolabs.com)", default="")
     acute_base = acute_base_from_domain(base_domain) if base_domain.strip() else DEFAULT_ACUTE_BASE
     ui.say(f"Acute endpoint: {acute_base}")
 

@@ -14,10 +14,17 @@ from .credentials import default_config_dir
 # Default Moolabs base domain when the operator leaves the `configure` prompt
 # blank. Overridable per-deployment via the "Moolabs base domain" prompt (or
 # MCB_ACUTE_BASE / ACUTE_BASE env) — this is just what an empty answer resolves to.
-DEFAULT_MOOLABS_DOMAIN = "moolabs.com"
+#
+# Must be "prod.moolabs.com", NOT the bare apex "moolabs.com": Moolabs services
+# have no cert covering the bare apex or "*.moolabs.com" — production's ingress
+# cert (CN=prod.moolabs.com) only covers prod.moolabs.com, *.prod.moolabs.com,
+# and *.us.prod.moolabs.com. "acute.moolabs.com" resolves and answers, but the
+# TLS handshake fails with a hostname-mismatch since that cert doesn't list it.
+# Verified 2026-08-11 against the live ingress with openssl s_client + curl.
+DEFAULT_MOOLABS_DOMAIN = "prod.moolabs.com"
 # acute's public ingress is acute.<domain>, NOT the BFF at api.<domain> (see
 # acute_base_from_domain below) — derive the default the same way so a blank
-# prompt answer and an explicit "moolabs.com" answer resolve identically.
+# prompt answer and an explicit "prod.moolabs.com" answer resolve identically.
 DEFAULT_ACUTE_BASE = f"https://acute.{DEFAULT_MOOLABS_DOMAIN}"
 CONFIG_FILENAME = "moo-cloud-bill.toml"
 
