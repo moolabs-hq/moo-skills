@@ -301,8 +301,15 @@ step_task_role() {
 }
 
 step_scheduler_role() {
-  local trust="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"scheduler.amazonaws.com\"},\"Action\":\"sts:AssumeRole\",\"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"$ACCOUNT_ID\"}}}]}"
-  create_role_if_absent mooCloudBillSchedulerRole "$trust" "let EventBridge Scheduler run the task" || true
+  # Trusts BOTH EventBridge Scheduler (new, needs a recent AWS CLI/botocore)
+  # and classic EventBridge Rules (events.amazonaws.com, supported by every
+  # AWS CLI back to ~2016) so one role works with whichever backend
+  # step_schedule() ends up using — see its AWS CLI capability check.
+  local trust="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"scheduler.amazonaws.com\"},\"Action\":\"sts:AssumeRole\",\"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"$ACCOUNT_ID\"}}},{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"events.amazonaws.com\"},\"Action\":\"sts:AssumeRole\",\"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"$ACCOUNT_ID\"}}}]}"
+  create_role_if_absent mooCloudBillSchedulerRole "$trust" "let EventBridge (Scheduler or classic Rules) run the task" || true
+  # Sync the trust doc even on reuse — an existing role from before dual-backend
+  # support only trusted scheduler.amazonaws.com and would reject classic Rules.
+  run aws iam update-assume-role-policy --role-name mooCloudBillSchedulerRole --policy-document "$trust"
   local pol="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"ecs:RunTask\",\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":[\"$EXEC_ROLE_ARN\",\"$TASK_ROLE_ARN\"]}]}"
   run aws iam put-role-policy --role-name mooCloudBillSchedulerRole --policy-name run-task --policy-document "$pol"
   SCHED_ROLE_ARN="$(aws iam get-role --role-name mooCloudBillSchedulerRole --query Role.Arn --output text 2>/dev/null || echo "arn:aws:iam::$ACCOUNT_ID:role/mooCloudBillSchedulerRole")"
@@ -350,31 +357,62 @@ step_verify() {
   fi
 }
 
-step_schedule() {
-  # `aws scheduler` (EventBridge Scheduler) needs a CLI/botocore new enough to know
-  # the service (added ~Nov 2022). An older install doesn't error here — the
-  # reuse-check below is 2>&1-suppressed — it errors later at create-schedule with
-  # a raw "argument command: Invalid choice" dump. Catch it here with a clear message.
-  if ! aws scheduler help >/dev/null 2>&1; then
-    note "✗ this AWS CLI doesn't recognize 'aws scheduler' (EventBridge Scheduler) — it's too old."
-    note "  Upgrade: $(pkg_install_hint awscli)   then re-run this step."
-    note "  skipped schedule."
-    return 0
-  fi
+# The ECS target JSON is identical between the two backends (only the wrapping
+# API call differs), so both step_schedule_via_* functions build it the same way.
+schedule_ecs_target_json() {
+  cat <<JSON
+{"Arn":"arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:cluster/$CLUSTER","RoleArn":"$SCHED_ROLE_ARN","EcsParameters":{"TaskDefinitionArn":"arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:task-definition/moo-cloud-bill-push","LaunchType":"FARGATE","NetworkConfiguration":{"awsvpcConfiguration":{"Subnets":$(subnet_json),"SecurityGroups":["$SECURITY_GROUP"],"AssignPublicIp":"ENABLED"}}}}
+JSON
+}
+
+# EventBridge Scheduler — the modern, purpose-built API. Needs a CLI/botocore
+# new enough to know the `scheduler` service (added ~Nov 2022); gated on that
+# by the step_schedule() dispatcher below, which falls back to
+# step_schedule_via_events_rule() on an older CLI instead of erroring here.
+step_schedule_via_scheduler() {
   if aws scheduler get-schedule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
     note "✓ schedule '$SCHEDULE_NAME' exists — reusing (delete it first to change cadence)."; return 0
   fi
   confirm "Create the daily EventBridge schedule '$SCHEDULE_NAME' ($SCHEDULE_CRON UTC)?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped schedule."; return 0; }
-  local target
-  target="$(cat <<JSON
-{"Arn":"arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:cluster/$CLUSTER","RoleArn":"$SCHED_ROLE_ARN","EcsParameters":{"TaskDefinitionArn":"arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:task-definition/moo-cloud-bill-push","LaunchType":"FARGATE","NetworkConfiguration":{"awsvpcConfiguration":{"Subnets":$(subnet_json),"SecurityGroups":["$SECURITY_GROUP"],"AssignPublicIp":"ENABLED"}}}}
-JSON
-)"
+  local target; target="$(schedule_ecs_target_json)"
   if [[ $DRY_RUN -eq 1 ]]; then printf '    $ aws scheduler create-schedule --name %s --schedule-expression "%s" --target <target>\n' "$SCHEDULE_NAME" "$SCHEDULE_CRON";
   else aws scheduler create-schedule --name "$SCHEDULE_NAME" --schedule-expression "$SCHEDULE_CRON" \
     --schedule-expression-timezone UTC --flexible-time-window '{"Mode":"OFF"}' \
     --target "$target" --region "$AWS_REGION" >/dev/null; fi
+}
+
+# Classic EventBridge Rules (`aws events put-rule` + `put-targets`) — the same
+# cron() syntax, the same ECS-task target shape, and has been in every AWS CLI
+# (v1 and v2) since ~2016. Used when `aws scheduler` isn't available, so the
+# daily push still gets scheduled instead of the operator being told to
+# upgrade and left without a working schedule.
+step_schedule_via_events_rule() {
+  if aws events describe-rule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    note "✓ EventBridge rule '$SCHEDULE_NAME' exists — reusing (delete it first to change cadence)."; return 0
+  fi
+  confirm "Create the daily EventBridge rule '$SCHEDULE_NAME' ($SCHEDULE_CRON UTC)?"; local r=$?; abort_if_quit $r
+  [[ $r -eq 0 ]] || { note "  skipped schedule."; return 0; }
+  local target targets
+  target="$(schedule_ecs_target_json)"
+  targets="[$(printf '%s' "$target" | sed 's/^{/{"Id":"moo-cloud-bill-push",/')]"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '    $ aws events put-rule --name %s --schedule-expression "%s" --state ENABLED\n' "$SCHEDULE_NAME" "$SCHEDULE_CRON"
+    printf '    $ aws events put-targets --rule %s --targets <targets>\n' "$SCHEDULE_NAME"
+    return 0
+  fi
+  run aws events put-rule --name "$SCHEDULE_NAME" --schedule-expression "$SCHEDULE_CRON" \
+    --state ENABLED --region "$AWS_REGION" >/dev/null
+  run aws events put-targets --rule "$SCHEDULE_NAME" --targets "$targets" --region "$AWS_REGION" >/dev/null
+}
+
+step_schedule() {
+  if aws scheduler help >/dev/null 2>&1; then
+    step_schedule_via_scheduler
+  else
+    note "  (this AWS CLI predates EventBridge Scheduler — using classic EventBridge Rules instead; same daily cadence, same task.)"
+    step_schedule_via_events_rule
+  fi
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
