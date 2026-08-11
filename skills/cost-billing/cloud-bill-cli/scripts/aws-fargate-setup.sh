@@ -89,6 +89,48 @@ pkg_install_hint() {
   esac
 }
 
+# Version-aware upgrade guidance for an AWS CLI too old to know `aws scheduler`
+# (EventBridge Scheduler, added ~Nov 2022 in botocore). v1 and v2 are upgraded
+# differently, and neither is reliably a plain package-manager install — e.g.
+# apt's `awscli` is v1, and re-running the same install command that got you
+# here just reinstalls the same stale version. Prints one or more indented
+# lines; caller is responsible for the leading note/heading.
+aws_upgrade_hint() {
+  local ver major os
+  ver="$(aws --version 2>&1)"   # "aws-cli/2.34.37 Python/3.14.4 Darwin/25.5.0 source/arm64"
+  major="$(printf '%s' "$ver" | sed -n 's#.*aws-cli/\([0-9][0-9]*\)\..*#\1#p')"
+  os="$(uname -s)"
+  case "$major" in
+    1)
+      echo "$ver — AWS CLI v1 is end-of-life and won't get the scheduler service added."
+      echo "Migrate to v2:"
+      case "$os" in
+        Darwin) echo "  brew uninstall awscli; brew install awscli   # brew's awscli formula IS v2" ;;
+        Linux)  echo "  curl \"https://awscli.amazonaws.com/awscli-exe-linux-\$(uname -m).zip\" -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install" ;;
+        *)      echo "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" ;;
+      esac
+      ;;
+    2)
+      echo "$ver — this v2 build predates the scheduler service (botocore ~Nov 2022)."
+      echo "Upgrade in place:"
+      case "$os" in
+        Darwin)
+          if command -v brew >/dev/null 2>&1 && brew list awscli >/dev/null 2>&1; then
+            echo "  brew upgrade awscli"
+          else
+            echo "  curl \"https://awscli.amazonaws.com/AWSCLIV2.pkg\" -o /tmp/AWSCLIV2.pkg && sudo installer -pkg /tmp/AWSCLIV2.pkg -target /"
+          fi
+          ;;
+        Linux)  echo "  curl \"https://awscli.amazonaws.com/awscli-exe-linux-\$(uname -m).zip\" -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install --update" ;;
+        *)      echo "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" ;;
+      esac
+      ;;
+    *)
+      echo "Unrecognized \`aws --version\` output ($ver) — reinstall: $(pkg_install_hint awscli)"
+      ;;
+  esac
+}
+
 ensure_prereq() {
   local bin="$1" pkg="$2"
   command -v "$bin" >/dev/null 2>&1 && { note "✓ $bin found"; return 0; }
@@ -356,8 +398,9 @@ step_schedule() {
   # reuse-check below is 2>&1-suppressed — it errors later at create-schedule with
   # a raw "argument command: Invalid choice" dump. Catch it here with a clear message.
   if ! aws scheduler help >/dev/null 2>&1; then
-    note "✗ this AWS CLI doesn't recognize 'aws scheduler' (EventBridge Scheduler) — it's too old."
-    note "  Upgrade: $(pkg_install_hint awscli)   then re-run this step."
+    note "✗ this AWS CLI doesn't recognize 'aws scheduler' (EventBridge Scheduler)."
+    local line; while IFS= read -r line; do note "  $line"; done < <(aws_upgrade_hint)
+    note "  Then re-run this step."
     note "  skipped schedule."
     return 0
   fi
