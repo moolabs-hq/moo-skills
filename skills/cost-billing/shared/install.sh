@@ -1211,6 +1211,15 @@ _run_aws_fargate_setup() {
   local cli_dir="$1" aws_profile="$2"
   local script="$cli_dir/scripts/aws-fargate-setup.sh"
   local runbook="$cli_dir/AWS_SCHEDULING.md"
+  # load_cli_config() inside aws-fargate-setup.sh shells out to plain `python3`
+  # to read the config `configure` just saved a few lines above. That python3
+  # has no reason to already know about moo_cloud_bill — the CLI we just ran
+  # may live in a sandboxed venv, pipx, or nowhere (system-wide fallback) — so
+  # point it at the package source directly; it's always at $cli_dir/src
+  # regardless of how moo-cloud-bill itself got installed. Without this, the
+  # operator gets re-prompted for bucket/prefix/report-name/domain that
+  # `configure` already saved seconds earlier.
+  local pypath="$cli_dir/src${PYTHONPATH:+:$PYTHONPATH}"
   echo ""
   if [[ ! -f "$script" ]]; then
     echo "  Guided setup script not found at:"
@@ -1230,13 +1239,13 @@ _run_aws_fargate_setup() {
   local a; read -r -p "  Run the AWS Fargate setup? [y/d/N]: " a
   case "$a" in
     y|Y|yes|YES)
-      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script"; else bash "$script"; fi ;;
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script"; else PYTHONPATH="$pypath" bash "$script"; fi ;;
     d|D|dry|dry-run)
-      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script" --dry-run; else bash "$script" --dry-run; fi
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" --dry-run; else PYTHONPATH="$pypath" bash "$script" --dry-run; fi
       echo ""
       printf "  Now run it for real? [y/N]: "; read -r a2
       case "$a2" in y|Y|yes|YES)
-        if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" bash "$script"; else bash "$script"; fi ;;
+        if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script"; else PYTHONPATH="$pypath" bash "$script"; fi ;;
       *) echo "  Left as a dry-run. Run later: bash \"$script\"" ;; esac ;;
     *)
       echo "  No problem — nothing was changed. Alternatives:"
