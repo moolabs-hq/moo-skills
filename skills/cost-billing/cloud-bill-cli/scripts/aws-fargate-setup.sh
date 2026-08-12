@@ -182,6 +182,78 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
   SUBNETS="${chosen%,}"
 }
 
+# Creates a security group scoped to this VPC — used when none exist to choose
+# from, or the operator picks "create one" out of the list. Reuses one from a
+# prior run instead of failing on AWS's per-VPC name-uniqueness constraint.
+# AWS gives every new security group an allow-all outbound rule and no inbound
+# rules by default — exactly what a Fargate task pulling from ECR/S3/Acute over
+# the internet needs; nothing to add.
+create_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
+  local vpc="$1" name="moo-cloud-bill-sg" existing
+  existing="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values="$name" \
+              --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
+  if [[ -n "$existing" && "$existing" != "None" ]]; then
+    note "✓ security group '$name' already exists ($existing) — reusing."
+    SECURITY_GROUP="$existing"
+    return 0
+  fi
+  confirm "Create security group '$name' in $vpc (outbound only — AWS's default for a new SG)?"; local r=$?; abort_if_quit $r
+  [[ $r -eq 0 ]] || return 0
+  if [[ $DRY_RUN -eq 1 ]]; then
+    run aws ec2 create-security-group --group-name "$name" \
+      --description "moo-cloud-bill Fargate task (outbound only)" --vpc-id "$vpc" --region "$AWS_REGION" >/dev/null
+    SECURITY_GROUP="sg-DRYRUN"
+    return 0
+  fi
+  run aws ec2 create-security-group --group-name "$name" \
+    --description "moo-cloud-bill Fargate task (outbound only)" --vpc-id "$vpc" --region "$AWS_REGION" >/dev/null
+  SECURITY_GROUP="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values="$name" \
+                     --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
+  note "Created security group '$name' ($SECURITY_GROUP)."
+}
+
+# Lists the VPC's security groups (id, name, description) and lets the operator
+# pick one by number — mirrors choose_subnets(). Offers to create one (see
+# create_security_group above) if none exist, or if the operator asks for it.
+# Under --yes (non-interactive), prefers a group actually named "default" if
+# one is in the list, else the first one, else creates one.
+choose_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
+  local vpc="$1" rows
+  rows="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" \
+          --query 'SecurityGroups[].[GroupId,GroupName,Description]' --output text --region "$AWS_REGION" 2>/dev/null)"
+  local -a ids names
+  local i=0 gid gname gdesc
+  if [[ -n "$rows" ]]; then
+    note "Security groups in $vpc:"
+    while IFS=$'\t' read -r gid gname gdesc; do
+      [[ -z "$gid" ]] && continue
+      i=$((i + 1)); ids[$i]="$gid"; names[$i]="$gname"
+      note "  $i) $gid  ($gname — $gdesc)"
+    done <<<"$rows"
+  fi
+
+  if [[ $i -eq 0 ]]; then
+    note "No security groups found in $vpc."
+    create_security_group "$vpc"
+    return 0
+  fi
+
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    local n picked=""
+    for n in "${!ids[@]}"; do [[ "${names[$n]}" == "default" ]] && picked="${ids[$n]}"; done
+    if [[ -n "$picked" ]]; then SECURITY_GROUP="$picked"; else SECURITY_GROUP="${ids[1]}"; fi
+    return 0
+  fi
+
+  note "  c) create a new one"
+  read -r -p "  Choose a security group (number), or 'c' to create one: " sel
+  if [[ "$sel" == "c" || "$sel" == "C" ]]; then
+    create_security_group "$vpc"
+  elif [[ "$sel" =~ ^[0-9]+$ && -n "${ids[$sel]:-}" ]]; then
+    SECURITY_GROUP="${ids[$sel]}"
+  fi
+}
+
 discover_network() {
   [[ -n "$SUBNETS" && -n "$SECURITY_GROUP" ]] && return 0
   note "The Fargate task needs a VPC subnet + security group with outbound internet."
@@ -191,15 +263,7 @@ discover_network() {
   if [[ -n "$vpc" && "$vpc" != "None" ]]; then
     note "Default VPC: $vpc"
     [[ -z "$SUBNETS" ]] && choose_subnets "$vpc"
-    if [[ -z "$SECURITY_GROUP" ]]; then
-      local d_sg
-      d_sg="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values=default \
-              --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
-      if [[ -n "$d_sg" && "$d_sg" != "None" ]]; then
-        note "Default security group: $d_sg"
-        confirm "Use it?" && SECURITY_GROUP="$d_sg"
-      fi
-    fi
+    [[ -z "$SECURITY_GROUP" ]] && choose_security_group "$vpc"
   fi
   [[ -z "$SUBNETS" ]]        && read -r -p "  Subnet IDs (comma-separated): " SUBNETS
   [[ -z "$SECURITY_GROUP" ]] && read -r -p "  Security group ID: " SECURITY_GROUP
