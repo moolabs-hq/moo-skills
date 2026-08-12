@@ -145,24 +145,111 @@ resolve_api_key() {
   [[ -n "$API_KEY" ]] || { note "! No API key — run 'moo-cloud-bill init' or paste it. Aborting."; exit 1; }
 }
 
+# Checks whether a subnet is actually internet-routable and warns if not,
+# rather than silently creating one that won't work. Resolves the subnet's
+# EFFECTIVE route table — its explicit association if any, else the VPC's
+# main table, which is what a freshly created subnet always starts on — and
+# looks for a 0.0.0.0/0 route to an Internet Gateway. Deliberately read-only:
+# creating an IGW + route table changes VPC-level routing (blast radius
+# beyond this one subnet), which is out of scope for a billing-ingest
+# installer that otherwise only ever touches its own moo-cloud-bill-* resources.
+warn_if_subnet_not_routable() {  # $1 = subnet id, $2 = vpc id
+  local subnet="$1" vpc="$2" rtb has_igw_route
+  rtb="$(aws ec2 describe-route-tables --filters Name=association.subnet-id,Values="$subnet" \
+         --query 'RouteTables[0].RouteTableId' --output text --region "$AWS_REGION" 2>/dev/null)"
+  if [[ -z "$rtb" || "$rtb" == "None" ]]; then
+    rtb="$(aws ec2 describe-route-tables --filters Name=vpc-id,Values="$vpc" Name=association.main,Values=true \
+           --query 'RouteTables[0].RouteTableId' --output text --region "$AWS_REGION" 2>/dev/null)"
+  fi
+  [[ -z "$rtb" || "$rtb" == "None" ]] && return 0   # couldn't resolve one — nothing more to say
+  has_igw_route="$(aws ec2 describe-route-tables --route-table-ids "$rtb" \
+    --query "RouteTables[0].Routes[?DestinationCidrBlock=='0.0.0.0/0' && starts_with(GatewayId, 'igw-')].GatewayId" \
+    --output text --region "$AWS_REGION" 2>/dev/null)"
+  if [[ -z "$has_igw_route" ]]; then
+    note "! $subnet has no route to an internet gateway (route table $rtb has no 0.0.0.0/0 → igw-* route)."
+    note "  The Fargate task needs outbound internet to pull its image and reach S3/Acute — it will fail without one."
+    note "  To fix: attach an internet gateway to $vpc and route 0.0.0.0/0 to it from $rtb, e.g.:"
+    note "    aws ec2 create-internet-gateway --region $AWS_REGION"
+    note "    aws ec2 attach-internet-gateway --vpc-id $vpc --internet-gateway-id <igw-id> --region $AWS_REGION"
+    note "    aws ec2 create-route --route-table-id $rtb --destination-cidr-block 0.0.0.0/0 --gateway-id <igw-id> --region $AWS_REGION"
+  fi
+}
+
+# Creates a subnet in this VPC — used when none exist to choose from, or the
+# operator picks "create one" out of the list. Only creates the subnet itself
+# (see warn_if_subnet_not_routable above for why this doesn't also wire up
+# internet routing) — CIDR and AZ are the operator's call since a wrong guess
+# here is an AWS-side error (InvalidSubnet.Range/.Conflict), not something
+# worth trying to compute ourselves.
+create_subnet() {  # $1 = vpc id; sets SUBNETS
+  local vpc="$1" vpc_cidr
+  vpc_cidr="$(aws ec2 describe-vpcs --vpc-ids "$vpc" --query 'Vpcs[0].CidrBlock' --output text --region "$AWS_REGION" 2>/dev/null)"
+
+  local -a azs
+  local i=0 az
+  # A flat `[].field` query with --output text prints one tab-separated line,
+  # same shape as the SUBNETS CSV elsewhere in this file — word-split it.
+  for az in $(aws ec2 describe-availability-zones --region "$AWS_REGION" --filters Name=state,Values=available \
+              --query 'AvailabilityZones[].ZoneName' --output text 2>/dev/null); do
+    i=$((i + 1)); azs[$i]="$az"
+  done
+  if [[ $i -eq 0 ]]; then
+    note "! Could not list availability zones in $AWS_REGION — aborting."
+    exit 1
+  fi
+  note "Availability zones in $AWS_REGION:"
+  local n; for n in "${!azs[@]}"; do note "  $n) ${azs[$n]}"; done
+
+  confirm "Create a subnet in $vpc (CIDR block ${vpc_cidr:-unknown}) for the Fargate task?"; local r=$?; abort_if_quit $r
+  [[ $r -eq 0 ]] || return 0
+
+  local az_choice cidr
+  read -r -p "  Availability zone (number, default 1): " az_choice
+  [[ -z "$az_choice" || ! "$az_choice" =~ ^[0-9]+$ || -z "${azs[$az_choice]:-}" ]] && az_choice=1
+  read -r -p "  Subnet CIDR (must fit inside ${vpc_cidr:-the VPC range}, e.g. 10.0.100.0/24): " cidr
+  if [[ -z "$cidr" ]]; then
+    note "! No CIDR entered — aborting."
+    exit 1
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    run aws ec2 create-subnet --vpc-id "$vpc" --cidr-block "$cidr" --availability-zone "${azs[$az_choice]}" --region "$AWS_REGION" >/dev/null
+    SUBNETS="subnet-DRYRUN"
+    return 0
+  fi
+  local subnet_id
+  subnet_id="$(run aws ec2 create-subnet --vpc-id "$vpc" --cidr-block "$cidr" --availability-zone "${azs[$az_choice]}" \
+               --region "$AWS_REGION" --query Subnet.SubnetId --output text)"
+  note "Created subnet $subnet_id (${azs[$az_choice]}, $cidr)."
+  warn_if_subnet_not_routable "$subnet_id" "$vpc"
+  SUBNETS="$subnet_id"
+}
+
 # Lists the VPC's subnets (id, AZ, CIDR) and lets the operator pick one or more
 # by number, rather than silently lumping every subnet in the VPC together.
-# Under --yes (non-interactive), there's no one to ask, so it keeps the old
-# behavior of selecting all of them.
+# Offers to create one (see create_subnet above) if none exist, or if the
+# operator asks for it. Under --yes (non-interactive), there's no one to ask,
+# so it keeps the old behavior of selecting all of them.
 choose_subnets() {  # $1 = vpc id; sets SUBNETS
   local vpc="$1" rows
   rows="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$vpc" \
           --query 'Subnets[].[SubnetId,AvailabilityZone,CidrBlock]' --output text --region "$AWS_REGION" 2>/dev/null)"
-  [[ -z "$rows" ]] && return 0
   local -a ids
   local i=0 sid az cidr
-  note "Subnets in $vpc:"
-  while IFS=$'\t' read -r sid az cidr; do
-    [[ -z "$sid" ]] && continue
-    i=$((i + 1)); ids[$i]="$sid"
-    note "  $i) $sid  ($az, $cidr)"
-  done <<<"$rows"
-  [[ $i -eq 0 ]] && return 0
+  if [[ -n "$rows" ]]; then
+    note "Subnets in $vpc:"
+    while IFS=$'\t' read -r sid az cidr; do
+      [[ -z "$sid" ]] && continue
+      i=$((i + 1)); ids[$i]="$sid"
+      note "  $i) $sid  ($az, $cidr)"
+    done <<<"$rows"
+  fi
+
+  if [[ $i -eq 0 ]]; then
+    note "No subnets found in $vpc."
+    create_subnet "$vpc"
+    return 0
+  fi
 
   if [[ $ASSUME_YES -eq 1 ]]; then
     local n out=""; for n in "${!ids[@]}"; do out="$out${ids[$n]},"; done
@@ -170,7 +257,12 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
     return 0
   fi
 
-  read -r -p "  Choose subnet(s) — comma-separated numbers, or 'a' for all: " sel
+  note "  c) create a new one"
+  read -r -p "  Choose subnet(s) — comma-separated numbers, 'a' for all, or 'c' to create one: " sel
+  if [[ "$sel" == "c" || "$sel" == "C" ]]; then
+    create_subnet "$vpc"
+    return 0
+  fi
   local chosen="" part
   if [[ -z "$sel" || "$sel" == "a" || "$sel" == "A" ]]; then
     local n; for n in "${!ids[@]}"; do chosen="$chosen${ids[$n]},"; done
