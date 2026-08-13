@@ -26,6 +26,7 @@ set -uo pipefail
 DRY_RUN=0
 ASSUME_YES=0
 AWS_REGION="${AWS_REGION:-us-east-1}"
+REGION_EXPLICIT=0   # set to 1 by --region below; tells load_cli_config not to override it
 CLUSTER="moo-cloud-bill"
 ECR_REPO="moo-cloud-bill"
 SECRET_NAME="moo-cloud-bill/api-key"
@@ -38,7 +39,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
-    --region) AWS_REGION="$2"; shift 2 ;;
+    --region) AWS_REGION="$2"; REGION_EXPLICIT=1; shift 2 ;;
     --cluster) CLUSTER="$2"; shift 2 ;;
     --ecr-repo) ECR_REPO="$2"; shift 2 ;;
     --secret-name) SECRET_NAME="$2"; shift 2 ;;
@@ -119,7 +120,16 @@ PY
 )"; then eval "$out"; fi
   CUR_BUCKET="${CFG_BUCKET:-}"; CUR_PREFIX="${CFG_PREFIX:-}"; REPORT_NAME="${CFG_REPORT_NAME:-}"
   ACUTE_BASE="${CFG_ACUTE_BASE:-}"; REPORTING_CURRENCY="${CFG_REPORTING_CURRENCY:-USD}"
-  [[ -n "${CFG_REGION:-}" ]] && AWS_REGION="${CFG_REGION}"
+  # BUCKET_REGION is where the CUR bucket/export actually lives — AWS's CUR 2.0
+  # Data Exports API only exists in us-east-1, so `configure` always creates the
+  # bucket there and CFG_REGION is always "us-east-1" in practice. AWS_REGION is
+  # a SEPARATE concept: where the compute (VPC, ECS cluster, IAM roles, ECR,
+  # EventBridge schedule) runs — a customer can run their Fargate task out of
+  # eu-west-1 while still reading a CUR bucket that has to sit in us-east-1.
+  # Only fall back to CFG_REGION for AWS_REGION when the operator didn't pass
+  # --region themselves — otherwise this silently overwrote and broke the flag.
+  BUCKET_REGION="${CFG_REGION:-us-east-1}"
+  [[ $REGION_EXPLICIT -eq 0 && -n "${CFG_REGION:-}" ]] && AWS_REGION="${CFG_REGION}"
 
   local prompt_needed=0
   for v in CUR_BUCKET CUR_PREFIX REPORT_NAME ACUTE_BASE; do [[ -z "${!v}" ]] && prompt_needed=1; done
@@ -558,7 +568,7 @@ step_cluster_taskdef() {
 
   local taskdef
   taskdef="$(cat <<JSON
-{"family":"moo-cloud-bill-push","requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"512","memory":"1024","executionRoleArn":"$EXEC_ROLE_ARN","taskRoleArn":"$TASK_ROLE_ARN","containerDefinitions":[{"name":"push","image":"$IMAGE","essential":true,"command":["push"],"environment":[{"name":"MCB_BUCKET","value":"$CUR_BUCKET"},{"name":"MCB_PREFIX","value":"$CUR_PREFIX"},{"name":"MCB_REPORT_NAME","value":"$REPORT_NAME"},{"name":"MCB_REGION","value":"$AWS_REGION"},{"name":"MCB_ACUTE_BASE","value":"$ACUTE_BASE"},{"name":"MCB_REPORTING_CURRENCY","value":"$REPORTING_CURRENCY"}],"secrets":[{"name":"MOOLABS_API_KEY","valueFrom":"$SECRET_ARN"}],"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/moo-cloud-bill","awslogs-region":"$AWS_REGION","awslogs-stream-prefix":"push"}}}]}
+{"family":"moo-cloud-bill-push","requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"512","memory":"1024","executionRoleArn":"$EXEC_ROLE_ARN","taskRoleArn":"$TASK_ROLE_ARN","containerDefinitions":[{"name":"push","image":"$IMAGE","essential":true,"command":["push"],"environment":[{"name":"MCB_BUCKET","value":"$CUR_BUCKET"},{"name":"MCB_PREFIX","value":"$CUR_PREFIX"},{"name":"MCB_REPORT_NAME","value":"$REPORT_NAME"},{"name":"MCB_REGION","value":"$BUCKET_REGION"},{"name":"MCB_ACUTE_BASE","value":"$ACUTE_BASE"},{"name":"MCB_REPORTING_CURRENCY","value":"$REPORTING_CURRENCY"}],"secrets":[{"name":"MOOLABS_API_KEY","valueFrom":"$SECRET_ARN"}],"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/moo-cloud-bill","awslogs-region":"$AWS_REGION","awslogs-stream-prefix":"push"}}}]}
 JSON
 )"
   confirm "Register the Fargate task definition 'moo-cloud-bill-push'?"; local t=$?; abort_if_quit $t
