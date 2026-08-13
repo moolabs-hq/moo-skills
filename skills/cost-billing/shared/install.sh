@@ -1080,8 +1080,10 @@ run_cur_setup_wizard() {
   echo "  (Permissions + the 'IAM access to Billing' precondition were listed above.)"
 
   # boto3 needs valid credentials before configure can call STS. Let the engineer
-  # SELECT a profile from ~/.aws, then (re)authenticate via SSO so an expired
-  # token doesn't blow up the wizard.
+  # SELECT a profile from ~/.aws, then check whether it's ALREADY authenticated
+  # before asking to (re)run SSO login — a live sts:GetCallerIdentity call is
+  # ~100ms and means a fresh session skips the login prompt entirely instead of
+  # asking "log in again?" every single run regardless of token validity.
   local _profiles=() _p _i _choice
   while IFS= read -r _p; do [[ -n "$_p" ]] && _profiles+=("$_p"); done < <(list_aws_profiles)
 
@@ -1103,13 +1105,19 @@ run_cur_setup_wizard() {
   [[ -n "$aws_profile" ]] && profile_args=(--profile "$aws_profile")
 
   if command -v aws >/dev/null 2>&1; then
-    printf "  Run 'aws sso login %s' now? [Y/n]: " "${aws_profile:+--profile $aws_profile}"
-    read -r ans
-    case "$ans" in
-      n|N|no|NO) echo "    Skipping SSO login — ensure your credentials are valid." ;;
-      *) aws sso login "${profile_args[@]}" \
-           || echo "    ! 'aws sso login' failed (non-SSO profile or error) — continuing; configure will report if creds are invalid." ;;
-    esac
+    local _identity_account
+    _identity_account="$(aws sts get-caller-identity "${profile_args[@]}" --query Account --output text 2>/dev/null)"
+    if [[ -n "$_identity_account" && "$_identity_account" != "None" ]]; then
+      echo "  ✓ Already authenticated (account $_identity_account) — skipping SSO login."
+    else
+      printf "  Run 'aws sso login %s' now? [Y/n]: " "${aws_profile:+--profile $aws_profile}"
+      read -r ans
+      case "$ans" in
+        n|N|no|NO) echo "    Skipping SSO login — ensure your credentials are valid." ;;
+        *) aws sso login "${profile_args[@]}" \
+             || echo "    ! 'aws sso login' failed (non-SSO profile or error) — continuing; configure will report if creds are invalid." ;;
+      esac
+    fi
   else
     echo "    (aws CLI not found — ensure your AWS credentials are valid before configure)"
   fi
