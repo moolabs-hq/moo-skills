@@ -66,11 +66,17 @@ run() {
 }
 
 # Per-step gate. Returns: 0=yes, 1=skip, 2=quit (propagated to stop the run).
+# $2 = "y" makes a bare Enter mean yes instead of no — use ONLY when the
+# operator already gave explicit intent one step earlier (e.g. just typed
+# 'c' to request a create out of a picker list); a confirm reached any other
+# way keeps the safe default-no.
 confirm() {
   [[ $ASSUME_YES -eq 1 ]] && return 0
-  local ans
-  printf '  %s [y/N, or q to stop]: ' "$1"
+  local ans default="${2:-n}" hint="y/N"
+  [[ "$default" == "y" ]] && hint="Y/n"
+  printf '  %s [%s, or q to stop]: ' "$1" "$hint"
   read -r ans
+  [[ -z "$ans" ]] && ans="$default"
   case "$ans" in
     y|Y|yes|YES) return 0 ;;
     q|Q|quit) return 2 ;;
@@ -241,8 +247,8 @@ warn_if_subnet_not_routable() {  # $1 = subnet id, $2 = vpc id
 # internet routing) — CIDR and AZ are the operator's call since a wrong guess
 # here is an AWS-side error (InvalidSubnet.Range/.Conflict), not something
 # worth trying to compute ourselves.
-create_subnet() {  # $1 = vpc id; sets SUBNETS
-  local vpc="$1" vpc_cidr
+create_subnet() {  # $1 = vpc id; $2 = "explicit" if the operator already typed 'c'; sets SUBNETS
+  local vpc="$1" explicit="${2:-}" vpc_cidr
   vpc_cidr="$(aws ec2 describe-vpcs --vpc-ids "$vpc" --query 'Vpcs[0].CidrBlock' --output text --region "$AWS_REGION" 2>/dev/null)"
 
   local -a azs
@@ -260,7 +266,8 @@ create_subnet() {  # $1 = vpc id; sets SUBNETS
   note "Availability zones in $AWS_REGION:"
   local n; for n in "${!azs[@]}"; do note "  $n) ${azs[$n]}"; done
 
-  confirm "Create a subnet in $vpc (CIDR block ${vpc_cidr:-unknown}) for the Fargate task?"; local r=$?; abort_if_quit $r
+  local dflt="n"; [[ "$explicit" == "explicit" ]] && dflt="y"
+  confirm "Create a subnet in $vpc (CIDR block ${vpc_cidr:-unknown}) for the Fargate task?" "$dflt"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || return 0
 
   local az_choice cidr
@@ -321,7 +328,7 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
   note "  c) create a new one"
   read -r -p "  Choose subnet(s) — comma-separated numbers, 'a' for all, or 'c' to create one: " sel
   if [[ "$sel" == "c" || "$sel" == "C" ]]; then
-    create_subnet "$vpc"
+    create_subnet "$vpc" explicit
     return 0
   fi
   local chosen="" part
@@ -346,8 +353,8 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
 # AWS gives every new security group an allow-all outbound rule and no inbound
 # rules by default — exactly what a Fargate task pulling from ECR/S3/Acute over
 # the internet needs; nothing to add.
-create_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
-  local vpc="$1" name="moo-cloud-bill-sg" existing
+create_security_group() {  # $1 = vpc id; $2 = "explicit" if the operator already typed 'c'; sets SECURITY_GROUP
+  local vpc="$1" explicit="${2:-}" name="moo-cloud-bill-sg" existing
   existing="$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=group-name,Values="$name" \
               --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null)"
   if [[ -n "$existing" && "$existing" != "None" ]]; then
@@ -355,7 +362,8 @@ create_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
     SECURITY_GROUP="$existing"
     return 0
   fi
-  confirm "Create security group '$name' in $vpc (outbound only — AWS's default for a new SG)?"; local r=$?; abort_if_quit $r
+  local dflt="n"; [[ "$explicit" == "explicit" ]] && dflt="y"
+  confirm "Create security group '$name' in $vpc (outbound only — AWS's default for a new SG)?" "$dflt"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || return 0
   if [[ $DRY_RUN -eq 1 ]]; then
     run aws ec2 create-security-group --group-name "$name" \
@@ -406,7 +414,7 @@ choose_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
   note "  c) create a new one"
   read -r -p "  Choose a security group (number), or 'c' to create one: " sel
   if [[ "$sel" == "c" || "$sel" == "C" ]]; then
-    create_security_group "$vpc"
+    create_security_group "$vpc" explicit
   elif [[ "$sel" =~ ^[0-9]+$ && -n "${ids[$sel]:-}" ]]; then
     SECURITY_GROUP="${ids[$sel]}"
   fi
@@ -414,10 +422,11 @@ choose_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
 
 # Creates this region's default VPC — a subnet per AZ, an internet gateway,
 # and the 0.0.0.0/0 route, all wired atomically by AWS in one call. This is
-# the escape hatch for "no VPC at all", which is the NORMAL state for any
-# AWS account created after Dec 2021 (AWS stopped auto-creating default VPCs
-# then) — not an edge case. Deliberately does NOT support creating a
-# non-default VPC: that drags CIDR planning + IGW + route-table wiring back
+# the escape hatch for "no VPC at all" — most commonly a deliberately
+# security-hardened account (CIS/Control Tower baselines routinely delete the
+# default VPC), or an opt-in region (af-south-1, ap-east-1, me-south-1, ...)
+# that hasn't been enabled, not an account-age artifact. Deliberately does not
+# support creating a non-default VPC: that drags CIDR planning + IGW + route-table wiring back
 # into this script by hand, the exact blast-radius tradeoff
 # warn_if_subnet_not_routable above already decided against. Errors with
 # DefaultVpcAlreadyExists if one exists, which can't happen here since
