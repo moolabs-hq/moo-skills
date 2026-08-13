@@ -142,6 +142,56 @@ PY
   fi
 }
 
+# Lets the operator pick which region the COMPUTE runs in, distinct from
+# wherever the CUR bucket lives (see load_cli_config above) — e.g. a customer
+# whose cluster should run in Europe. Skipped when --region was already passed
+# (REGION_EXPLICIT) or under --yes (nothing to ask). A curated, continent-
+# grouped shortlist rather than a bare "type a region code" prompt; "other"
+# covers anything not listed, INCLUDING opt-in regions that aren't enabled
+# yet — choose_vpc()/create_default_vpc() below will say so clearly instead
+# of failing with a confusing AWS error if it isn't.
+choose_region() {
+  [[ $REGION_EXPLICIT -eq 1 || $ASSUME_YES -eq 1 ]] && return 0
+  note "Which AWS region should the Fargate cluster run in?"
+  note "  (this can differ from where the CUR bucket lives — currently $BUCKET_REGION)"
+  note "  North America:"
+  note "    1) us-east-1       N. Virginia"
+  note "    2) us-east-2       Ohio"
+  note "    3) us-west-2       Oregon"
+  note "    4) ca-central-1    Canada (Central)"
+  note "  Europe:"
+  note "    5) eu-west-1       Ireland"
+  note "    6) eu-central-1    Frankfurt"
+  note "    7) eu-west-2       London"
+  note "  Asia Pacific:"
+  note "    8) ap-southeast-1  Singapore"
+  note "    9) ap-northeast-1  Tokyo"
+  note "    10) ap-south-1     Mumbai"
+  note "  South America:"
+  note "    11) sa-east-1      São Paulo"
+  printf "  Choice [number, or 'o' to type any other region code, default: %s]: " "$AWS_REGION"
+  read -r sel
+  case "$sel" in
+    "") ;;  # keep the current default (--region, or the CUR bucket's region)
+    1) AWS_REGION=us-east-1 ;;
+    2) AWS_REGION=us-east-2 ;;
+    3) AWS_REGION=us-west-2 ;;
+    4) AWS_REGION=ca-central-1 ;;
+    5) AWS_REGION=eu-west-1 ;;
+    6) AWS_REGION=eu-central-1 ;;
+    7) AWS_REGION=eu-west-2 ;;
+    8) AWS_REGION=ap-southeast-1 ;;
+    9) AWS_REGION=ap-northeast-1 ;;
+    10) AWS_REGION=ap-south-1 ;;
+    11) AWS_REGION=sa-east-1 ;;
+    o|O)
+      read -r -p "  AWS region code (e.g. af-south-1): " sel
+      [[ -n "$sel" ]] && AWS_REGION="$sel"
+      ;;
+    *) note "  Not a valid choice — keeping $AWS_REGION." ;;
+  esac
+}
+
 resolve_api_key() {
   # From the 0600 credentials file written by `moo-cloud-bill init`, else prompt (hidden).
   local creds="${MOO_CLOUD_BILL_CONFIG_DIR:-$HOME/.config/moo-cloud-bill}/credentials"
@@ -399,9 +449,11 @@ create_default_vpc() {  # sets VPC_ID
 # way to see what's available or create anything. Offers to create the
 # region's default VPC (see create_default_vpc above) when none exist at all.
 choose_vpc() {  # sets VPC_ID
-  local rows
+  local rows err errfile
+  errfile="$(mktemp)"
   rows="$(aws ec2 describe-vpcs \
-          --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output text --region "$AWS_REGION" 2>/dev/null)"
+          --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output text --region "$AWS_REGION" 2>"$errfile")"
+  err="$(cat "$errfile")"; rm -f "$errfile"
   local -a ids defaults
   local i=0 vid cidr isdef tag
   if [[ -n "$rows" ]]; then
@@ -415,6 +467,20 @@ choose_vpc() {  # sets VPC_ID
   fi
 
   if [[ $i -eq 0 ]]; then
+    # An empty list can mean two very different things: genuinely no VPC yet
+    # (create_default_vpc below is the right move), or a region this account
+    # can't reach at all — e.g. an opt-in region (af-south-1, ap-east-1,
+    # me-south-1, ...) that hasn't been enabled, which fails EC2 calls with
+    # AuthFailure. Offering to create a VPC in the latter case just fails
+    # again with the same opaque error, when the real fix is enabling the
+    # region first. describe-vpcs swallows stderr above for the normal case,
+    # so re-check with a second call if the first one actually errored.
+    if [[ -n "$err" ]]; then
+      note "! Can't reach $AWS_REGION: $err"
+      note "  If this is an opt-in region (af-south-1, ap-east-1, me-south-1, ...), enable it first:"
+      note "  Billing console → Account → AWS Regions → enable $AWS_REGION, then re-run."
+      exit 1
+    fi
     note "No VPC found in $AWS_REGION."
     create_default_vpc
     return 0
@@ -669,9 +735,10 @@ main() {
 
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")"
   [[ -n "$ACCOUNT_ID" ]] || { note "! Can't read your AWS identity — run 'aws sso login' (or set creds) and re-run."; exit 1; }
-  note "AWS account: $ACCOUNT_ID   region: $AWS_REGION"
+  note "AWS account: $ACCOUNT_ID"
 
   load_cli_config
+  choose_region
   resolve_api_key
   discover_network
   show_plan
