@@ -254,6 +254,7 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
   if [[ $ASSUME_YES -eq 1 ]]; then
     local n out=""; for n in "${!ids[@]}"; do out="$out${ids[$n]},"; done
     SUBNETS="${out%,}"
+    local s; for s in ${SUBNETS//,/ }; do warn_if_subnet_not_routable "$s" "$vpc"; done
     return 0
   fi
 
@@ -272,6 +273,11 @@ choose_subnets() {  # $1 = vpc id; sets SUBNETS
     done
   fi
   SUBNETS="${chosen%,}"
+  # Existing subnets can be just as unroutable as a freshly created one —
+  # especially in a non-default VPC, where nothing wires up an IGW route
+  # automatically. create_subnet already warns on its own path; this covers
+  # the "picked from the list" path too.
+  local s; for s in ${SUBNETS//,/ }; do warn_if_subnet_not_routable "$s" "$vpc"; done
 }
 
 # Creates a security group scoped to this VPC — used when none exist to choose
@@ -346,20 +352,90 @@ choose_security_group() {  # $1 = vpc id; sets SECURITY_GROUP
   fi
 }
 
+# Creates this region's default VPC — a subnet per AZ, an internet gateway,
+# and the 0.0.0.0/0 route, all wired atomically by AWS in one call. This is
+# the escape hatch for "no VPC at all", which is the NORMAL state for any
+# AWS account created after Dec 2021 (AWS stopped auto-creating default VPCs
+# then) — not an edge case. Deliberately does NOT support creating a
+# non-default VPC: that drags CIDR planning + IGW + route-table wiring back
+# into this script by hand, the exact blast-radius tradeoff
+# warn_if_subnet_not_routable above already decided against. Errors with
+# DefaultVpcAlreadyExists if one exists, which can't happen here since
+# choose_vpc only calls this when its VPC list came back empty.
+create_default_vpc() {  # sets VPC_ID
+  confirm "No VPC found in $AWS_REGION. Create this region's default VPC (subnet per AZ + internet gateway, wired by AWS in one step)?"; local r=$?; abort_if_quit $r
+  if [[ $r -ne 0 ]]; then
+    note "! No VPC to use — aborting."
+    exit 1
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    run aws ec2 create-default-vpc --region "$AWS_REGION" >/dev/null
+    VPC_ID="vpc-DRYRUN"
+    return 0
+  fi
+  VPC_ID="$(run aws ec2 create-default-vpc --region "$AWS_REGION" --query Vpc.VpcId --output text)"
+  if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+    note "! Failed to create a default VPC — aborting."
+    exit 1
+  fi
+  note "Created default VPC $VPC_ID (subnet per AZ + internet gateway, already routable)."
+}
+
+# Lists EVERY VPC in the region (default or not) and lets the operator pick
+# one by number — same shape as choose_subnets/choose_security_group above.
+# Older code here only ever looked at the DEFAULT VPC, which meant an account
+# with no default VPC (the normal case post-Dec-2021, or any non-default VPC
+# a customer already uses) fell straight to raw "paste an ID" prompts with no
+# way to see what's available or create anything. Offers to create the
+# region's default VPC (see create_default_vpc above) when none exist at all.
+choose_vpc() {  # sets VPC_ID
+  local rows
+  rows="$(aws ec2 describe-vpcs \
+          --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output text --region "$AWS_REGION" 2>/dev/null)"
+  local -a ids defaults
+  local i=0 vid cidr isdef tag
+  if [[ -n "$rows" ]]; then
+    note "VPCs in $AWS_REGION:"
+    while IFS=$'\t' read -r vid cidr isdef; do
+      [[ -z "$vid" ]] && continue
+      i=$((i + 1)); ids[$i]="$vid"; defaults[$i]="$isdef"
+      tag=""; [[ "$isdef" == "True" ]] && tag=", default"
+      note "  $i) $vid  ($cidr$tag)"
+    done <<<"$rows"
+  fi
+
+  if [[ $i -eq 0 ]]; then
+    note "No VPC found in $AWS_REGION."
+    create_default_vpc
+    return 0
+  fi
+
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    local n picked=""
+    for n in "${!ids[@]}"; do [[ "${defaults[$n]}" == "True" ]] && picked="${ids[$n]}"; done
+    VPC_ID="${picked:-${ids[1]}}"
+    return 0
+  fi
+
+  read -r -p "  Choose a VPC (number): " sel
+  [[ "$sel" =~ ^[0-9]+$ && -n "${ids[$sel]:-}" ]] && VPC_ID="${ids[$sel]}"
+}
+
 discover_network() {
   [[ -n "$SUBNETS" && -n "$SECURITY_GROUP" ]] && return 0
   note "The Fargate task needs a VPC subnet + security group with outbound internet."
-  local vpc
-  vpc="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
-        --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || echo None)"
-  if [[ -n "$vpc" && "$vpc" != "None" ]]; then
-    note "Default VPC: $vpc"
+  local vpc=""
+  if [[ -z "$SUBNETS" || -z "$SECURITY_GROUP" ]]; then
+    choose_vpc
+    vpc="$VPC_ID"
+  fi
+  if [[ -n "$vpc" ]]; then
     [[ -z "$SUBNETS" ]] && choose_subnets "$vpc"
     [[ -z "$SECURITY_GROUP" ]] && choose_security_group "$vpc"
   fi
   [[ -z "$SUBNETS" ]]        && read -r -p "  Subnet IDs (comma-separated): " SUBNETS
   [[ -z "$SECURITY_GROUP" ]] && read -r -p "  Security group ID: " SECURITY_GROUP
-  # A blank answer here (no default VPC, or an empty Enter at the prompt) would
+  # A blank answer here (no VPC chosen, or an empty Enter at the prompt) would
   # otherwise surface much later as an opaque AWS-side error deep in Step 7/8
   # ("subnets can not be empty") instead of a clear failure up front.
   if [[ -z "$SUBNETS" || -z "$SECURITY_GROUP" ]]; then
