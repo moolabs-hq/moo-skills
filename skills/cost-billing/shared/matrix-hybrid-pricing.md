@@ -94,27 +94,69 @@ completely different things, and they require OPPOSITE handling:
 quantity elsewhere in the same code path (e.g. summed, compared against a usage cap
 in raw units), or does it get used as a monetary/credit amount that is itself
 DEDUCTED from a balance (e.g. passed straight into a `consume_credits`-shaped
-call)? The latter is a price. When it's a price:
+call)? The latter is a price. When it's a price, do NOT default to binding
+`derivation` to it — first ask which pricing authority this integration intends:
 
-- Bind `derivation` to it (it IS the correct variable quantity for THIS meter, in
-  the customer's own currency) — same as any other variable-quantity case.
-- Do **NOT** also propose the table's dimension key as an SDK dimension field UNLESS
-  you have confirmed, from the customer/reviewer, that Moolabs' rate schedule for
-  this specific meter does NOT also price by that same dimension. Record this open
-  question in `review_notes` rather than silently picking either side — it is a
-  product decision (is nRev's own rate table being kept as the pricing authority, or
-  is it being replaced by Moolabs' matrix rate schedule for this meter?), not
-  something discovery or the codemod can infer from code alone.
+- **The customer's own rate table stays authoritative for this meter** (Moolabs is
+  just recording the resulting spend/credits, not re-pricing it) → bind `derivation`
+  to the price-table's output (it correctly IS the variable quantity in the
+  customer's own currency), and do NOT also propose the table's dimension key as an
+  SDK dimension field — see `pricing_shape: variable` above.
+- **Moolabs' matrix rate schedule is meant to REPLACE the customer's own pricing for
+  this meter** — the common case when the integration is explicitly a *migration
+  off a prior provider that made the customer pre-compute pricing themselves* — set
+  `pricing_shape: dimensional` instead: `derivation` stays a flat `1` (or the true
+  neutral per-run count), and the table's dimension key becomes `dimension_source`,
+  proposed via `dimension_candidates` and confirmed the same way as any other
+  candidate field. See "dimensional pricing" below.
 
-**What actually happened on PR #1239:** `ask_ai_node.py` / `summariser_node.py`'s
-`get_credit_cost_per_item()` returns `PRICING_DICT[settings["model"]]` — a PRICE
-(credits per item, keyed by model), not a quantity. The initial fix correctly bound
-`derivation` to the accumulated total AND separately wired `model=` as an SDK
-dimension, reasoning (wrongly) that `model` was "just descriptive metadata." The
-customer caught it: if Moolabs matrix-prices this meter by `model`, that's double
-pricing. The `model=` wiring was reverted (commit `b3bf63ff`); the PR now sits at
-`derivation`-bound-to-the-price-table's-output with NO dimension field, which is the
-safe, self-consistent state pending the product decision above.
+Don't guess between these — record the open question in `review_notes` and route it
+to the human (customer/reviewer). It is a product decision (is the customer's rate
+table being kept as the pricing authority, or replaced by Moolabs'?), not something
+discovery or the codemod can infer from code alone. A "we're migrating off provider
+X, who made us calculate everything ourselves" statement from the customer is a
+strong, explicit signal toward `dimensional`.
+
+### `dimensional` pricing (flat quantity, dimension-driven price)
+
+`pricing_shape: dimensional` is the THIRD case (added 2026-08-21, after PR #1239's
+resolution below), distinct from both `flat` (no variability at all) and `variable`
+(the per-occurrence COUNT varies). Here the quantity is flat — usually `derivation:
+1`, one event per occurrence — but the PRICE varies by a dimension Moolabs' own
+matrix rate schedule prices (node type, model, region, tier, ...), not by anything
+the customer's code computes. `dimension_source` carries the runtime expression for
+that dimension value (the SDK helper's `model=` kwarg — a generic dimension slot,
+not restricted to LLM model names).
+
+**Not yet wired into the codemod templates** (the `.j2` templates only interpolate
+`entry.refund_unit.derivation`, not `dimension_source` — grep-verified across all
+seven `assets/codemod-templates/*.j2` files). Until that lands, `dimension_source`
+is applied by the agent by hand at codemod time, the same "aspirational schema,
+agent-applied" pattern several other Phase 4/5 fields already use per
+`discovery/SKILL.md`'s own Scripts section. Don't claim template automation exists
+for this field until the templates are actually updated to read it.
+
+**What actually happened on PR #1239, and how it resolved:** `ask_ai_node.py` /
+`summariser_node.py`'s `get_credit_cost_per_item()` returns
+`PRICING_DICT[settings["model"]]` — a PRICE (credits per item, keyed by model), not
+a quantity. The initial fix bound `derivation` to the accumulated total AND
+separately wired `model=` as an SDK dimension (commit `1d2789c7`), reasoning
+(wrongly) that `model` was "just descriptive metadata." The customer caught it —
+double pricing — and that commit was reverted (`b3bf63ff`).
+
+The actual answer, once asked: this integration is a **migration off a prior
+provider that made the customer pre-compute pricing themselves** — the entire
+point is to stop doing that. So the resolution (commit `65b94ad5`) is neither
+"keep nRev's price" nor "bind derivation to it": it's `pricing_shape: dimensional`
+(added to the schema below after this) — `value` is a flat `1` (finance's
+`per_node_run` unit is satisfied: one event per run), and `model` carries the node
+TYPE (`self.node_details.get("node_type_id")`, e.g. `"ask_ai"`, `"google_search"` —
+confirmed generalizable to "model can be anything, not just LLM models"), letting
+Moolabs' own rate schedule price per node type. `get_credit_cost_per_item()` /
+`consume_credits()` (nRev's own Flexprice system, billing nRev's end-customers) are
+untouched — only what's reported to Moolabs changed. Accepted, explicit tradeoff: a
+run's Moolabs-reported price no longer varies by LLM model or item/page/row count
+within the run, only by node type.
 
 ## Recommended fix shape (for the codemod / instrument-stage guidance)
 

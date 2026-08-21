@@ -1055,16 +1055,20 @@ def build_tasks(
             _ru = entry.get("refund_unit")
             if isinstance(_ru, dict):
                 enriched_entry["refund_unit"] = _coerce_derivation(_ru)
-                # derivation_candidates is review-only scaffolding (propose-then-
-                # confirm, like entity_id_candidate) — never read by the callsite
-                # templates (grep-verified: templates only interpolate
-                # entry.refund_unit.derivation) and never meant to survive past
-                # Stage-3 signoff. Drop it here so it doesn't reach
+                # derivation_candidates / dimension_candidates are review-only
+                # scaffolding (propose-then-confirm, like entity_id_candidate) —
+                # never read by the callsite templates (grep-verified: templates
+                # only interpolate entry.refund_unit.derivation; dimension_source
+                # isn't template-consumed yet either — see
+                # shared/matrix-hybrid-pricing.md) and never meant to survive
+                # past Stage-3 signoff. Drop them here so they don't reach
                 # emit_tasks_yaml's nested-dict writer, which only handles one
                 # level of scalar values and would mis-serialize a nested
-                # list-of-dicts. charge_trigger_note is a plain string (safe to
-                # serialize either way) and stays as forensic context.
+                # list-of-dicts. charge_trigger_note / dimension_source are
+                # plain strings (safe to serialize either way) and stay as
+                # forensic context / a manual codemod input.
                 enriched_entry["refund_unit"].pop("derivation_candidates", None)
+                enriched_entry["refund_unit"].pop("dimension_candidates", None)
                 # Round-5/6: a prose derivation can't compile to a usage quantity,
                 # so it was coerced to a placeholder. Warn LOUDLY (parity with
                 # cost_value_missing) — a wrong usage quantity is a billing bug.
