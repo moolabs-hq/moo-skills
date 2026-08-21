@@ -127,6 +127,53 @@ http_method:
   DELETE_weight: 0.0      # ambiguous — sometimes a billable cancellation event
 
 # ──────────────────────────────────────────────────────────────────────────
+# SIGNAL 7: Brownfield variable-quantity / matrix-hybrid pricing detection
+# (added 2026-08-21, after the workflow-studio dogfood run shipped a hardcoded
+# value=1 that ignored an existing, variable per-run credit-cost system already
+# in the customer's code — see shared/matrix-hybrid-pricing.md.)
+#
+# This signal does NOT feed the terminal-event confidence score (a candidate
+# already IS or ISN'T terminal by the signals above). It runs ONCE PER
+# terminal-event candidate that clears the threshold, to decide refund_unit's
+# `pricing_shape` (flat | variable) BEFORE defaulting derivation to a flat
+# count. See discovery/SKILL.md Phase 4, "Brownfield variable-quantity
+# detection".
+# ──────────────────────────────────────────────────────────────────────────
+
+variable_quantity_patterns:
+  # Function/method name signals (case-insensitive substring match) in the
+  # target function AND its direct callees.
+  metering_vocabulary:
+    - "consume_credit"
+    - "credit_cost"
+    - "cost_per_item"
+    - "usage_units"
+    - "metered_amount"
+    - "billable_quantity"
+    - "billing_amount"
+    - "record_usage"
+    - "ingest_usage"
+    - "usage_record"
+  # Vendor-native metering calls (raw or SDK) — same detection style as
+  # vendor-host-catalog.yaml's raw-HTTP matching.
+  vendor_metering_calls:
+    - "usage_records.create"        # Stripe legacy usage records
+    - "meter_events.create"         # Stripe billing meters
+  # Structural signal: a base-class stub method overridden by >= this many
+  # subclasses with non-constant logic is treated as a strong variable-
+  # quantity signal even with zero vocabulary hits (e.g. workflow-studio's
+  # get_credit_cost_per_item(), overridden by 30+ node subclasses).
+  override_fanout_threshold: 3
+
+# Action when a candidate's target function OR a direct callee matches:
+# - Propose refund_unit.derivation_candidates (NEVER auto-promote — same
+#   discipline as entity_id_candidate).
+# - Set refund_unit.pricing_shape: variable.
+# - Record the matched evidence file:line on the candidate.
+# No match -> refund_unit.pricing_shape: flat (the default; most units ARE
+# flat-priced — don't invent variability where none exists).
+
+# ──────────────────────────────────────────────────────────────────────────
 # FOUR-SCENARIO VALIDATION (refund test passed 2026-05-11)
 # Per requirements §2 + Doc 3 §6.4:
 #

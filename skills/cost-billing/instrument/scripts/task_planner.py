@@ -1055,6 +1055,16 @@ def build_tasks(
             _ru = entry.get("refund_unit")
             if isinstance(_ru, dict):
                 enriched_entry["refund_unit"] = _coerce_derivation(_ru)
+                # derivation_candidates is review-only scaffolding (propose-then-
+                # confirm, like entity_id_candidate) — never read by the callsite
+                # templates (grep-verified: templates only interpolate
+                # entry.refund_unit.derivation) and never meant to survive past
+                # Stage-3 signoff. Drop it here so it doesn't reach
+                # emit_tasks_yaml's nested-dict writer, which only handles one
+                # level of scalar values and would mis-serialize a nested
+                # list-of-dicts. charge_trigger_note is a plain string (safe to
+                # serialize either way) and stays as forensic context.
+                enriched_entry["refund_unit"].pop("derivation_candidates", None)
                 # Round-5/6: a prose derivation can't compile to a usage quantity,
                 # so it was coerced to a placeholder. Warn LOUDLY (parity with
                 # cost_value_missing) — a wrong usage quantity is a billing bug.
@@ -1065,6 +1075,34 @@ def build_tasks(
                         f"({_ru.get('derivation')!r}); coerced to a placeholder "
                         f"quantity. Fix discovery to emit a runtime EXPRESSION (e.g. "
                         f"response.usage.completion_tokens) so usage is recorded.\n"
+                    )
+                # 2026-08-21 matrix-hybrid-pricing fix: discovery's Phase 4 sets
+                # pricing_shape: variable when the customer's OWN code already
+                # computes a per-occurrence quantity that differs by call (see
+                # cost-billing-shared/matrix-hybrid-pricing.md -- the
+                # workflow-studio value=1 bug this closes). A `variable`-shaped
+                # unit that STILL needed coercion means no real quantity
+                # expression was ever confirmed for it -- escalate past the
+                # generic warning above, since this is worse than an ordinary
+                # missing derivation: a KNOWN-variable quantity is about to ship
+                # as a flat placeholder, silently mis-billing every occurrence
+                # whose real cost differs from it.
+                pricing_shape_mismatch = (
+                    _ru.get("pricing_shape") == "variable"
+                    and enriched_entry["refund_unit"].get("derivation_needs_review")
+                )
+                enriched_entry["pricing_shape_mismatch"] = pricing_shape_mismatch
+                if pricing_shape_mismatch:
+                    sys.stderr.write(
+                        f"CRITICAL: usage entry {wf!r} at {file_path}:{entry.get('line')} "
+                        f"is pricing_shape: variable (discovery found an existing "
+                        f"brownfield metering/credit computation) but no confirmed "
+                        f"derivation expression was bound -- shipping the coerced "
+                        f"placeholder quantity here silently mis-bills every "
+                        f"occurrence whose real cost differs. Confirm one of "
+                        f"refund_unit.derivation_candidates (or supply the real "
+                        f"expression) before this entry's insert is planned. "
+                        f"See cost-billing-shared/matrix-hybrid-pricing.md.\n"
                     )
             elif pattern in ("usage-only", "sibling-pair"):
                 enriched_entry["refund_unit"] = {"unit": "event", "derivation": 1}
