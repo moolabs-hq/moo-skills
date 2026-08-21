@@ -58,11 +58,11 @@ terminal-event candidate, before defaulting `refund_unit` to a flat unit:
    terminal event (the shape this suite recommends the codemod itself add — see
    "Recommended fix shape" below).
 4. **Existing dimension-keyed cost table** — a lookup structure (dict/config) keyed by
-   more than one dimension (e.g. `{provider: {model: price}}`) feeding a per-call cost
-   calculation. This is the strongest signal of an eventual Moolabs-side matrix-pricing
-   fit (the ingested event should carry the matching dimension, typically `model`, so
-   Moolabs' rate engine can price it correctly) — record the dimension name(s) found so
-   PM/CFO review can decide whether to also bind the SDK helper's `model=` field.
+   a dimension (e.g. `{model: price}`) feeding a per-call cost calculation. This is a
+   signal of an eventual Moolabs-side matrix-pricing fit, but see "Quantity vs. price —
+   do not bind both" below before proposing anything from it: whether this signal
+   means "propose a `derivation_candidate`" or "propose a dimension field, and leave
+   `derivation` alone" depends entirely on what the table's OUTPUT represents.
 
 Any hit → propose one or more `refund_unit.derivation_candidates` entries (never
 auto-promote — same discipline as `entity_id_candidate`), set
@@ -71,6 +71,50 @@ auto-promote — same discipline as `entity_id_candidate`), set
 No hit → `refund_unit.pricing_shape: flat` (the default; `derivation: 1` or a
 genuine constant is correct and expected — most units ARE flat-priced. Don't invent
 variability where none exists).
+
+## Quantity vs. price — do not bind both (added 2026-08-21, after a near-miss on PR #1239)
+
+Signal 4 above (a dimension-keyed cost table) is dangerous to act on naively, because
+"the customer's code already computes a variable number" is true of BOTH of two
+completely different things, and they require OPPOSITE handling:
+
+- **A quantity** — a count of billable units (tokens, pages, rows, seconds). Binding
+  `derivation` to it is correct and is exactly what this doc otherwise recommends.
+- **A price** — a lookup table's OUTPUT already expressed in the customer's own
+  billing currency (credits, dollars, cents) for one dimension value (e.g.
+  `PRICING_DICT[model] -> credits_per_item`, one row per model). This is the
+  customer's OWN rate card, not a quantity. If you bind `derivation` to its output
+  AND ALSO propose the table's key (`model`) as a dimension field on the SDK helper
+  (`model=`), and Moolabs' rate schedule for that meter ALSO prices by that same
+  dimension, the event gets priced TWICE: once by the customer's own table (baked
+  into `derivation`'s value) and once more by Moolabs' matrix rate card applied on
+  top of it. Silent overcharge, not a crash — nothing about it fails loudly.
+
+**The discriminator:** does the lookup table's output get used as a countable
+quantity elsewhere in the same code path (e.g. summed, compared against a usage cap
+in raw units), or does it get used as a monetary/credit amount that is itself
+DEDUCTED from a balance (e.g. passed straight into a `consume_credits`-shaped
+call)? The latter is a price. When it's a price:
+
+- Bind `derivation` to it (it IS the correct variable quantity for THIS meter, in
+  the customer's own currency) — same as any other variable-quantity case.
+- Do **NOT** also propose the table's dimension key as an SDK dimension field UNLESS
+  you have confirmed, from the customer/reviewer, that Moolabs' rate schedule for
+  this specific meter does NOT also price by that same dimension. Record this open
+  question in `review_notes` rather than silently picking either side — it is a
+  product decision (is nRev's own rate table being kept as the pricing authority, or
+  is it being replaced by Moolabs' matrix rate schedule for this meter?), not
+  something discovery or the codemod can infer from code alone.
+
+**What actually happened on PR #1239:** `ask_ai_node.py` / `summariser_node.py`'s
+`get_credit_cost_per_item()` returns `PRICING_DICT[settings["model"]]` — a PRICE
+(credits per item, keyed by model), not a quantity. The initial fix correctly bound
+`derivation` to the accumulated total AND separately wired `model=` as an SDK
+dimension, reasoning (wrongly) that `model` was "just descriptive metadata." The
+customer caught it: if Moolabs matrix-prices this meter by `model`, that's double
+pricing. The `model=` wiring was reverted (commit `b3bf63ff`); the PR now sits at
+`derivation`-bound-to-the-price-table's-output with NO dimension field, which is the
+safe, self-consistent state pending the product decision above.
 
 ## Recommended fix shape (for the codemod / instrument-stage guidance)
 
@@ -91,8 +135,10 @@ should:
 
 This is exactly the shape used to fix the `workflow-studio` `node_run.completed` bug:
 `consume_credits()` now accumulates into `self._moolabs_credits_consumed`; the emit
-reads that total. See `domains/node_engine/core/nodes/base_node.py` in
-`nurturev/workflow_studio` (PR #1239) for the reference implementation.
+reads that total, with NO dimension field alongside it (see "Quantity vs. price —
+do not bind both" above for why not). See
+`domains/node_engine/core/nodes/base_node.py` in `nurturev/workflow_studio`
+(PR #1239) for the reference implementation.
 
 ## Review-blocking condition
 
