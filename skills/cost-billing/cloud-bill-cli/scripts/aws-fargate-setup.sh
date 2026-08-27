@@ -632,6 +632,64 @@ step_scheduler_role() {
   SCHED_ROLE_ARN="$(aws iam get-role --role-name mooCloudBillSchedulerRole --query Role.Arn --output text 2>/dev/null || echo "arn:aws:iam::$ACCOUNT_ID:role/mooCloudBillSchedulerRole")"
 }
 
+# Create /ecs/moo-cloud-bill and VERIFY it's actually there afterward — the old
+# code was `... create-log-group ... 2>/dev/null || true`, which swallows every
+# failure (wrong region, IAM denied, race) and reports success regardless. That's
+# exactly how a task can run daily for weeks and never produce a single log line:
+# the group never existed, the awslogs driver has nowhere to write, and nobody
+# printed an error to notice. If creation fails or the after-the-fact
+# describe-log-groups doesn't confirm it, this step now says so and returns
+# non-zero instead of moving on quietly.
+ensure_log_group() {
+  local group="/ecs/moo-cloud-bill"
+  local existing
+  existing="$(aws logs describe-log-groups --log-group-name-prefix "$group" \
+    --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text 2>/dev/null)"
+
+  if [[ "$existing" == "$group" ]]; then
+    note "✓ CloudWatch log group $group exists — reusing."
+  else
+    if ! run aws logs create-log-group --log-group-name "$group" --region "$AWS_REGION"; then
+      note "! Could not create log group $group (see the AWS error above)."
+      note "  Without it, the push task's awslogs driver has nowhere to write — it will"
+      note "  keep running on schedule but produce ZERO log output. Fix the error above"
+      note "  (commonly IAM or wrong --region), then re-run this script."
+      return 1
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+      note "[dry-run] would verify via describe-log-groups after creating."
+    else
+      existing="$(aws logs describe-log-groups --log-group-name-prefix "$group" \
+        --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text 2>/dev/null)"
+      if [[ "$existing" != "$group" ]]; then
+        note "! create-log-group reported success but $group isn't visible via"
+        note "  describe-log-groups in region $AWS_REGION. Check the region and re-run"
+        note "  before scheduling — otherwise the daily push will log nowhere."
+        return 1
+      fi
+      note "✓ Created and verified: $group ($AWS_REGION)"
+    fi
+  fi
+
+  # Retention is DESTRUCTIVE, not additive: CloudWatch's default is to keep log
+  # events forever, and narrowing it prunes anything already older than the
+  # window too — not just what's written going forward. Ask, like every other
+  # AWS mutation in this script.
+  confirm "Set 7-day retention on $group? (deletes any log events older than 7 days — CloudWatch's default is to keep them forever)"
+  local ret=$?; abort_if_quit $ret
+  if [[ $ret -eq 0 ]]; then
+    if run aws logs put-retention-policy --log-group-name "$group" \
+         --retention-in-days 7 --region "$AWS_REGION"; then
+      note "✓ Retention set: 7 days."
+    else
+      note "! Failed to set retention (see AWS error above) — $group still works, it"
+      note "  just keeps log events indefinitely (CloudWatch default) for now."
+    fi
+  else
+    note "  Skipped — $group keeps log events indefinitely (CloudWatch default)."
+  fi
+}
+
 step_cluster_taskdef() {
   if aws ecs describe-clusters --clusters "$CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
     note "✓ ECS cluster '$CLUSTER' exists — reusing."
@@ -639,7 +697,11 @@ step_cluster_taskdef() {
     confirm "Create ECS (Fargate) cluster '$CLUSTER'?"; local r=$?; abort_if_quit $r
     [[ $r -eq 0 ]] && run aws ecs create-cluster --cluster-name "$CLUSTER" --region "$AWS_REGION" >/dev/null || note "  skipped."
   fi
-  run aws logs create-log-group --log-group-name /ecs/moo-cloud-bill --region "$AWS_REGION" 2>/dev/null || true
+  if ! ensure_log_group; then
+    note "! Stopping before registering the task definition — fix the log group"
+    note "  issue above first, then re-run (earlier steps are reused, not repeated)."
+    return 1
+  fi
 
   local taskdef
   taskdef="$(cat <<JSON
