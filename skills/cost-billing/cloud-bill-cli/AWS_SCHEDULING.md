@@ -255,8 +255,17 @@ aws ecs run-task \
 aws logs tail /ecs/moo-cloud-bill --follow --region "$AWS_REGION"
 ```
 
-A clean run exits 0; a failed day exits non-zero and logs the failing day (the schedule
-will surface that as a failed invocation).
+A clean run exits 0; a failed day exits non-zero and logs the failing day. EventBridge
+Scheduler only observes whether its `ecs:RunTask` API call was accepted; it does not
+turn a later container failure into a failed Scheduler invocation. Monitor the ECS task
+state and `/ecs/moo-cloud-bill` logs for runtime failures.
+
+The guided installer waits for this verification task and checks its exit code before
+creating the schedule. If the application never starts because of a transient
+infrastructure error such as `CannotPullContainerError`, it safely retries up to three
+times. It does not retry a non-zero application exit, because a push may have posted
+some day-batches before failing. If verification does not pass, the installer stops
+without creating the daily schedule.
 
 ---
 
