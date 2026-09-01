@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from moo_cloud_bill.cur_columns import DEFAULT_COLUMN_MAP
-from moo_cloud_bill.mapper import build_daily_batches
+from moo_cloud_bill.mapper import build_daily_batches, normalize_aws_cur_resource_id
 
 CM = DEFAULT_COLUMN_MAP
 
@@ -154,3 +154,64 @@ def test_daily_period_bounds_are_half_open_utc_day():
     b = batches[0]
     assert b.billing_period_start.isoformat() == "2026-05-14T00:00:00+00:00"
     assert b.billing_period_end.isoformat() == "2026-05-15T00:00:00+00:00"
+
+
+def test_normalizes_aws_cur_client_vpn_connection_to_endpoint_arn():
+    resource_id = (
+        "arn:aws:client-vpn:123456789012:us-east-1:"
+        "endpoint/cvpn-endpoint-0123456789abcdef0/connection/1234567890"
+    )
+
+    assert normalize_aws_cur_resource_id(resource_id, region="us-east-1") == (
+        "arn:aws:ec2:us-east-1:123456789012:"
+        "client-vpn-endpoint/cvpn-endpoint-0123456789abcdef0"
+    )
+
+
+def test_normalizes_aws_cur_client_vpn_association_to_endpoint_arn():
+    resource_id = (
+        "arn:aws:client-vpn:123456789012:us-east-1:"
+        "endpoint/cvpn-endpoint-0123456789abcdef0/association/cvpn-assoc-0123456789abcdef0"
+    )
+
+    assert normalize_aws_cur_resource_id(resource_id, region="us-east-1") == (
+        "arn:aws:ec2:us-east-1:123456789012:"
+        "client-vpn-endpoint/cvpn-endpoint-0123456789abcdef0"
+    )
+
+
+def test_client_vpn_normalization_is_applied_before_daily_aggregation():
+    connection = (
+        "arn:aws:client-vpn:123456789012:us-east-1:"
+        "endpoint/cvpn-endpoint-0123456789abcdef0/connection/1234567890"
+    )
+    association = (
+        "arn:aws:client-vpn:123456789012:us-east-1:"
+        "endpoint/cvpn-endpoint-0123456789abcdef0/association/cvpn-assoc-0123456789abcdef0"
+    )
+
+    batches, _ = build_daily_batches(
+        [row(1, rid=connection), row(2, rid=association)], CM
+    )
+
+    assert len(batches[0].rows) == 1
+    assert batches[0].rows[0].cost == Decimal("3")
+    assert batches[0].rows[0].resource_id == (
+        "arn:aws:ec2:us-east-1:123456789012:"
+        "client-vpn-endpoint/cvpn-endpoint-0123456789abcdef0"
+    )
+
+
+def test_client_vpn_normalization_fails_closed_on_region_mismatch():
+    resource_id = (
+        "arn:aws:client-vpn:123456789012:us-east-1:"
+        "endpoint/cvpn-endpoint-0123456789abcdef0/connection/1234567890"
+    )
+
+    assert normalize_aws_cur_resource_id(resource_id, region="us-west-2") == resource_id
+
+
+def test_unknown_malformed_aws_arn_is_not_rewritten():
+    resource_id = "arn:aws:unknown:123456789012:us-east-1:resource/example"
+
+    assert normalize_aws_cur_resource_id(resource_id, region="us-east-1") == resource_id

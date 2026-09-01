@@ -9,6 +9,7 @@ Negative cost (credits): Acute rejects cost<0 (422), so we exclude + record them
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -24,6 +25,22 @@ GrainKey = tuple[str, str, str, str]
 # (`currency` is intentionally NOT required: if a non-standard CUR omits it, falling
 # back to the reporting currency — i.e. "no FX" — is a sensible, non-corrupting default.)
 REQUIRED_COLUMNS = ("service_name", "cost", "usage_start")
+
+# AWS CUR 2.0 emits Client VPN billing identifiers that look like ARNs but put
+# account before region and use a non-IAM ``client-vpn`` service/resource shape:
+#
+#   arn:aws:client-vpn:<account>:<region>:endpoint/<id>/connection/<id>
+#
+# Acute intentionally rejects malformed ARN-looking values. Convert only this
+# observed CUR shape to the documented EC2 Client VPN endpoint ARN. The
+# endpoint is the addressable AWS resource; connection/association suffixes are
+# billing detail, already retained independently by the CUR usage type.
+_AWS_CUR_CLIENT_VPN_RESOURCE_RE = re.compile(
+    r"^arn:(?P<partition>aws|aws-cn|aws-us-gov):client-vpn:"
+    r"(?P<account_id>[0-9]{12}):(?P<region>[a-z0-9-]+):"
+    r"endpoint/(?P<endpoint_id>cvpn-endpoint-[a-z0-9]+)"
+    r"(?:/(?:connection|association)/[^/]+)?$"
+)
 
 
 def parse_timestamp(value, col_name: str = "usage_start") -> datetime:
@@ -104,6 +121,35 @@ def parse_cost(raw_value, col_name: str) -> Decimal:
         ) from exc
 
 
+def normalize_aws_cur_resource_id(
+    resource_id: str | None,
+    *,
+    region: str | None,
+) -> str | None:
+    """Normalize known AWS CUR pseudo-ARNs without guessing unknown identities.
+
+    AWS's addressable Client VPN resource is an EC2 ``client-vpn-endpoint`` ARN.
+    If the CUR identity contradicts the row's explicit region, retain the raw
+    value so Acute rejects the ambiguity instead of silently misattributing it.
+    """
+    if not resource_id:
+        return resource_id
+
+    match = _AWS_CUR_CLIENT_VPN_RESOURCE_RE.fullmatch(resource_id.strip())
+    if match is None:
+        return resource_id
+
+    cur_region = match.group("region")
+    explicit_region = (region or "").strip()
+    if explicit_region and explicit_region != cur_region:
+        return resource_id
+
+    return (
+        f"arn:{match.group('partition')}:ec2:{cur_region}:"
+        f"{match.group('account_id')}:client-vpn-endpoint/{match.group('endpoint_id')}"
+    )
+
+
 def build_daily_batches(
     raw_rows,
     column_map: dict[str, str],
@@ -129,8 +175,10 @@ def build_daily_batches(
 
         service = str(raw[col["service_name"]] or "")
         cost = parse_cost(raw[col["cost"]], col["cost"])
-        resource_id = raw.get(col["resource_id"]) or None
         region = raw.get(col["region"]) or None
+        resource_id = raw.get(col["resource_id"]) or None
+        if cloud_provider.strip().lower() == "aws":
+            resource_id = normalize_aws_cur_resource_id(resource_id, region=region)
         usage_type = raw.get(col["usage_type"]) or None
         currency = str(raw.get(col["currency"], reporting_currency) or reporting_currency)
 
