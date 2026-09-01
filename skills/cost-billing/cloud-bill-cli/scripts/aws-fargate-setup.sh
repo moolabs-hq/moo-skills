@@ -6,7 +6,7 @@
 #   • checks prerequisites (aws CLI, Docker or Podman) and offers to install missing ones,
 #   • DISCLOSES the full plan (every resource it would create, with the IAM action),
 #   • REUSES anything that already exists (describe-before-create),
-#   • asks PERMISSION before EACH create — answer "n" to skip a step or "q" to stop,
+#   • asks before EACH create and before replacing an existing API-key secret,
 #   • supports --dry-run (print every command, change nothing).
 #
 # Nothing is created without your explicit yes. Re-running is safe (idempotent).
@@ -578,7 +578,7 @@ discover_network() {
 show_plan() {
   hr; say "  PLAN — what this will create in your AWS account (region $AWS_REGION):"
   note ""
-  note "  1. Secrets Manager secret  '$SECRET_NAME'         [secretsmanager:CreateSecret]"
+  note "  1. Secrets Manager secret  '$SECRET_NAME'         [secretsmanager:CreateSecret/PutSecretValue]"
   note "       ← your Moolabs API key (so the task never bakes it in)"
   note "  2. ECR repo  '$ECR_REPO'  + build & push the image  [ecr:CreateRepository, push]"
   note "  3. IAM role  mooCloudBillExecRole   (pull image, read the secret, logs)"
@@ -588,7 +588,8 @@ show_plan() {
   note "  7. On-demand VERIFY run (safe pre-start failures retry up to $VERIFY_MAX_ATTEMPTS times) — optional"
   note "  8. EventBridge schedule '$SCHEDULE_NAME'  ($SCHEDULE_CRON UTC, daily)"
   note ""
-  note "  Each step asks before it runs and is SKIPPED if the resource already exists."
+  note "  Each create asks before it runs. Existing resources are reused; the API-key"
+  note "  secret explicitly offers an update so key rotation or tenant changes take effect."
   [[ $DRY_RUN -eq 1 ]] && note "  [--dry-run] nothing will actually be created."
   hr
 }
@@ -600,18 +601,44 @@ ECS_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"
 
 step_secret() {
   if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-    note "✓ secret '$SECRET_NAME' exists — reusing."
+    note "✓ secret '$SECRET_NAME' exists."
+    local r=0
+    confirm "Update it with the Moolabs API key captured by this run?" "y" || r=$?
+    abort_if_quit "$r"
+    if [[ $r -eq 0 ]]; then
+      # NEVER route this through run(): run() echoes every argument, including
+      # --secret-string. Print a deliberately masked command instead.
+      printf '    $ aws secretsmanager put-secret-value --secret-id %s --secret-string ****hidden**** --region %s\n' "$SECRET_NAME" "$AWS_REGION" >&2
+      if [[ $DRY_RUN -eq 0 ]]; then
+        if ! aws secretsmanager put-secret-value --secret-id "$SECRET_NAME" \
+          --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null; then
+          note "! Could not update secret '$SECRET_NAME' (see the AWS error above)."
+          note "  Stopping so Fargate cannot silently run with a stale API key."
+          return 1
+        fi
+        note "✓ Updated secret '$SECRET_NAME' with the API key captured by this run."
+      else
+        note "[dry-run] would update the existing secret value."
+      fi
+    else
+      note "  Kept the existing secret value. If the API key or Moolabs tenant changed,"
+      note "  verification will fail until this secret is updated."
+    fi
   else
     local r=0; confirm "Create Secrets Manager secret '$SECRET_NAME' with your Moolabs API key?" || r=$?
     abort_if_quit "$r"
     if [[ $r -eq 0 ]]; then
       # NEVER echo the key — print a masked command, pass the real value only to aws.
       printf '    $ aws secretsmanager create-secret --name %s --secret-string ****hidden**** --region %s\n' "$SECRET_NAME" "$AWS_REGION" >&2
-      [[ $DRY_RUN -eq 0 ]] && aws secretsmanager create-secret --name "$SECRET_NAME" \
+      if [[ $DRY_RUN -eq 0 ]] && ! aws secretsmanager create-secret --name "$SECRET_NAME" \
         --description "Moolabs API key for moo-cloud-bill push" \
-        --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null
+        --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null; then
+        note "! Could not create secret '$SECRET_NAME' (see the AWS error above)."
+        return 1
+      fi
     else
-      note "  skipped."
+      note "  skipped — cannot register a runnable task without the API-key secret."
+      return 1
     fi
   fi
   SECRET_ARN="$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" --query ARN --output text 2>/dev/null || echo "arn:aws:secretsmanager:$AWS_REGION:$ACCOUNT_ID:secret:$SECRET_NAME")"
@@ -939,7 +966,11 @@ main() {
     exit 0
   fi
 
-  say ""; say "  Step 1/8 — Secrets Manager";        step_secret
+  say ""; say "  Step 1/8 — Secrets Manager"
+  if ! step_secret; then
+    note "! Secret setup did not complete; stopping before image, task, and schedule changes."
+    exit 1
+  fi
   say "  Step 2/8 — Image (ECR)";                    step_image
   say "  Step 3/8 — Execution role";                 step_exec_role
   say "  Step 4/8 — Task role";                      step_task_role

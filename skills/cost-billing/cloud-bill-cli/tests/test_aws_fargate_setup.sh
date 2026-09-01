@@ -30,6 +30,7 @@ VERIFY_RETRY_DELAY_SECONDS=0
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
 RUN_COUNT_FILE="$TEST_DIR/run-count"
+SECRET_UPDATE_MARKER="$TEST_DIR/secret-updated"
 SCENARIO=""
 
 reset_run_count() { printf '0\n' > "$RUN_COUNT_FILE"; }
@@ -40,6 +41,31 @@ sleep() { :; }
 # shellcheck disable=SC2329
 aws() {
   local service="${1:-}" operation="${2:-}"
+  if [[ "$service $operation" == "secretsmanager describe-secret" ]]; then
+    case "$SCENARIO" in
+      secret_exists_update|secret_update_failure)
+        printf 'arn:aws:secretsmanager:us-east-1:123456789012:secret:moo-cloud-bill/api-key-test\n'
+        return 0 ;;
+    esac
+  fi
+
+  if [[ "$service $operation" == "secretsmanager put-secret-value" ]]; then
+    local previous="" supplied_key=""
+    shift 2
+    while [[ $# -gt 0 ]]; do
+      if [[ "$previous" == "--secret-string" ]]; then supplied_key="$1"; break; fi
+      previous="$1"
+      shift
+    done
+    [[ "$supplied_key" == "$API_KEY" ]] || {
+      printf 'put-secret-value did not receive the current API key\n' >&2
+      return 1
+    }
+    [[ "$SCENARIO" == "secret_update_failure" ]] && return 42
+    : > "$SECRET_UPDATE_MARKER"
+    return 0
+  fi
+
   if [[ "$service $operation" == "ecs run-task" ]]; then
     local count
     count="$(run_count)"
@@ -82,6 +108,33 @@ aws() {
 }
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+# A rerun must offer to propagate the API key captured by `init` into the
+# existing Fargate secret. The real key must never appear in terminal output.
+# shellcheck disable=SC2034
+ACCOUNT_ID="123456789012"
+# shellcheck disable=SC2034
+SECRET_NAME="moo-cloud-bill/api-key"
+# shellcheck disable=SC2034
+API_KEY="test-rotated-api-key-never-print"
+SCENARIO="secret_exists_update"
+rm -f "$SECRET_UPDATE_MARKER"
+secret_output="$TEST_DIR/secret-output"
+step_secret >"$secret_output" 2>&1 || fail "existing secret update should succeed"
+[[ -e "$SECRET_UPDATE_MARKER" ]] || fail "existing secret was silently reused instead of updated"
+grep -q "put-secret-value.*\\*\\*\\*\\*hidden\\*\\*\\*\\*" "$secret_output" \
+  || fail "secret update command was not shown safely masked"
+if grep -q "$API_KEY" "$secret_output"; then
+  fail "secret update leaked the API key to terminal output"
+fi
+
+SCENARIO="secret_update_failure"
+secret_failure_output="$TEST_DIR/secret-failure-output"
+if step_secret >"$secret_failure_output" 2>&1; then
+  fail "failed secret update must stop setup"
+fi
+grep -q "cannot silently run with a stale API key" "$secret_failure_output" \
+  || fail "secret update failure did not explain the stale-key risk"
 
 SCENARIO="retry_then_success"
 reset_run_count
@@ -151,4 +204,16 @@ if (main >"$TEST_DIR/main-output" 2>&1); then
 fi
 [[ ! -e "$schedule_marker" ]] || fail "main created a schedule after failed verification"
 
-printf 'PASS: Fargate verification retries only safe pre-start failures and blocks application failures\n'
+post_secret_marker="$TEST_DIR/post-secret-step-ran"
+step_secret() { return 1; }
+step_image() { : > "$post_secret_marker"; }
+step_verify() { return 0; }
+if (main >"$TEST_DIR/main-secret-failure-output" 2>&1); then
+  fail "main must fail when an API-key secret update fails"
+fi
+[[ ! -e "$post_secret_marker" ]] \
+  || fail "main continued to image/task mutations after secret setup failed"
+grep -q "Secret setup did not complete" "$TEST_DIR/main-secret-failure-output" \
+  || fail "main did not explain that secret failure stopped the setup"
+
+printf 'PASS: Fargate setup rotates existing API-key secrets, masks key output, and verifies safely\n'

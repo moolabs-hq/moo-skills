@@ -77,15 +77,23 @@ export CLUSTER=moo-cloud-bill               # an ECS cluster name (create below 
 
 ## 1. Store the Moolabs API key in Secrets Manager
 
-The key is generated in the Moolabs UI. Store it once; the task reads it at runtime
-(it is **never** baked into the image or the task definition in plaintext).
+The key is generated in the Moolabs UI. The task reads it at runtime (it is **never**
+baked into the image or the task definition in plaintext). When the key is rotated
+or the connector changes tenant, update this value; merely changing the local
+`moo-cloud-bill` credentials file does not change the Fargate secret.
 
 ```bash
-# Reuse: if you already have it, run `aws secretsmanager describe-secret --secret-id moo-cloud-bill/api-key` and skip.
+# First setup: create the secret.
 aws secretsmanager create-secret \
   --name moo-cloud-bill/api-key \
   --description "Moolabs API key for moo-cloud-bill push" \
   --secret-string "mlk_xxxxxxxxxxxxxxxx" \
+  --region "$AWS_REGION"
+
+# Rerun/key rotation: replace the value instead of silently reusing the old key.
+aws secretsmanager put-secret-value \
+  --secret-id moo-cloud-bill/api-key \
+  --secret-string "mlk_REPLACEMENT_KEY" \
   --region "$AWS_REGION"
 
 export SECRET_ARN=$(aws secretsmanager describe-secret \
