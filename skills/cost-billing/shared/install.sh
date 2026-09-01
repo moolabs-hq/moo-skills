@@ -173,6 +173,9 @@ ROOT_PLUGIN_MANIFEST="$SUITE_SRC_DIR/../../.claude-plugin/plugin.json"
 MIN_PYTHON_VERSION="3.11"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/aws-session.sh"
+
 require_supported_python() {
   if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "ERROR: Python ${MIN_PYTHON_VERSION}+ is required to install and run the cost-billing discovery skills; '$PYTHON_BIN' was not found." >&2
@@ -1105,19 +1108,7 @@ run_cur_setup_wizard() {
   [[ -n "$aws_profile" ]] && profile_args=(--profile "$aws_profile")
 
   if command -v aws >/dev/null 2>&1; then
-    local _identity_account
-    _identity_account="$(aws sts get-caller-identity "${profile_args[@]}" --query Account --output text 2>/dev/null)"
-    if [[ -n "$_identity_account" && "$_identity_account" != "None" ]]; then
-      echo "  ✓ Already authenticated (account $_identity_account) — skipping SSO login."
-    else
-      printf "  Run 'aws sso login %s' now? [Y/n]: " "${aws_profile:+--profile $aws_profile}"
-      read -r ans
-      case "$ans" in
-        n|N|no|NO) echo "    Skipping SSO login — ensure your credentials are valid." ;;
-        *) aws sso login "${profile_args[@]}" \
-             || echo "    ! 'aws sso login' failed (non-SSO profile or error) — continuing; configure will report if creds are invalid." ;;
-      esac
-    fi
+    ensure_aws_profile_session "$aws_profile"
   else
     echo "    (aws CLI not found — ensure your AWS credentials are valid before configure)"
   fi
