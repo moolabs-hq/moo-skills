@@ -65,7 +65,7 @@ export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export CUR_BUCKET=my-cur-bucket             # from `configure`
 export CUR_PREFIX=cur2                       # from `configure`
 export REPORT_NAME=moolabs-cur2             # from `configure`
-export ACUTE_BASE=https://acute.prod.moolabs.com   # from `configure`
+export ACUTE_BASE=https://acute.moolabs.com        # from `configure`
 export REPORTING_CURRENCY=USD
 export SUBNETS=subnet-aaaa,subnet-bbbb      # your VPC subnets (egress to internet)
 export SECURITY_GROUP=sg-cccc               # egress allowed
@@ -77,15 +77,23 @@ export CLUSTER=moo-cloud-bill               # an ECS cluster name (create below 
 
 ## 1. Store the Moolabs API key in Secrets Manager
 
-The key is generated in the Moolabs UI. Store it once; the task reads it at runtime
-(it is **never** baked into the image or the task definition in plaintext).
+The key is generated in the Moolabs UI. The task reads it at runtime (it is **never**
+baked into the image or the task definition in plaintext). When the key is rotated
+or the connector changes tenant, update this value; merely changing the local
+`moo-cloud-bill` credentials file does not change the Fargate secret.
 
 ```bash
-# Reuse: if you already have it, run `aws secretsmanager describe-secret --secret-id moo-cloud-bill/api-key` and skip.
+# First setup: create the secret.
 aws secretsmanager create-secret \
   --name moo-cloud-bill/api-key \
   --description "Moolabs API key for moo-cloud-bill push" \
   --secret-string "mlk_xxxxxxxxxxxxxxxx" \
+  --region "$AWS_REGION"
+
+# Rerun/key rotation: replace the value instead of silently reusing the old key.
+aws secretsmanager put-secret-value \
+  --secret-id moo-cloud-bill/api-key \
+  --secret-string "mlk_REPLACEMENT_KEY" \
   --region "$AWS_REGION"
 
 export SECRET_ARN=$(aws secretsmanager describe-secret \
@@ -255,8 +263,17 @@ aws ecs run-task \
 aws logs tail /ecs/moo-cloud-bill --follow --region "$AWS_REGION"
 ```
 
-A clean run exits 0; a failed day exits non-zero and logs the failing day (the schedule
-will surface that as a failed invocation).
+A clean run exits 0; a failed day exits non-zero and logs the failing day. EventBridge
+Scheduler only observes whether its `ecs:RunTask` API call was accepted; it does not
+turn a later container failure into a failed Scheduler invocation. Monitor the ECS task
+state and `/ecs/moo-cloud-bill` logs for runtime failures.
+
+The guided installer waits for this verification task and checks its exit code before
+creating the schedule. If the application never starts because of a transient
+infrastructure error such as `CannotPullContainerError`, it safely retries up to three
+times. It does not retry a non-zero application exit, because a push may have posted
+some day-batches before failing. If verification does not pass, the installer stops
+without creating the daily schedule.
 
 ---
 

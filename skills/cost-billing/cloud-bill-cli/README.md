@@ -49,7 +49,8 @@ Secrets Manager, and is fully containerized (`Dockerfile` included).
 
 → **Guided setup: [`scripts/aws-fargate-setup.sh`](./scripts/aws-fargate-setup.sh)** —
 runs the AWS CLI for you, but shows a plan, reuses what exists, and asks before EACH
-create (`--dry-run` to preview). `install.sh` offers to run it.
+create (`--dry-run` to preview). On reruns it also offers to update the existing
+Secrets Manager value with the API key captured by `init`. `install.sh` offers to run it.
 → **Manual reference: [`AWS_SCHEDULING.md`](./AWS_SCHEDULING.md)** — the same steps as
 commands you run yourself.
 

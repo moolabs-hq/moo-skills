@@ -1236,10 +1236,10 @@ _run_aws_fargate_setup() {
     return 0
   fi
   echo "  Guided AWS Fargate setup. It will:"
-  echo "    • check prerequisites (aws CLI, docker) and offer to install missing ones,"
+  echo "    • check prerequisites (aws CLI, Docker or Podman) and offer to install missing ones,"
   echo "    • show a PLAN (Secrets Manager secret, ECR image, 3 IAM roles, ECS task +"
   echo "      cluster, EventBridge schedule),"
-  echo "    • REUSE anything that already exists and ASK before EACH create."
+  echo "    • REUSE existing resources, ASK before EACH create, and offer API-key rotation."
   echo ""
   echo "    y) Run it now (you confirm each step)"
   echo "    d) Dry-run first (print every command, change nothing)"

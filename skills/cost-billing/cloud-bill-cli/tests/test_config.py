@@ -20,6 +20,7 @@ def test_acute_base_from_domain(domain, expected):
 
 
 def test_acute_base_from_blank_domain_falls_back():
+    assert DEFAULT_ACUTE_BASE == "https://acute.moolabs.com"
     assert acute_base_from_domain("  ") == DEFAULT_ACUTE_BASE
 
 

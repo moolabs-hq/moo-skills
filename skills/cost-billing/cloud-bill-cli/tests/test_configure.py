@@ -14,6 +14,7 @@ def test_reuse_path_does_not_create(tmp_path):
     cfg = run_configure(cl, ui, config_dir=tmp_path, column_map_path=tmp_path / "cm.yaml")
     assert cfg.bucket == "existing-bucket"
     assert cfg.report_name == "existing-cur2"
+    assert cfg.acute_base == "https://acute.moolabs.com"
     assert cl["exports"].created == []  # nothing created
 
 

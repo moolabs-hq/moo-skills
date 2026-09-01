@@ -3,10 +3,10 @@
 #
 # This is the AUTOMATED version of AWS_SCHEDULING.md: it runs the AWS CLI commands
 # for you — but on YOUR terms. It:
-#   • checks prerequisites (aws CLI, docker) and offers to install missing ones,
+#   • checks prerequisites (aws CLI, Docker or Podman) and offers to install missing ones,
 #   • DISCLOSES the full plan (every resource it would create, with the IAM action),
 #   • REUSES anything that already exists (describe-before-create),
-#   • asks PERMISSION before EACH create — answer "n" to skip a step or "q" to stop,
+#   • asks before EACH create and before replacing an existing API-key secret,
 #   • supports --dry-run (print every command, change nothing).
 #
 # Nothing is created without your explicit yes. Re-running is safe (idempotent).
@@ -34,6 +34,9 @@ SCHEDULE_NAME="moo-cloud-bill-daily-push"
 SCHEDULE_CRON="cron(17 6 * * ? *)"
 SUBNETS=""
 SECURITY_GROUP=""
+CONTAINER_CLI="${CONTAINER_CLI:-}"
+VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-3}"
+VERIFY_RETRY_DELAY_SECONDS="${VERIFY_RETRY_DELAY_SECONDS:-15}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -110,6 +113,47 @@ ensure_prereq() {
   fi
 }
 
+ensure_container_cli() {
+  if [[ -n "$CONTAINER_CLI" ]]; then
+    command -v "$CONTAINER_CLI" >/dev/null 2>&1 || {
+      note "✗ configured container CLI '$CONTAINER_CLI' was not found on PATH."
+      exit 1
+    }
+  elif command -v docker >/dev/null 2>&1; then
+    CONTAINER_CLI="docker"
+  elif command -v podman >/dev/null 2>&1; then
+    CONTAINER_CLI="podman"
+  else
+    note "✗ neither docker nor podman was found — one is required."
+    local hint; hint="$(pkg_install_hint docker)"
+    if confirm "Install docker now via: $hint ?"; then
+      run bash -c "$hint" || { note "! install failed — install Docker or Podman manually, then re-run."; exit 1; }
+      command -v docker >/dev/null 2>&1 || {
+        note "! docker still isn't on PATH. Install Docker or Podman, ensure its engine is running, then re-run."
+        exit 1
+      }
+      CONTAINER_CLI="docker"
+    else
+      note "Can't proceed without Docker or Podman. Install one and re-run, or use the manual runbook: $CLI_DIR/AWS_SCHEDULING.md"
+      exit 1
+    fi
+  fi
+
+  note "✓ container CLI found: $CONTAINER_CLI"
+  [[ $DRY_RUN -eq 1 ]] && return 0
+
+  if ! "$CONTAINER_CLI" info >/dev/null 2>&1; then
+    note "✗ $CONTAINER_CLI is installed, but its container engine is not available."
+    if [[ "$(basename "$CONTAINER_CLI")" == "podman" ]]; then
+      note "  On macOS, start a machine first: podman machine start <machine-name>"
+      note "  List available machines with: podman machine list"
+    else
+      note "  Start Docker Desktop (or the Docker daemon), then re-run."
+    fi
+    exit 1
+  fi
+}
+
 # ── Inputs ────────────────────────────────────────────────────────────────────
 
 load_cli_config() {
@@ -144,7 +188,7 @@ PY
     [[ -z "$CUR_BUCKET" ]]  && read -r -p "  CUR S3 bucket: " CUR_BUCKET
     [[ -z "$CUR_PREFIX" ]]  && read -r -p "  CUR S3 prefix (e.g. cur2): " CUR_PREFIX
     [[ -z "$REPORT_NAME" ]] && read -r -p "  CUR export name (e.g. moolabs-cur2): " REPORT_NAME
-    [[ -z "$ACUTE_BASE" ]]  && read -r -p "  Acute base URL (e.g. https://acute.prod.moolabs.com): " ACUTE_BASE
+    [[ -z "$ACUTE_BASE" ]]  && read -r -p "  Acute base URL (e.g. https://acute.moolabs.com): " ACUTE_BASE
   fi
 }
 
@@ -534,17 +578,18 @@ discover_network() {
 show_plan() {
   hr; say "  PLAN — what this will create in your AWS account (region $AWS_REGION):"
   note ""
-  note "  1. Secrets Manager secret  '$SECRET_NAME'         [secretsmanager:CreateSecret]"
+  note "  1. Secrets Manager secret  '$SECRET_NAME'         [secretsmanager:CreateSecret/PutSecretValue]"
   note "       ← your Moolabs API key (so the task never bakes it in)"
   note "  2. ECR repo  '$ECR_REPO'  + build & push the image  [ecr:CreateRepository, push]"
   note "  3. IAM role  mooCloudBillExecRole   (pull image, read the secret, logs)"
   note "  4. IAM role  mooCloudBillTaskRole   (read CUR from s3://$CUR_BUCKET/$CUR_PREFIX/*)"
   note "  5. IAM role  mooCloudBillSchedulerRole (let EventBridge run the task)"
   note "  6. ECS cluster '$CLUSTER' + log group + Fargate task definition"
-  note "  7. One on-demand VERIFY run (to confirm wiring) — optional"
+  note "  7. On-demand VERIFY run (safe pre-start failures retry up to $VERIFY_MAX_ATTEMPTS times) — optional"
   note "  8. EventBridge schedule '$SCHEDULE_NAME'  ($SCHEDULE_CRON UTC, daily)"
   note ""
-  note "  Each step asks before it runs and is SKIPPED if the resource already exists."
+  note "  Each create asks before it runs. Existing resources are reused; the API-key"
+  note "  secret explicitly offers an update so key rotation or tenant changes take effect."
   [[ $DRY_RUN -eq 1 ]] && note "  [--dry-run] nothing will actually be created."
   hr
 }
@@ -556,18 +601,44 @@ ECS_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"
 
 step_secret() {
   if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-    note "✓ secret '$SECRET_NAME' exists — reusing."
+    note "✓ secret '$SECRET_NAME' exists."
+    local r=0
+    confirm "Update it with the Moolabs API key captured by this run?" "y" || r=$?
+    abort_if_quit "$r"
+    if [[ $r -eq 0 ]]; then
+      # NEVER route this through run(): run() echoes every argument, including
+      # --secret-string. Print a deliberately masked command instead.
+      printf '    $ aws secretsmanager put-secret-value --secret-id %s --secret-string ****hidden**** --region %s\n' "$SECRET_NAME" "$AWS_REGION" >&2
+      if [[ $DRY_RUN -eq 0 ]]; then
+        if ! aws secretsmanager put-secret-value --secret-id "$SECRET_NAME" \
+          --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null; then
+          note "! Could not update secret '$SECRET_NAME' (see the AWS error above)."
+          note "  Stopping so Fargate cannot silently run with a stale API key."
+          return 1
+        fi
+        note "✓ Updated secret '$SECRET_NAME' with the API key captured by this run."
+      else
+        note "[dry-run] would update the existing secret value."
+      fi
+    else
+      note "  Kept the existing secret value. If the API key or Moolabs tenant changed,"
+      note "  verification will fail until this secret is updated."
+    fi
   else
     local r=0; confirm "Create Secrets Manager secret '$SECRET_NAME' with your Moolabs API key?" || r=$?
     abort_if_quit "$r"
     if [[ $r -eq 0 ]]; then
       # NEVER echo the key — print a masked command, pass the real value only to aws.
       printf '    $ aws secretsmanager create-secret --name %s --secret-string ****hidden**** --region %s\n' "$SECRET_NAME" "$AWS_REGION" >&2
-      [[ $DRY_RUN -eq 0 ]] && aws secretsmanager create-secret --name "$SECRET_NAME" \
+      if [[ $DRY_RUN -eq 0 ]] && ! aws secretsmanager create-secret --name "$SECRET_NAME" \
         --description "Moolabs API key for moo-cloud-bill push" \
-        --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null
+        --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null; then
+        note "! Could not create secret '$SECRET_NAME' (see the AWS error above)."
+        return 1
+      fi
     else
-      note "  skipped."
+      note "  skipped — cannot register a runnable task without the API-key secret."
+      return 1
     fi
   fi
   SECRET_ARN="$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" --query ARN --output text 2>/dev/null || echo "arn:aws:secretsmanager:$AWS_REGION:$ACCOUNT_ID:secret:$SECRET_NAME")"
@@ -581,11 +652,11 @@ step_image() {
     confirm "Create ECR repo '$ECR_REPO'?"; local r=$?; abort_if_quit $r
     [[ $r -eq 0 ]] && run aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null || { note "  skipped repo; cannot push image."; return 0; }
   fi
-  confirm "Build the image (linux/amd64) and push to ECR? (needs docker)"; local b=$?; abort_if_quit $b
+  confirm "Build the image (linux/amd64) and push to ECR? (using $CONTAINER_CLI)"; local b=$?; abort_if_quit $b
   if [[ $b -eq 0 ]]; then
-    run bash -c "aws ecr get-login-password --region '$AWS_REGION' | docker login --username AWS --password-stdin '$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com'"
-    run docker build --platform linux/amd64 -t "$IMAGE" "$CLI_DIR"
-    run docker push "$IMAGE"
+    run bash -c "aws ecr get-login-password --region '$AWS_REGION' | '$CONTAINER_CLI' login --username AWS --password-stdin '$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com'"
+    run "$CONTAINER_CLI" build --platform linux/amd64 -t "$IMAGE" "$CLI_DIR"
+    run "$CONTAINER_CLI" push "$IMAGE"
   else
     note "  skipped build/push — the task def will reference $IMAGE (push it before scheduling)."
   fi
@@ -632,6 +703,64 @@ step_scheduler_role() {
   SCHED_ROLE_ARN="$(aws iam get-role --role-name mooCloudBillSchedulerRole --query Role.Arn --output text 2>/dev/null || echo "arn:aws:iam::$ACCOUNT_ID:role/mooCloudBillSchedulerRole")"
 }
 
+# Create /ecs/moo-cloud-bill and VERIFY it's actually there afterward — the old
+# code was `... create-log-group ... 2>/dev/null || true`, which swallows every
+# failure (wrong region, IAM denied, race) and reports success regardless. That's
+# exactly how a task can run daily for weeks and never produce a single log line:
+# the group never existed, the awslogs driver has nowhere to write, and nobody
+# printed an error to notice. If creation fails or the after-the-fact
+# describe-log-groups doesn't confirm it, this step now says so and returns
+# non-zero instead of moving on quietly.
+ensure_log_group() {
+  local group="/ecs/moo-cloud-bill"
+  local existing
+  existing="$(aws logs describe-log-groups --log-group-name-prefix "$group" \
+    --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text 2>/dev/null)"
+
+  if [[ "$existing" == "$group" ]]; then
+    note "✓ CloudWatch log group $group exists — reusing."
+  else
+    if ! run aws logs create-log-group --log-group-name "$group" --region "$AWS_REGION"; then
+      note "! Could not create log group $group (see the AWS error above)."
+      note "  Without it, the push task's awslogs driver has nowhere to write — it will"
+      note "  keep running on schedule but produce ZERO log output. Fix the error above"
+      note "  (commonly IAM or wrong --region), then re-run this script."
+      return 1
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+      note "[dry-run] would verify via describe-log-groups after creating."
+    else
+      existing="$(aws logs describe-log-groups --log-group-name-prefix "$group" \
+        --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text 2>/dev/null)"
+      if [[ "$existing" != "$group" ]]; then
+        note "! create-log-group reported success but $group isn't visible via"
+        note "  describe-log-groups in region $AWS_REGION. Check the region and re-run"
+        note "  before scheduling — otherwise the daily push will log nowhere."
+        return 1
+      fi
+      note "✓ Created and verified: $group ($AWS_REGION)"
+    fi
+  fi
+
+  # Retention is DESTRUCTIVE, not additive: CloudWatch's default is to keep log
+  # events forever, and narrowing it prunes anything already older than the
+  # window too — not just what's written going forward. Ask, like every other
+  # AWS mutation in this script.
+  confirm "Set 7-day retention on $group? (deletes any log events older than 7 days — CloudWatch's default is to keep them forever)"
+  local ret=$?; abort_if_quit $ret
+  if [[ $ret -eq 0 ]]; then
+    if run aws logs put-retention-policy --log-group-name "$group" \
+         --retention-in-days 7 --region "$AWS_REGION"; then
+      note "✓ Retention set: 7 days."
+    else
+      note "! Failed to set retention (see AWS error above) — $group still works, it"
+      note "  just keeps log events indefinitely (CloudWatch default) for now."
+    fi
+  else
+    note "  Skipped — $group keeps log events indefinitely (CloudWatch default)."
+  fi
+}
+
 step_cluster_taskdef() {
   if aws ecs describe-clusters --clusters "$CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
     note "✓ ECS cluster '$CLUSTER' exists — reusing."
@@ -639,7 +768,11 @@ step_cluster_taskdef() {
     confirm "Create ECS (Fargate) cluster '$CLUSTER'?"; local r=$?; abort_if_quit $r
     [[ $r -eq 0 ]] && run aws ecs create-cluster --cluster-name "$CLUSTER" --region "$AWS_REGION" >/dev/null || note "  skipped."
   fi
-  run aws logs create-log-group --log-group-name /ecs/moo-cloud-bill --region "$AWS_REGION" 2>/dev/null || true
+  if ! ensure_log_group; then
+    note "! Stopping before registering the task definition — fix the log group"
+    note "  issue above first, then re-run (earlier steps are reused, not repeated)."
+    return 1
+  fi
 
   local taskdef
   taskdef="$(cat <<JSON
@@ -657,21 +790,94 @@ subnet_json() {  # CSV -> ["a","b"]
   local s out=""; for s in ${SUBNETS//,/ }; do out="$out\"$s\","; done; printf '[%s]' "${out%,}"
 }
 
+retryable_verify_start_failure() {
+  local stop_code="$1" stopped_reason="$2"
+  [[ "$stop_code" == "TaskFailedToStart" ]] && return 0
+  case "$stopped_reason" in
+    *CannotPullContainerError*|*ResourceInitializationError*|*InternalError*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 step_verify() {
-  confirm "Run ONE on-demand task now to verify the wiring (before scheduling)?"; local r=$?; abort_if_quit $r
+  confirm "Run an on-demand task now and verify its result before scheduling?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped verify run."; return 0; }
   local netcfg="awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=ENABLED}"
   if [[ $DRY_RUN -eq 1 ]]; then
     run aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
       --task-definition moo-cloud-bill-push --network-configuration "$netcfg" --region "$AWS_REGION" >/dev/null
+    note "[dry-run] would wait for the task, check its exit code, and retry a safe"
+    note "pre-start infrastructure failure up to $VERIFY_MAX_ATTEMPTS attempt(s)."
     return 0
   fi
-  if run aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
-    --task-definition moo-cloud-bill-push --network-configuration "$netcfg" --region "$AWS_REGION" >/dev/null; then
-    note "Started. Watch logs:  aws logs tail /ecs/moo-cloud-bill --follow --region $AWS_REGION"
-  else
-    note "! run-task failed (see the AWS error above) — fix it before scheduling the daily run."
-  fi
+
+  local attempt task_arn result exit_code stop_code stopped_reason task_id
+  attempt=1
+  while [[ $attempt -le $VERIFY_MAX_ATTEMPTS ]]; do
+    note "Starting verification task (attempt $attempt/$VERIFY_MAX_ATTEMPTS)…"
+    printf '    $ aws ecs run-task --cluster %s --launch-type FARGATE --task-definition moo-cloud-bill-push --network-configuration <network> --region %s\n' \
+      "$CLUSTER" "$AWS_REGION" >&2
+    task_arn="$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+      --task-definition moo-cloud-bill-push --network-configuration "$netcfg" \
+      --region "$AWS_REGION" --query 'tasks[0].taskArn' --output text)"
+
+    if [[ -z "$task_arn" || "$task_arn" == "None" ]]; then
+      note "! ECS did not accept the verification task."
+      if [[ $attempt -lt $VERIFY_MAX_ATTEMPTS ]]; then
+        note "  Retrying in $VERIFY_RETRY_DELAY_SECONDS second(s)…"
+        sleep "$VERIFY_RETRY_DELAY_SECONDS"
+        attempt=$((attempt + 1))
+        continue
+      fi
+      note "! Verification failed after $VERIFY_MAX_ATTEMPTS attempt(s); the schedule will not be created."
+      return 1
+    fi
+
+    task_id="${task_arn##*/}"
+    note "Started $task_id. Waiting for it to stop so the result can be verified…"
+    if ! aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task_arn" \
+         --region "$AWS_REGION"; then
+      note "! Timed out waiting for $task_id. Not retrying: it may still be running."
+      note "  Inspect it in ECS before re-running this installer."
+      return 1
+    fi
+
+    result="$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task_arn" \
+      --region "$AWS_REGION" \
+      --query 'tasks[0].[containers[0].exitCode,stopCode,stoppedReason]' --output text)"
+    IFS=$'\t' read -r exit_code stop_code stopped_reason <<< "$result"
+
+    if [[ "$exit_code" == "0" ]]; then
+      note "✓ Verification task $task_id completed successfully (exit code 0)."
+      note "  Logs: aws logs tail /ecs/moo-cloud-bill --log-stream-name-prefix push/push/$task_id --region $AWS_REGION"
+      return 0
+    fi
+
+    note "! Verification task $task_id failed before scheduling."
+    note "  stop code: ${stop_code:-unknown}"
+    note "  reason: ${stopped_reason:-unknown}"
+    note "  exit code: ${exit_code:-not started}"
+
+    # A pre-start failure cannot have partially pushed billing data, so it is
+    # safe to retry. Never retry a non-zero application exit here: push may have
+    # posted some day-batches before failing, and that needs operator review.
+    if retryable_verify_start_failure "$stop_code" "$stopped_reason"; then
+      if [[ $attempt -lt $VERIFY_MAX_ATTEMPTS ]]; then
+        note "  The application never started; retrying safely in $VERIFY_RETRY_DELAY_SECONDS second(s)…"
+        sleep "$VERIFY_RETRY_DELAY_SECONDS"
+        attempt=$((attempt + 1))
+        continue
+      fi
+      note "! Verification failed after $VERIFY_MAX_ATTEMPTS attempt(s); the daily schedule will not be created."
+      return 1
+    fi
+
+    note "! Verification did not pass; the daily schedule will not be created."
+    note "  Logs (if the container started): aws logs tail /ecs/moo-cloud-bill --region $AWS_REGION"
+    return 1
+  done
+
+  return 1
 }
 
 # The ECS target JSON is identical between the two backends (only the wrapping
@@ -740,7 +946,7 @@ main() {
   hr
   note "Checking prerequisites…"
   ensure_prereq aws awscli
-  ensure_prereq docker docker
+  ensure_container_cli
 
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")"
   [[ -n "$ACCOUNT_ID" ]] || { note "! Can't read your AWS identity — run 'aws sso login' (or set creds) and re-run."; exit 1; }
@@ -760,13 +966,25 @@ main() {
     exit 0
   fi
 
-  say ""; say "  Step 1/8 — Secrets Manager";        step_secret
+  say ""; say "  Step 1/8 — Secrets Manager"
+  if ! step_secret; then
+    note "! Secret setup did not complete; stopping before image, task, and schedule changes."
+    exit 1
+  fi
   say "  Step 2/8 — Image (ECR)";                    step_image
   say "  Step 3/8 — Execution role";                 step_exec_role
   say "  Step 4/8 — Task role";                      step_task_role
   say "  Step 5/8 — Scheduler role";                 step_scheduler_role
-  say "  Step 6/8 — Cluster + task definition";      step_cluster_taskdef
-  say "  Step 7/8 — Verify run";                     step_verify
+  say "  Step 6/8 — Cluster + task definition"
+  if ! step_cluster_taskdef; then
+    note "! Cluster/task-definition setup did not complete; stopping before verification and scheduling."
+    exit 1
+  fi
+  say "  Step 7/8 — Verify run"
+  if ! step_verify; then
+    note "! Verification failed; stopping before the daily schedule is created."
+    exit 1
+  fi
   say "  Step 8/8 — Daily schedule";                 step_schedule
 
   say ""; hr
@@ -776,4 +994,6 @@ main() {
   hr
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
