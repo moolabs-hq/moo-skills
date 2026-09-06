@@ -36,7 +36,7 @@ aws() {
     esac
   fi
   if [[ "$service $operation" == "sso login" ]]; then
-    : > "$LOGIN_MARKER"
+    printf '%s\n' "$*" > "$LOGIN_MARKER"
     return 0
   fi
   return 1
@@ -59,6 +59,11 @@ ensure_aws_profile_session "" </dev/null >"$default_output" 2>&1 \
   || fail "valid default credential chain should be reused"
 grep -q "Already authenticated.*123456789012" "$default_output" \
   || fail "default credential chain did not report reuse"
+if grep -q "Run 'aws sso login" "$default_output"; then
+  fail "valid default credential chain was prompted to log in again"
+fi
+[[ ! -e "$LOGIN_MARKER" ]] \
+  || fail "valid default credential chain called aws sso login"
 
 SCENARIO="expired"
 expired_output="$TEST_DIR/expired-output"
@@ -67,6 +72,16 @@ printf 'y\n' | ensure_aws_profile_session "moolabs-prod" >"$expired_output" 2>&1
 grep -q "Run 'aws sso login --profile moolabs-prod' now" "$expired_output" \
   || fail "expired session did not show the login prompt"
 [[ -e "$LOGIN_MARKER" ]] || fail "expired session did not call aws sso login"
+grep -Fxq "sso login --profile moolabs-prod" "$LOGIN_MARKER" \
+  || fail "expired session did not pass the selected profile to aws sso login"
+
+rm -f "$LOGIN_MARKER"
+SCENARIO="expired"
+default_expired_output="$TEST_DIR/default-expired-output"
+printf 'y\n' | ensure_aws_profile_session "" >"$default_expired_output" 2>&1 \
+  || fail "expired default credential chain should offer and run SSO login"
+grep -Fxq "sso login" "$LOGIN_MARKER" \
+  || fail "default credential chain login unexpectedly passed a profile"
 
 rm -f "$LOGIN_MARKER"
 SCENARIO="expired"
