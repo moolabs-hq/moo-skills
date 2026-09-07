@@ -102,6 +102,7 @@ echo "[4/8] install.sh syntax (wrapper + real)"
 check "install.sh wrapper"     bash -n "$SUITE_ROOT/install.sh"
 check "shared/install.sh"      bash -n "$SUITE_ROOT/shared/install.sh"
 check "aws-fargate-setup.sh"   bash -n "$SUITE_ROOT/cloud-bill-cli/scripts/aws-fargate-setup.sh"
+check "AWS SSO session reuse"  bash "$SUITE_ROOT/shared/scripts/test_aws_session.sh"
 check "Fargate verify retries" bash "$SUITE_ROOT/cloud-bill-cli/tests/test_aws_fargate_setup.sh"
 # Also parse under /bin/bash (macOS ships 3.2.57). Catches array / parameter
 # expansion syntax that modern bash silently accepts but 3.2 rejects.
@@ -109,6 +110,7 @@ if [[ -x /bin/bash ]]; then
   check "install.sh wrapper (/bin/bash)"  /bin/bash -n "$SUITE_ROOT/install.sh"
   check "shared/install.sh (/bin/bash)"   /bin/bash -n "$SUITE_ROOT/shared/install.sh"
   check "aws-fargate-setup.sh (/bin/bash)" /bin/bash -n "$SUITE_ROOT/cloud-bill-cli/scripts/aws-fargate-setup.sh"
+  check "AWS SSO session reuse (/bin/bash)" /bin/bash "$SUITE_ROOT/shared/scripts/test_aws_session.sh"
   check "Fargate verify retries (/bin/bash)" /bin/bash "$SUITE_ROOT/cloud-bill-cli/tests/test_aws_fargate_setup.sh"
 fi
 echo ""

@@ -75,6 +75,10 @@ Log in (`aws sso login --profile <name>`) to the **account whose bill you want t
 ingest**. v1 is **single-account** — for an AWS Organizations consolidated bill you
 would use the management/payer account, but multi-account is deferred.
 
+The guided installer checks the selected profile with `sts:GetCallerIdentity` first.
+If that session is still valid it is reused immediately; `aws sso login` is offered
+only when the selected profile is expired or otherwise cannot authenticate.
+
 **Account-level gotcha:** the account must have **"IAM access to Billing" enabled**
 (Billing console → *Account* → *IAM access*). Without it, CUR API calls return 403
 **even when the IAM policy is correct** — this is an account root toggle, separate
