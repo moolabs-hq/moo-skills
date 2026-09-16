@@ -35,7 +35,15 @@ it checks prerequisites, prints a plan, **reuses anything that already exists**,
 # from the cloud-bill-cli directory:
 bash scripts/aws-fargate-setup.sh --dry-run   # print every command, change nothing
 bash scripts/aws-fargate-setup.sh             # run it, confirming each step
+# Restricted IAM only: omit CloudWatch Logs APIs and task log delivery.
+bash scripts/aws-fargate-setup.sh --skip-logging
 ```
+
+`--skip-logging` is an explicit degraded mode for operators who cannot create or
+inspect CloudWatch log groups. It skips the log-group and retention steps and
+registers the task without `logConfiguration`. Verification still checks the ECS
+task's exit code, but container stdout/stderr is not retained. Without the flag,
+logging remains required and setup stops if the log group cannot be verified.
 
 It reads your bucket/prefix/report/acute-base from `moo-cloud-bill configure`, your
 API key from the `init` credentials file, and offers your default VPC's subnets +

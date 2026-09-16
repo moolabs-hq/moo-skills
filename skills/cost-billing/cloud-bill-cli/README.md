@@ -51,6 +51,9 @@ Secrets Manager, and is fully containerized (`Dockerfile` included).
 runs the AWS CLI for you, but shows a plan, reuses what exists, and asks before EACH
 create (`--dry-run` to preview). On reruns it also offers to update the existing
 Secrets Manager value with the API key captured by `init`. `install.sh` offers to run it.
+If the operator cannot create or inspect CloudWatch log groups, pass
+`--skip-logging`; the task is registered without an `awslogs` configuration and
+can still be verified from its ECS exit status, but its stdout/stderr is unavailable.
 → **Manual reference: [`AWS_SCHEDULING.md`](./AWS_SCHEDULING.md)** — the same steps as
 commands you run yourself.
 

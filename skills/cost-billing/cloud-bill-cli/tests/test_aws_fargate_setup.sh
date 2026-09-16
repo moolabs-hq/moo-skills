@@ -31,6 +31,8 @@ TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
 RUN_COUNT_FILE="$TEST_DIR/run-count"
 SECRET_UPDATE_MARKER="$TEST_DIR/secret-updated"
+LOGS_CALL_MARKER="$TEST_DIR/logs-called"
+TASK_DEF_FILE="$TEST_DIR/task-definition.json"
 SCENARIO=""
 
 reset_run_count() { printf '0\n' > "$RUN_COUNT_FILE"; }
@@ -41,6 +43,21 @@ sleep() { :; }
 # shellcheck disable=SC2329
 aws() {
   local service="${1:-}" operation="${2:-}"
+  if [[ "$service" == "logs" ]]; then
+    : > "$LOGS_CALL_MARKER"
+    [[ "$SCENARIO" == "logged_taskdef" ]] || {
+      printf 'CloudWatch Logs must not be called in scenario %s\n' "$SCENARIO" >&2
+      return 1
+    }
+    case "$operation" in
+      describe-log-groups)
+        printf '/ecs/moo-cloud-bill\n'
+        return 0 ;;
+      put-retention-policy)
+        return 0 ;;
+    esac
+  fi
+
   if [[ "$service $operation" == "secretsmanager describe-secret" ]]; then
     case "$SCENARIO" in
       secret_exists_update|secret_update_failure)
@@ -73,6 +90,29 @@ aws() {
     printf '%s\n' "$count" > "$RUN_COUNT_FILE"
     printf 'arn:aws:ecs:us-east-1:123456789012:task/moo-cloud-bill/task%s\n' "$count"
     return 0
+  fi
+
+  if [[ "$service $operation" == "ecs describe-clusters" ]]; then
+    case "$SCENARIO" in
+      skip_logging_taskdef|logged_taskdef)
+        printf 'ACTIVE\n'
+        return 0 ;;
+    esac
+  fi
+
+  if [[ "$service $operation" == "ecs register-task-definition" ]]; then
+    local previous=""
+    shift 2
+    while [[ $# -gt 0 ]]; do
+      if [[ "$previous" == "--cli-input-json" ]]; then
+        printf '%s\n' "$1" > "$TASK_DEF_FILE"
+        return 0
+      fi
+      previous="$1"
+      shift
+    done
+    printf 'register-task-definition did not receive --cli-input-json\n' >&2
+    return 1
   fi
 
   if [[ "$service $operation" == "ecs wait" ]]; then
@@ -136,6 +176,60 @@ fi
 grep -q "cannot silently run with a stale API key" "$secret_failure_output" \
   || fail "secret update failure did not explain the stale-key risk"
 
+# Restricted-IAM mode must avoid every CloudWatch Logs API call and omit the
+# awslogs driver from the registered task definition. The default path must
+# continue to verify/reuse the log group and retain the existing configuration.
+# shellcheck disable=SC2034
+IMAGE="123456789012.dkr.ecr.us-east-1.amazonaws.com/moo-cloud-bill:latest"
+# shellcheck disable=SC2034
+EXEC_ROLE_ARN="arn:aws:iam::123456789012:role/mooCloudBillExecRole"
+# shellcheck disable=SC2034
+TASK_ROLE_ARN="arn:aws:iam::123456789012:role/mooCloudBillTaskRole"
+# shellcheck disable=SC2034
+CUR_BUCKET="test-cur-bucket"
+# shellcheck disable=SC2034
+CUR_PREFIX="cur2"
+# shellcheck disable=SC2034
+REPORT_NAME="moolabs-cur2"
+# shellcheck disable=SC2034
+BUCKET_REGION="us-east-1"
+# shellcheck disable=SC2034
+ACUTE_BASE="https://acute.moolabs.com"
+# shellcheck disable=SC2034
+REPORTING_CURRENCY="USD"
+# shellcheck disable=SC2034
+SECRET_ARN="arn:aws:secretsmanager:us-east-1:123456789012:secret:moo-cloud-bill/api-key-test"
+
+SCENARIO="skip_logging_taskdef"
+# shellcheck disable=SC2034
+SKIP_LOGGING=1
+rm -f "$LOGS_CALL_MARKER" "$TASK_DEF_FILE"
+skip_logging_output="$TEST_DIR/skip-logging-output"
+step_cluster_taskdef >"$skip_logging_output" 2>&1 \
+  || fail "skip-logging task definition should register successfully"
+[[ ! -e "$LOGS_CALL_MARKER" ]] || fail "skip-logging mode called CloudWatch Logs"
+python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$TASK_DEF_FILE" \
+  || fail "skip-logging task definition is not valid JSON"
+if grep -q 'logConfiguration\|awslogs' "$TASK_DEF_FILE"; then
+  fail "skip-logging task definition still contains awslogs configuration"
+fi
+grep -q "stdout/stderr will not be retained" "$skip_logging_output" \
+  || fail "skip-logging task registration did not warn about missing logs"
+
+SCENARIO="logged_taskdef"
+# shellcheck disable=SC2034
+SKIP_LOGGING=0
+rm -f "$LOGS_CALL_MARKER" "$TASK_DEF_FILE"
+step_cluster_taskdef >"$TEST_DIR/logged-taskdef-output" 2>&1 \
+  || fail "default task definition should register successfully"
+[[ -e "$LOGS_CALL_MARKER" ]] || fail "default mode did not verify the CloudWatch log group"
+python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$TASK_DEF_FILE" \
+  || fail "default task definition is not valid JSON"
+grep -q '"logConfiguration"' "$TASK_DEF_FILE" \
+  || fail "default task definition lost its log configuration"
+grep -q '"awslogs-group":"/ecs/moo-cloud-bill"' "$TASK_DEF_FILE" \
+  || fail "default task definition lost its CloudWatch log group"
+
 SCENARIO="retry_then_success"
 reset_run_count
 retry_output="$TEST_DIR/retry-output"
@@ -171,6 +265,17 @@ grep -q "daily schedule will not be created" "$failure_output" \
 SCENARIO="success"
 reset_run_count
 # shellcheck disable=SC2034
+SKIP_LOGGING=1
+skip_verify_output="$TEST_DIR/skip-verify-output"
+step_verify >"$skip_verify_output" 2>&1 || fail "skip-logging verification should succeed"
+grep -q "CloudWatch logging is disabled" "$skip_verify_output" \
+  || fail "skip-logging verification did not warn that logs are unavailable"
+if grep -q "aws logs tail" "$skip_verify_output"; then
+  fail "skip-logging verification printed an unusable CloudWatch Logs command"
+fi
+
+reset_run_count
+# shellcheck disable=SC2034
 DRY_RUN=1
 dry_output="$TEST_DIR/dry-output"
 step_verify >"$dry_output" 2>&1 || fail "dry-run verification should succeed"
@@ -199,6 +304,8 @@ aws() {
 }
 # shellcheck disable=SC2034
 DRY_RUN=0
+# shellcheck disable=SC2034
+SKIP_LOGGING=0
 if (main >"$TEST_DIR/main-output" 2>&1); then
   fail "main must fail when verification fails"
 fi
@@ -216,4 +323,4 @@ fi
 grep -q "Secret setup did not complete" "$TEST_DIR/main-secret-failure-output" \
   || fail "main did not explain that secret failure stopped the setup"
 
-printf 'PASS: Fargate setup rotates existing API-key secrets, masks key output, and verifies safely\n'
+printf 'PASS: Fargate setup rotates secrets, configures optional logging, and verifies safely\n'
