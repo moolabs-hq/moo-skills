@@ -45,10 +45,13 @@ aws() {
   local service="${1:-}" operation="${2:-}"
   if [[ "$service" == "logs" ]]; then
     : > "$LOGS_CALL_MARKER"
-    [[ "$SCENARIO" == "logged_taskdef" ]] || {
+    [[ "$SCENARIO" == "logged_taskdef" || "$SCENARIO" == "logs_denied_taskdef" ]] || {
       printf 'CloudWatch Logs must not be called in scenario %s\n' "$SCENARIO" >&2
       return 1
     }
+    if [[ "$SCENARIO" == "logs_denied_taskdef" ]]; then
+      return 42
+    fi
     case "$operation" in
       describe-log-groups)
         printf '/ecs/moo-cloud-bill\n'
@@ -94,7 +97,7 @@ aws() {
 
   if [[ "$service $operation" == "ecs describe-clusters" ]]; then
     case "$SCENARIO" in
-      skip_logging_taskdef|logged_taskdef)
+      skip_logging_taskdef|logged_taskdef|logs_denied_taskdef)
         printf 'ACTIVE\n'
         return 0 ;;
     esac
@@ -230,6 +233,17 @@ grep -q '"logConfiguration"' "$TASK_DEF_FILE" \
 grep -q '"awslogs-group":"/ecs/moo-cloud-bill"' "$TASK_DEF_FILE" \
   || fail "default task definition lost its CloudWatch log group"
 
+SCENARIO="logs_denied_taskdef"
+rm -f "$LOGS_CALL_MARKER" "$TASK_DEF_FILE"
+logs_denied_output="$TEST_DIR/logs-denied-output"
+if step_cluster_taskdef >"$logs_denied_output" 2>&1; then
+  fail "default mode must fail when CloudWatch logging cannot be configured"
+fi
+[[ -e "$LOGS_CALL_MARKER" ]] || fail "default mode did not attempt to verify CloudWatch Logs"
+[[ ! -e "$TASK_DEF_FILE" ]] || fail "default mode registered a task definition after logging failed"
+grep -q "Stopping before registering the task definition" "$logs_denied_output" \
+  || fail "default logging failure did not explain that task registration was blocked"
+
 SCENARIO="retry_then_success"
 reset_run_count
 retry_output="$TEST_DIR/retry-output"
@@ -274,6 +288,20 @@ if grep -q "aws logs tail" "$skip_verify_output"; then
   fail "skip-logging verification printed an unusable CloudWatch Logs command"
 fi
 
+SCENARIO="application_failure"
+reset_run_count
+skip_failure_output="$TEST_DIR/skip-failure-output"
+if step_verify >"$skip_failure_output" 2>&1; then
+  fail "skip-logging application failure must still fail verification"
+fi
+[[ "$(run_count)" == "1" ]] || fail "skip-logging application failure must not be retried"
+grep -q "diagnose from the ECS stop code/reason" "$skip_failure_output" \
+  || fail "skip-logging failure did not provide an available diagnosis path"
+if grep -q "aws logs tail" "$skip_failure_output"; then
+  fail "skip-logging failure printed an unusable CloudWatch Logs command"
+fi
+
+SCENARIO="success"
 reset_run_count
 # shellcheck disable=SC2034
 DRY_RUN=1
