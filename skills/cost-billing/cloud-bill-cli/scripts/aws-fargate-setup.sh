@@ -16,6 +16,7 @@
 #   ./scripts/aws-fargate-setup.sh --dry-run       # print every command, execute nothing
 #   ./scripts/aws-fargate-setup.sh --yes           # assume yes to every step (CI/non-interactive)
 #   ./scripts/aws-fargate-setup.sh --region us-east-1 --cluster mycluster
+#   ./scripts/aws-fargate-setup.sh --skip-logging  # omit CloudWatch logging (restricted IAM)
 #
 # NOTE: deliberately NOT `set -e`. This is a stepwise, resumable provisioner —
 # a declined step (confirm returns non-zero) and a reuse-skip are normal control
@@ -25,6 +26,7 @@ set -uo pipefail
 
 DRY_RUN=0
 ASSUME_YES=0
+SKIP_LOGGING=0
 AWS_REGION="${AWS_REGION:-us-east-1}"
 REGION_EXPLICIT=0   # set to 1 by --region below; tells load_cli_config not to override it
 CLUSTER="moo-cloud-bill"
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
+    --skip-logging) SKIP_LOGGING=1; shift ;;
     --region) AWS_REGION="$2"; REGION_EXPLICIT=1; shift 2 ;;
     --cluster) CLUSTER="$2"; shift 2 ;;
     --ecr-repo) ECR_REPO="$2"; shift 2 ;;
@@ -581,15 +584,27 @@ show_plan() {
   note "  1. Secrets Manager secret  '$SECRET_NAME'         [secretsmanager:CreateSecret/PutSecretValue]"
   note "       ← your Moolabs API key (so the task never bakes it in)"
   note "  2. ECR repo  '$ECR_REPO'  + build & push the image  [ecr:CreateRepository, push]"
-  note "  3. IAM role  mooCloudBillExecRole   (pull image, read the secret, logs)"
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    note "  3. IAM role  mooCloudBillExecRole   (pull image, read the secret)"
+  else
+    note "  3. IAM role  mooCloudBillExecRole   (pull image, read the secret, logs)"
+  fi
   note "  4. IAM role  mooCloudBillTaskRole   (read CUR from s3://$CUR_BUCKET/$CUR_PREFIX/*)"
   note "  5. IAM role  mooCloudBillSchedulerRole (let EventBridge run the task)"
-  note "  6. ECS cluster '$CLUSTER' + log group + Fargate task definition"
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    note "  6. ECS cluster '$CLUSTER' + Fargate task definition (CloudWatch logging skipped)"
+  else
+    note "  6. ECS cluster '$CLUSTER' + log group + Fargate task definition"
+  fi
   note "  7. On-demand VERIFY run (safe pre-start failures retry up to $VERIFY_MAX_ATTEMPTS times) — optional"
   note "  8. EventBridge schedule '$SCHEDULE_NAME'  ($SCHEDULE_CRON UTC, daily)"
   note ""
   note "  Each create asks before it runs. Existing resources are reused; the API-key"
   note "  secret explicitly offers an update so key rotation or tenant changes take effect."
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    note "  WARNING: --skip-logging omits the task's awslogs configuration. The task"
+    note "  can run without CloudWatch Logs permissions, but stdout/stderr is unavailable."
+  fi
   [[ $DRY_RUN -eq 1 ]] && note "  [--dry-run] nothing will actually be created."
   hr
 }
@@ -673,7 +688,9 @@ create_role_if_absent() {  # $1 role name, $2 trust json, $3 description
 }
 
 step_exec_role() {
-  create_role_if_absent mooCloudBillExecRole "$ECS_TRUST" "ECS pulls image, reads secret, writes logs" || true
+  local role_description="ECS pulls image, reads secret, writes logs"
+  [[ $SKIP_LOGGING -eq 1 ]] && role_description="ECS pulls image and reads secret"
+  create_role_if_absent mooCloudBillExecRole "$ECS_TRUST" "$role_description" || true
   run aws iam attach-role-policy --role-name mooCloudBillExecRole \
     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>/dev/null || true
   local pol="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"$SECRET_ARN\"}]}"
@@ -768,15 +785,22 @@ step_cluster_taskdef() {
     confirm "Create ECS (Fargate) cluster '$CLUSTER'?"; local r=$?; abort_if_quit $r
     [[ $r -eq 0 ]] && run aws ecs create-cluster --cluster-name "$CLUSTER" --region "$AWS_REGION" >/dev/null || note "  skipped."
   fi
-  if ! ensure_log_group; then
-    note "! Stopping before registering the task definition — fix the log group"
-    note "  issue above first, then re-run (earlier steps are reused, not repeated)."
-    return 1
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    note "! CloudWatch logging skipped by request; task stdout/stderr will not be retained."
+  else
+    if ! ensure_log_group; then
+      note "! Stopping before registering the task definition — fix the log group"
+      note "  issue above first, then re-run (earlier steps are reused, not repeated)."
+      return 1
+    fi
   fi
 
-  local taskdef
+  local taskdef log_configuration=""
+  if [[ $SKIP_LOGGING -eq 0 ]]; then
+    log_configuration=',"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/moo-cloud-bill","awslogs-region":"'"$AWS_REGION"'","awslogs-stream-prefix":"push"}}'
+  fi
   taskdef="$(cat <<JSON
-{"family":"moo-cloud-bill-push","requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"512","memory":"1024","executionRoleArn":"$EXEC_ROLE_ARN","taskRoleArn":"$TASK_ROLE_ARN","containerDefinitions":[{"name":"push","image":"$IMAGE","essential":true,"command":["push"],"environment":[{"name":"MCB_BUCKET","value":"$CUR_BUCKET"},{"name":"MCB_PREFIX","value":"$CUR_PREFIX"},{"name":"MCB_REPORT_NAME","value":"$REPORT_NAME"},{"name":"MCB_REGION","value":"$BUCKET_REGION"},{"name":"MCB_ACUTE_BASE","value":"$ACUTE_BASE"},{"name":"MCB_REPORTING_CURRENCY","value":"$REPORTING_CURRENCY"}],"secrets":[{"name":"MOOLABS_API_KEY","valueFrom":"$SECRET_ARN"}],"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/moo-cloud-bill","awslogs-region":"$AWS_REGION","awslogs-stream-prefix":"push"}}}]}
+{"family":"moo-cloud-bill-push","requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"512","memory":"1024","executionRoleArn":"$EXEC_ROLE_ARN","taskRoleArn":"$TASK_ROLE_ARN","containerDefinitions":[{"name":"push","image":"$IMAGE","essential":true,"command":["push"],"environment":[{"name":"MCB_BUCKET","value":"$CUR_BUCKET"},{"name":"MCB_PREFIX","value":"$CUR_PREFIX"},{"name":"MCB_REPORT_NAME","value":"$REPORT_NAME"},{"name":"MCB_REGION","value":"$BUCKET_REGION"},{"name":"MCB_ACUTE_BASE","value":"$ACUTE_BASE"},{"name":"MCB_REPORTING_CURRENCY","value":"$REPORTING_CURRENCY"}],"secrets":[{"name":"MOOLABS_API_KEY","valueFrom":"$SECRET_ARN"}]$log_configuration}]}
 JSON
 )"
   confirm "Register the Fargate task definition 'moo-cloud-bill-push'?"; local t=$?; abort_if_quit $t
@@ -849,7 +873,11 @@ step_verify() {
 
     if [[ "$exit_code" == "0" ]]; then
       note "✓ Verification task $task_id completed successfully (exit code 0)."
-      note "  Logs: aws logs tail /ecs/moo-cloud-bill --log-stream-name-prefix push/push/$task_id --region $AWS_REGION"
+      if [[ $SKIP_LOGGING -eq 1 ]]; then
+        note "  CloudWatch logging is disabled by --skip-logging; no task stdout/stderr is available."
+      else
+        note "  Logs: aws logs tail /ecs/moo-cloud-bill --log-stream-name-prefix push/push/$task_id --region $AWS_REGION"
+      fi
       return 0
     fi
 
@@ -873,7 +901,11 @@ step_verify() {
     fi
 
     note "! Verification did not pass; the daily schedule will not be created."
-    note "  Logs (if the container started): aws logs tail /ecs/moo-cloud-bill --region $AWS_REGION"
+    if [[ $SKIP_LOGGING -eq 1 ]]; then
+      note "  CloudWatch logging is disabled; diagnose from the ECS stop code/reason above."
+    else
+      note "  Logs (if the container started): aws logs tail /ecs/moo-cloud-bill --region $AWS_REGION"
+    fi
     return 1
   done
 
@@ -989,7 +1021,11 @@ main() {
 
   say ""; hr
   note "Done. The daily push runs at $SCHEDULE_CRON UTC via Fargate (IAM role — no SSO expiry)."
-  note "Logs:     aws logs tail /ecs/moo-cloud-bill --follow --region $AWS_REGION"
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    note "Logs:     disabled by --skip-logging (task stdout/stderr is not retained)"
+  else
+    note "Logs:     aws logs tail /ecs/moo-cloud-bill --follow --region $AWS_REGION"
+  fi
   note "Teardown: see the Teardown section of $CLI_DIR/AWS_SCHEDULING.md"
   hr
 }

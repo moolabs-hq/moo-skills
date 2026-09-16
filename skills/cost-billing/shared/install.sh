@@ -51,6 +51,8 @@
 #   ./install.sh --setup-cur                  # run ONLY the AWS CUR (moo-cloud-bill) setup
 #                                             # wizard — no persona prompt, no skill install.
 #                                             # Same interactive wizard as below, standalone.
+#   ./install.sh --setup-cur --skip-logging   # allow Fargate setup without CloudWatch Logs
+#                                             # (no log group or task logConfiguration).
 #
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
@@ -262,6 +264,7 @@ HANDOFF_SHARED_FOLDER=""
 HANDOFF_MCP_NAME=""
 HANDOFF_NO_PROMPT=0
 SETUP_CUR=0
+SKIP_LOGGING=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -295,6 +298,7 @@ while [[ $# -gt 0 ]]; do
     --handoff-mcp) HANDOFF_MCP_NAME="$2"; shift 2 ;;
     --no-handoff-prompt) HANDOFF_NO_PROMPT=1; shift ;;
     --setup-cur) SETUP_CUR=1; shift ;;
+    --skip-logging) SKIP_LOGGING=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -1210,6 +1214,12 @@ _run_aws_fargate_setup() {
   local cli_dir="$1" aws_profile="$2"
   local script="$cli_dir/scripts/aws-fargate-setup.sh"
   local runbook="$cli_dir/AWS_SCHEDULING.md"
+  local logging_suffix=""
+  local setup_args=()
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    logging_suffix=" --skip-logging"
+    setup_args+=("--skip-logging")
+  fi
   # load_cli_config() inside aws-fargate-setup.sh shells out to plain `python3`
   # to read the config `configure` just saved a few lines above. That python3
   # has no reason to already know about moo_cloud_bill — the CLI we just ran
@@ -1231,6 +1241,9 @@ _run_aws_fargate_setup() {
   echo "    • show a PLAN (Secrets Manager secret, ECR image, 3 IAM roles, ECS task +"
   echo "      cluster, EventBridge schedule),"
   echo "    • REUSE existing resources, ASK before EACH create, and offer API-key rotation."
+  if [[ $SKIP_LOGGING -eq 1 ]]; then
+    echo "    • SKIP CloudWatch logging (no log-group APIs; task stdout/stderr unavailable)."
+  fi
   echo ""
   echo "    y) Run it now (you confirm each step)"
   echo "    d) Dry-run first (print every command, change nothing)"
@@ -1238,18 +1251,18 @@ _run_aws_fargate_setup() {
   local a; read -r -p "  Run the AWS Fargate setup? [y/d/N]: " a
   case "$a" in
     y|Y|yes|YES)
-      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script"; else PYTHONPATH="$pypath" bash "$script"; fi ;;
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; else PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; fi ;;
     d|D|dry|dry-run)
-      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" --dry-run; else PYTHONPATH="$pypath" bash "$script" --dry-run; fi
+      if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" --dry-run "${setup_args[@]+"${setup_args[@]}"}"; else PYTHONPATH="$pypath" bash "$script" --dry-run "${setup_args[@]+"${setup_args[@]}"}"; fi
       echo ""
       printf "  Now run it for real? [y/N]: "; read -r a2
       case "$a2" in y|Y|yes|YES)
-        if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script"; else PYTHONPATH="$pypath" bash "$script"; fi ;;
-      *) echo "  Left as a dry-run. Run later: bash \"$script\"" ;; esac ;;
+        if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; else PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; fi ;;
+      *) echo "  Left as a dry-run. Run later: bash \"$script\"$logging_suffix" ;; esac ;;
     *)
       echo "  No problem — nothing was changed. Alternatives:"
-      echo "    • Preview the plan anytime:  bash \"$script\" --dry-run"
-      echo "    • Run it later:              bash \"$script\""
+      echo "    • Preview the plan anytime:  bash \"$script\" --dry-run$logging_suffix"
+      echo "    • Run it later:              bash \"$script\"$logging_suffix"
       echo "    • Do it by hand:             $runbook"
       ;;
   esac
