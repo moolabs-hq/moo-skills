@@ -665,16 +665,62 @@ step_image() {
     note "✓ ECR repo '$ECR_REPO' exists — reusing."
   else
     confirm "Create ECR repo '$ECR_REPO'?"; local r=$?; abort_if_quit $r
-    [[ $r -eq 0 ]] && run aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null || { note "  skipped repo; cannot push image."; return 0; }
+    if [[ $r -ne 0 ]]; then
+      note "  skipped repo; cannot push image."
+      return 1
+    fi
+    if ! run aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null; then
+      note "! Could not create ECR repo '$ECR_REPO' (see the AWS error above); cannot push image."
+      note "  If an organisation policy denies ecr:CreateRepository, ask an administrator to"
+      note "  create the repo and re-run — this step reuses a repo that already exists."
+      note "  To point at a repo under a different name, re-run with --ecr-repo <name>."
+      return 1
+    fi
   fi
   confirm "Build the image (linux/amd64) and push to ECR? (using $CONTAINER_CLI)"; local b=$?; abort_if_quit $b
   if [[ $b -eq 0 ]]; then
-    run bash -c "aws ecr get-login-password --region '$AWS_REGION' | '$CONTAINER_CLI' login --username AWS --password-stdin '$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com'"
-    run "$CONTAINER_CLI" build --platform linux/amd64 -t "$IMAGE" "$CLI_DIR"
-    run "$CONTAINER_CLI" push "$IMAGE"
+    # Each of these is checked: an older 'latest' left in ECR would otherwise
+    # satisfy the tag gate below and send Step 7 off with the wrong image.
+    if ! run bash -c "aws ecr get-login-password --region '$AWS_REGION' | '$CONTAINER_CLI' login --username AWS --password-stdin '$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com'"; then
+      note "! Could not log in to ECR (see the error above); cannot push the image."
+      return 1
+    fi
+    if ! run "$CONTAINER_CLI" build --platform linux/amd64 -t "$IMAGE" "$CLI_DIR"; then
+      note "! Image build failed (see the error above)."
+      return 1
+    fi
+    if ! run "$CONTAINER_CLI" push "$IMAGE"; then
+      note "! Image push failed (see the error above); ECR may still hold an older 'latest'."
+      return 1
+    fi
   else
-    note "  skipped build/push — the task def will reference $IMAGE (push it before scheduling)."
+    note "  skipped build/push — reusing whatever is already tagged 'latest' in ECR."
   fi
+  # --dry-run fakes every mutating command above, so nothing can be in ECR yet.
+  [[ $DRY_RUN -eq 1 ]] && return 0
+  # Steps 6-8 register and run a task definition that pulls $IMAGE. Prove the tag
+  # is actually in ECR now. Gating on the tag (not on the operator's answers)
+  # catches a denied create, a declined build with no prior push, AND a login,
+  # build, or push that failed above — each of which otherwise surfaces much
+  # later as an opaque CannotPullContainerError in Step 7/8.
+  local describe_err
+  if describe_err="$(aws ecr describe-images --repository-name "$ECR_REPO" \
+      --image-ids imageTag=latest --region "$AWS_REGION" 2>&1 >/dev/null)"; then
+    note "✓ image $IMAGE is present in ECR."
+    return 0
+  fi
+  # Only a readable "absent" is proof. If this identity cannot LOOK, an image an
+  # administrator pushed may well be there, so do not block on a blind spot —
+  # Step 7/8 now reports a missing image clearly and without retries.
+  case "$describe_err" in
+    *AccessDenied*|*UnauthorizedOperation*|*"not authorized"*)
+      note "! Cannot confirm the image: ecr:DescribeImages is denied for this identity."
+      note "  Continuing. If 'latest' was never pushed, Step 7/8 stops with a clear error."
+      return 0 ;;
+  esac
+  note "! No image tagged 'latest' in ECR repo '$ECR_REPO' — the task cannot start."
+  note "  Push the image, then re-run: this step reuses an image that is already there."
+  return 1
 }
 
 create_role_if_absent() {  # $1 role name, $2 trust json, $3 description
@@ -814,8 +860,23 @@ subnet_json() {  # CSV -> ["a","b"]
   local s out=""; for s in ${SUBNETS//,/ }; do out="$out\"$s\","; done; printf '[%s]' "${out%,}"
 }
 
+# The single place that decides what a pre-start failure reason MEANS. The retry
+# decision and the operator message both read it, so they can never disagree.
+# Echoes "missing", "denied", or nothing at all.
+pull_failure_kind() {
+  case "$1" in
+    *"not found"*|*"manifest unknown"*|*"name unknown"*) printf 'missing' ;;
+    *AccessDenied*|*"access denied"*|*Forbidden*)        printf 'denied' ;;
+  esac
+}
+
 retryable_verify_start_failure() {
   local stop_code="$1" stopped_reason="$2"
+  # Permanent causes are checked FIRST, because they also report the retryable
+  # stop code TaskFailedToStart. A missing tag or a denied pull cannot change on
+  # its own, so retrying only wastes the budget and buries the real cause under
+  # three identical failure blocks.
+  [[ -n "$(pull_failure_kind "$stopped_reason")" ]] && return 1
   [[ "$stop_code" == "TaskFailedToStart" ]] && return 0
   case "$stopped_reason" in
     *CannotPullContainerError*|*ResourceInitializationError*|*InternalError*) return 0 ;;
@@ -901,6 +962,14 @@ step_verify() {
     fi
 
     note "! Verification did not pass; the daily schedule will not be created."
+    case "$(pull_failure_kind "$stopped_reason")" in
+      missing)
+        note "  Not retrying: the task definition points at an image that is not in ECR."
+        note "  Re-run the installer and let Step 2/8 build and push the image first." ;;
+      denied)
+        note "  Not retrying: the pull was denied, not delayed. Check the execution role"
+        note "  and any organisation policy that covers ECR." ;;
+    esac
     if [[ $SKIP_LOGGING -eq 1 ]]; then
       note "  CloudWatch logging is disabled; diagnose from the ECS stop code/reason above."
     else
@@ -1003,7 +1072,11 @@ main() {
     note "! Secret setup did not complete; stopping before image, task, and schedule changes."
     exit 1
   fi
-  say "  Step 2/8 — Image (ECR)";                    step_image
+  say "  Step 2/8 — Image (ECR)"
+  if ! step_image; then
+    note "! Image setup did not complete; stopping before role, task, and schedule changes."
+    exit 1
+  fi
   say "  Step 3/8 — Execution role";                 step_exec_role
   say "  Step 4/8 — Task role";                      step_task_role
   say "  Step 5/8 — Scheduler role";                 step_scheduler_role

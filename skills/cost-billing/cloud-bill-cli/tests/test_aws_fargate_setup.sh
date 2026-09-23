@@ -137,6 +137,8 @@ aws() {
         printf '0\tEssentialContainerExited\tEssential container in task exited\n' ;;
       exhaust_retries:*)
         printf 'None\tTaskFailedToStart\tCannotPullContainerError: ECR timeout\n' ;;
+      image_not_found:*)
+        printf 'None\tTaskFailedToStart\tCannotPullContainerError: pull image manifest has been retried 7 time(s): failed to resolve ref 123456789012.dkr.ecr.us-east-1.amazonaws.com/moo-cloud-bill:latest: not found\n' ;;
       application_failure:*)
         printf '1\tEssentialContainerExited\tEssential container in task exited\n' ;;
       *)
@@ -311,6 +313,137 @@ step_verify >"$dry_output" 2>&1 || fail "dry-run verification should succeed"
 grep -q "would wait for the task" "$dry_output" \
   || fail "dry-run verification plan missing"
 
+# ── a permanent pull failure must not burn the retry budget ──────────────────
+# Regression: a missing image tag reported stop code TaskFailedToStart, which
+# was classified retryable, so the installer ran three identical attempts and
+# buried the real cause (Step 2 could not push an image) under the last one.
+retryable_verify_start_failure "TaskFailedToStart" "CannotPullContainerError: ECR timeout" \
+  || fail "a transient pull timeout must stay retryable"
+retryable_verify_start_failure "TaskFailedToStart" "ResourceInitializationError: unable to pull secrets" \
+  || fail "a transient resource-initialization failure must stay retryable"
+if retryable_verify_start_failure "TaskFailedToStart" "CannotPullContainerError: ... :latest: not found"; then
+  fail "a missing image tag must not be treated as retryable"
+fi
+if retryable_verify_start_failure "TaskFailedToStart" "CannotPullContainerError: AccessDeniedException"; then
+  fail "a denied pull must not be treated as retryable"
+fi
+retryable_verify_start_failure "TaskFailedToStart" "CannotPullContainerError: ref sha256:403ab9 i/o timeout" \
+  || fail "a digest that contains 403 must not make a transient failure permanent"
+
+SCENARIO="image_not_found"
+reset_run_count
+# the dry-run check above left DRY_RUN=1; this case must exercise the real path
+# shellcheck disable=SC2034
+DRY_RUN=0
+image_not_found_output="$TEST_DIR/image-not-found-output"
+if step_verify >"$image_not_found_output" 2>&1; then
+  fail "verification must fail when the image is not in ECR"
+fi
+[[ "$(run_count)" == "1" ]] || fail "a missing image must not be retried"
+grep -qi "not retrying" "$image_not_found_output" \
+  || fail "verification did not say why the permanent failure was not retried"
+
+# ── step_image must report failure when the image cannot exist ───────────────
+# Regression: a CreateRepository denied by a service control policy printed
+# "skipped repo; cannot push image." and returned 0. main() did not check the
+# result, so the run registered a task definition that pointed at an image which
+# was never pushed, and Step 7 spent every retry on a CannotPullContainerError.
+ecr_scenario="no_repo"
+# shellcheck disable=SC2034
+CONTAINER_CLI="docker"
+
+# shellcheck disable=SC2329
+aws() {
+  case "${1:-} ${2:-}" in
+    "ecr describe-repositories")
+      [[ "$ecr_scenario" == repo_exists* ]] && return 0
+      return 1 ;;
+    "ecr create-repository")
+      [[ "$ecr_scenario" == "create_denied" ]] && return 254
+      return 0 ;;
+    "ecr describe-images")
+      [[ "$ecr_scenario" == "repo_exists_image_exists" ]] && return 0
+      if [[ "$ecr_scenario" == "repo_exists_describe_denied" ]]; then
+        printf 'An error occurred (AccessDeniedException) when calling DescribeImages\n' >&2
+        return 254
+      fi
+      return 1 ;;
+    *)
+      printf 'unexpected fake AWS command in image tests: %s %s\n' "${1:-}" "${2:-}" >&2
+      return 1 ;;
+  esac
+}
+
+# shellcheck disable=SC2034
+DRY_RUN=0
+ecr_scenario="create_denied"
+image_denied_output="$TEST_DIR/image-denied-output"
+if step_image >"$image_denied_output" 2>&1; then
+  fail "step_image must fail when the ECR repository cannot be created"
+fi
+grep -q "cannot push image" "$image_denied_output" \
+  || fail "step_image did not explain that the image cannot be pushed"
+
+# Declining a rebuild when the image is already in ECR is normal re-run traffic,
+# not a failure. This guards the fix against over-correcting into a hard stop.
+ecr_scenario="repo_exists_image_exists"
+image_reuse_output="$TEST_DIR/image-reuse-output"
+(
+  # shellcheck disable=SC2329
+  confirm() { return 1; }
+  step_image >"$image_reuse_output" 2>&1
+) || fail "step_image must succeed when the pushed image already exists"
+
+# Declining the build with nothing in ECR leaves Step 7 no image to run.
+ecr_scenario="repo_exists_no_image"
+image_missing_output="$TEST_DIR/image-missing-output"
+if (
+  # shellcheck disable=SC2329
+  confirm() { return 1; }
+  step_image >"$image_missing_output" 2>&1
+); then
+  fail "step_image must fail when no image has been pushed"
+fi
+
+# A failed push must stop the run. An older 'latest' left in ECR would otherwise
+# satisfy the tag gate below and send Step 7 off with the wrong image.
+ecr_scenario="repo_exists_image_exists"
+image_push_fail_output="$TEST_DIR/image-push-fail-output"
+if (
+  # shellcheck disable=SC2329
+  run() { [[ "${1:-} ${2:-}" == "docker push" ]] && return 1; return 0; }
+  step_image >"$image_push_fail_output" 2>&1
+); then
+  fail "step_image must fail when the image push fails"
+fi
+grep -q "Image push failed" "$image_push_fail_output" \
+  || fail "step_image did not report the failed push"
+
+# A denied DescribeImages is a blind spot, not proof of absence: an image an
+# administrator pushed may be there, so the run must continue rather than block.
+ecr_scenario="repo_exists_describe_denied"
+image_blind_output="$TEST_DIR/image-blind-output"
+(
+  # shellcheck disable=SC2329
+  confirm() { return 1; }
+  step_image >"$image_blind_output" 2>&1
+) || fail "step_image must not block when ecr:DescribeImages is denied"
+grep -q "Cannot confirm the image" "$image_blind_output" \
+  || fail "step_image did not disclose that the image could not be confirmed"
+
+# --dry-run fakes every mutating command, so a fresh account has no repo and no
+# image. The guard must never stop a dry run.
+ecr_scenario="no_repo"
+image_dry_output="$TEST_DIR/image-dry-output"
+(
+  # shellcheck disable=SC2030
+  DRY_RUN=1
+  step_image >"$image_dry_output" 2>&1
+) || fail "dry-run step_image must succeed with no repository present"
+
+# shellcheck disable=SC2031
+DRY_RUN=0
+
 schedule_marker="$TEST_DIR/schedule-created"
 ensure_prereq() { :; }
 ensure_container_cli() { :; }
@@ -350,5 +483,18 @@ fi
   || fail "main continued to image/task mutations after secret setup failed"
 grep -q "Secret setup did not complete" "$TEST_DIR/main-secret-failure-output" \
   || fail "main did not explain that secret failure stopped the setup"
+
+image_gate_marker="$TEST_DIR/post-image-step-ran"
+step_secret() { return 0; }
+step_image() { return 1; }
+step_exec_role() { : > "$image_gate_marker"; }
+step_verify() { return 0; }
+if (main >"$TEST_DIR/main-image-failure-output" 2>&1); then
+  fail "main must fail when the image step fails"
+fi
+[[ ! -e "$image_gate_marker" ]] \
+  || fail "main continued to IAM/task mutations after the image step failed"
+grep -q "Image setup did not complete" "$TEST_DIR/main-image-failure-output" \
+  || fail "main did not explain that the image step stopped the setup"
 
 printf 'PASS: Fargate setup rotates secrets, configures optional logging, and verifies safely\n'
