@@ -311,6 +311,218 @@ step_verify >"$dry_output" 2>&1 || fail "dry-run verification should succeed"
 grep -q "would wait for the task" "$dry_output" \
   || fail "dry-run verification plan missing"
 
+# ── resource tags ────────────────────────────────────────────────────────────
+# A customer org can deny every untagged create. AWS never standardised the tag
+# shorthand: most services take a list of Key=..,Value=.. pairs, ECS wants them
+# lowercase, and CloudWatch Logs wants ONE comma-joined map argument. So the
+# script takes one --tag input and renders three shapes from it.
+
+# the dry-run check above left DRY_RUN=1; these cases exercise the real path
+# shellcheck disable=SC2034
+DRY_RUN=0
+
+TAGS_KV=("Product-Area=devops" "Sub-Product-Area=ecr" "Environment=integration")
+
+tag_args upper
+[[ "${TAG_ARGS[*]}" == "--tags Key=Product-Area,Value=devops Key=Sub-Product-Area,Value=ecr Key=Environment,Value=integration" ]] \
+  || fail "upper tag rendering wrong: ${TAG_ARGS[*]}"
+
+tag_args lower
+[[ "${TAG_ARGS[*]}" == "--tags key=Product-Area,value=devops key=Sub-Product-Area,value=ecr key=Environment,value=integration" ]] \
+  || fail "lower tag rendering wrong: ${TAG_ARGS[*]}"
+
+tag_args map
+[[ ${#TAG_ARGS[@]} -eq 2 ]] \
+  || fail "map rendering must be exactly --tags plus ONE joined argument, got ${#TAG_ARGS[@]}"
+[[ "${TAG_ARGS[1]}" == "Product-Area=devops,Sub-Product-Area=ecr,Environment=integration" ]] \
+  || fail "map tag rendering wrong: ${TAG_ARGS[1]}"
+
+# A value holding a comma and a space must stay ONE argv entry. This is why the
+# flag is --tag KEY=VALUE and not a single comma-joined --tags string.
+TAGS_KV=("Owner=Platform Team, EU")
+tag_args upper
+[[ ${#TAG_ARGS[@]} -eq 2 ]] || fail "a value with a comma must stay one argument"
+[[ "${TAG_ARGS[1]}" == "Key=Owner,Value=Platform Team, EU" ]] \
+  || fail "a value with a comma/space was mangled: ${TAG_ARGS[1]}"
+
+# No tags: render nothing. The guarded expansion at each call site must also not
+# abort under /bin/bash 3.2, where an empty array under `set -u` is fatal.
+TAGS_KV=()
+tag_args upper
+[[ ${#TAG_ARGS[@]} -eq 0 ]] || fail "no tags must render no arguments"
+
+# --tag must accumulate, and must reject a value with no '='.
+TAGS_KV=()
+add_tag "A=1"; add_tag "B=2"
+[[ "${TAGS_KV[*]}" == "A=1 B=2" ]] || fail "add_tag did not accumulate: ${TAGS_KV[*]}"
+if add_tag "novalue" 2>/dev/null; then
+  fail "add_tag must reject an argument with no '='"
+fi
+if add_tag "=novalue" 2>/dev/null; then
+  fail "add_tag must reject an empty key"
+fi
+[[ "${TAGS_KV[*]}" == "A=1 B=2" ]] || fail "a rejected --tag must not be recorded"
+
+# ── the right shape must reach each real call site ───────────────────────────
+argv_file="$TEST_DIR/argv"
+record_run() { printf '%s\n' "$@" >> "$argv_file"; return 0; }
+TAGS_KV=("Product-Area=devops" "Sub-Product-Area=ecr" "Environment=integration")
+
+: > "$argv_file"
+(
+  # shellcheck disable=SC2329
+  aws() { return 1; }                      # nothing exists yet
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_image >/dev/null 2>&1
+) || true
+grep -qx -- "--tags" "$argv_file" || fail "ecr create-repository received no --tags"
+grep -qx -- "Key=Product-Area,Value=devops" "$argv_file" \
+  || fail "ecr create-repository did not receive the upper-case tag list"
+
+: > "$argv_file"
+(
+  # shellcheck disable=SC2329
+  aws() { return 1; }                      # log group absent
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  ensure_log_group >/dev/null 2>&1
+) || true
+grep -qx -- "Product-Area=devops,Sub-Product-Area=ecr,Environment=integration" "$argv_file" \
+  || fail "logs create-log-group did not receive ONE comma-joined tag map"
+
+: > "$argv_file"
+(
+  # shellcheck disable=SC2034
+  SKIP_LOGGING=1
+  # shellcheck disable=SC2034
+  EXEC_ROLE_ARN="arn:aws:iam::123456789012:role/e"
+  # shellcheck disable=SC2034
+  TASK_ROLE_ARN="arn:aws:iam::123456789012:role/t"
+  # shellcheck disable=SC2034
+  SECRET_ARN="arn:aws:secretsmanager:us-east-1:123456789012:secret:s"
+  # shellcheck disable=SC2034
+  IMAGE="123456789012.dkr.ecr.us-east-1.amazonaws.com/moo-cloud-bill:latest"
+  # shellcheck disable=SC2329
+  aws() { return 1; }                      # cluster absent
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_cluster_taskdef >/dev/null 2>&1
+) || true
+grep -qx -- "key=Product-Area,value=devops" "$argv_file" \
+  || fail "ecs create-cluster did not receive the LOWERCASE tag list"
+
+# IAM roles go through one helper, so all three roles are covered by this.
+: > "$argv_file"
+(
+  # shellcheck disable=SC2329
+  aws() { return 1; }                      # role absent
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  create_role_if_absent testRole '{"x":1}' "a role" >/dev/null 2>&1
+) || true
+grep -qx -- "Key=Product-Area,Value=devops" "$argv_file" \
+  || fail "iam create-role did not receive the upper-case tag list"
+
+# Secrets Manager is called directly rather than through run(), because the
+# secret value must never be echoed. Record at the aws boundary instead.
+: > "$argv_file"
+(
+  # shellcheck disable=SC2034
+  API_KEY="mlk_test"
+  # shellcheck disable=SC2329
+  aws() { record_run "$@"; return 1; }
+  step_secret >/dev/null 2>&1
+) || true
+grep -qx -- "Key=Product-Area,Value=devops" "$argv_file" \
+  || fail "secretsmanager create-secret did not receive the upper-case tag list"
+if grep -qx -- "mlk_test" "$argv_file"; then
+  : # the key IS passed to aws; it must simply never be printed to the terminal
+fi
+
+# ── one daily trigger, never two ─────────────────────────────────────────────
+# Scheduler and Rules use the same name but different APIs. Each path must see
+# the other, or switching --tag on or off leaves the push firing twice a day.
+: > "$argv_file"
+TAGS_KV=("Product-Area=devops")
+(
+  # shellcheck disable=SC2329
+  aws() {
+    case "${1:-} ${2:-}" in
+      "scheduler help") return 0 ;;
+      "scheduler get-schedule") return 0 ;;   # a Scheduler schedule already exists
+      *) return 1 ;;
+    esac
+  }
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_schedule >/dev/null 2>&1
+) || true
+if grep -qx -- "put-rule" "$argv_file"; then
+  fail "tags must not add a Rule beside an existing Scheduler schedule"
+fi
+
+: > "$argv_file"
+TAGS_KV=()
+(
+  # shellcheck disable=SC2329
+  aws() {
+    case "${1:-} ${2:-}" in
+      "scheduler help") return 0 ;;
+      "events describe-rule") return 0 ;;     # an EventBridge Rule already exists
+      "scheduler create-schedule") record_run "$@"; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_schedule >/dev/null 2>&1
+) || true
+if grep -qx -- "create-schedule" "$argv_file"; then
+  fail "a run without tags must not add a Schedule beside an existing Rule"
+fi
+TAGS_KV=("Product-Area=devops" "Sub-Product-Area=ecr" "Environment=integration")
+
+# ── the schedule step must take a path that can carry tags ───────────────────
+# EventBridge Scheduler cannot tag a schedule at creation, so supplying tags has
+# to route through a classic EventBridge Rule, which accepts --tags.
+: > "$argv_file"
+(
+  # shellcheck disable=SC2034
+  SCHED_ROLE_ARN="arn:aws:iam::123456789012:role/s"
+  # shellcheck disable=SC2329
+  aws() { [[ "${1:-} ${2:-}" == "scheduler help" ]] && return 0; return 1; }
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_schedule >/dev/null 2>&1
+) || true
+grep -qx -- "put-rule" "$argv_file" \
+  || fail "with tags, the schedule step must use the EventBridge Rules path"
+grep -qx -- "Key=Product-Area,Value=devops" "$argv_file" \
+  || fail "the whole point of the Rules path is that tags reach put-rule"
+if grep -qx -- "create-schedule" "$argv_file"; then
+  fail "with tags, the schedule step must not use scheduler create-schedule"
+fi
+
+# Without tags, Scheduler stays the default.
+: > "$argv_file"
+TAGS_KV=()
+(
+  # shellcheck disable=SC2034
+  SCHED_ROLE_ARN="arn:aws:iam::123456789012:role/s"
+  # shellcheck disable=SC2329
+  aws() {
+    [[ "${1:-} ${2:-}" == "scheduler help" ]] && return 0
+    [[ "${1:-} ${2:-}" == "scheduler create-schedule" ]] && { record_run "$@"; return 0; }
+    return 1
+  }
+  # shellcheck disable=SC2329
+  run() { record_run "$@"; }
+  step_schedule >/dev/null 2>&1
+) || true
+grep -qx -- "create-schedule" "$argv_file" \
+  || fail "without tags, the schedule step must keep EventBridge Scheduler"
+
 schedule_marker="$TEST_DIR/schedule-created"
 ensure_prereq() { :; }
 ensure_container_cli() { :; }

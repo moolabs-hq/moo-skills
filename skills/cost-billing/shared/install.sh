@@ -53,6 +53,9 @@
 #                                             # Same interactive wizard as below, standalone.
 #   ./install.sh --setup-cur --skip-logging   # allow Fargate setup without CloudWatch Logs
 #                                             # (no log group or task logConfiguration).
+#   ./install.sh --setup-cur --tag Environment=prod --tag Owner=platform
+#                                             # tag every AWS resource the setup creates,
+#                                             # for orgs that deny untagged creates.
 #
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
@@ -265,6 +268,10 @@ HANDOFF_MCP_NAME=""
 HANDOFF_NO_PROMPT=0
 SETUP_CUR=0
 SKIP_LOGGING=0
+# --tag KEY=VALUE, repeatable. Forwarded verbatim to aws-fargate-setup.sh, which
+# renders the per-service tag shapes. Kept as an array: a tag VALUE may contain
+# a space or a comma, and re-joining into one string would corrupt it.
+SETUP_TAGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -299,6 +306,7 @@ while [[ $# -gt 0 ]]; do
     --no-handoff-prompt) HANDOFF_NO_PROMPT=1; shift ;;
     --setup-cur) SETUP_CUR=1; shift ;;
     --skip-logging) SKIP_LOGGING=1; shift ;;
+    --tag) SETUP_TAGS+=("$2"); shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -1220,6 +1228,13 @@ _run_aws_fargate_setup() {
     logging_suffix=" --skip-logging"
     setup_args+=("--skip-logging")
   fi
+  # Forward each tag as TWO argv entries. A value may hold a space or a comma,
+  # so the display string is %q-quoted and the real call never re-joins them.
+  local tags_suffix="" _t
+  for _t in ${SETUP_TAGS[@]+"${SETUP_TAGS[@]}"}; do
+    setup_args+=("--tag" "$_t")
+    tags_suffix="$tags_suffix --tag $(printf '%q' "$_t")"
+  done
   # load_cli_config() inside aws-fargate-setup.sh shells out to plain `python3`
   # to read the config `configure` just saved a few lines above. That python3
   # has no reason to already know about moo_cloud_bill — the CLI we just ran
@@ -1258,11 +1273,11 @@ _run_aws_fargate_setup() {
       printf "  Now run it for real? [y/N]: "; read -r a2
       case "$a2" in y|Y|yes|YES)
         if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; else PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; fi ;;
-      *) echo "  Left as a dry-run. Run later: bash \"$script\"$logging_suffix" ;; esac ;;
+      *) echo "  Left as a dry-run. Run later: bash \"$script\"$logging_suffix$tags_suffix" ;; esac ;;
     *)
       echo "  No problem — nothing was changed. Alternatives:"
-      echo "    • Preview the plan anytime:  bash \"$script\" --dry-run$logging_suffix"
-      echo "    • Run it later:              bash \"$script\"$logging_suffix"
+      echo "    • Preview the plan anytime:  bash \"$script\" --dry-run$logging_suffix$tags_suffix"
+      echo "    • Run it later:              bash \"$script\"$logging_suffix$tags_suffix"
       echo "    • Do it by hand:             $runbook"
       ;;
   esac
