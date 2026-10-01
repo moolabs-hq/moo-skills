@@ -83,6 +83,49 @@ export CLUSTER=moo-cloud-bill               # an ECS cluster name (create below 
 
 ---
 
+### If your organisation requires tags on every create
+
+Some organisations deny an untagged create call. The denial looks like this:
+
+```
+An error occurred (AccessDeniedException) when calling the CreateRepository
+operation: ... with an explicit deny in a service control policy
+```
+
+AWS does not use one tag shorthand. Define the three shapes once:
+
+```bash
+# ECR, IAM, Secrets Manager, EventBridge Rules.
+TAGS_LIST=(--tags Key=Environment,Value=integration Key=Owner,Value=platform)
+# ECS uses lowercase keys.
+TAGS_ECS=(--tags key=Environment,value=integration key=Owner,value=platform)
+# CloudWatch Logs uses ONE comma-joined map argument, not a list.
+TAGS_MAP=(--tags Environment=integration,Owner=platform)
+```
+
+Append the matching variable to each create command below:
+
+| Command | Append |
+|---|---|
+| `secretsmanager create-secret` | `"${TAGS_LIST[@]}"` |
+| `ecr create-repository` | `"${TAGS_LIST[@]}"` |
+| `iam create-role` | `"${TAGS_LIST[@]}"` |
+| `ecs create-cluster` | `"${TAGS_ECS[@]}"` |
+| `logs create-log-group` | `"${TAGS_MAP[@]}"` |
+
+`aws scheduler create-schedule` accepts no `--tags`. See section 6.
+
+`ecs register-task-definition` and `ecs run-task` accept `--tags`, but neither
+`aws-fargate-setup.sh` nor this runbook sets them. Add them yourself if your
+policy covers those calls.
+
+The automated path does all of this for you. Pass `--tag KEY=VALUE` once per
+tag:
+
+```bash
+./scripts/aws-fargate-setup.sh --tag Environment=integration --tag Owner=platform
+```
+
 ## 1. Store the Moolabs API key in Secrets Manager
 
 The key is generated in the Moolabs UI. The task reads it at runtime (it is **never**
@@ -286,6 +329,13 @@ without creating the daily schedule.
 ---
 
 ## 6. Create the daily schedule (EventBridge Scheduler)
+
+> **Tags:** `aws scheduler create-schedule` has no `--tags` parameter.
+> EventBridge Scheduler tags the schedule *group*, not the schedule. If your
+> organisation requires tags on creation, create a classic EventBridge Rule
+> instead — `aws events put-rule` accepts `--tags`, and the cadence and the task
+> are the same. `aws-fargate-setup.sh` switches to that path automatically when
+> you pass `--tag`.
 
 ```bash
 cat > /tmp/schedule-target.json <<JSON

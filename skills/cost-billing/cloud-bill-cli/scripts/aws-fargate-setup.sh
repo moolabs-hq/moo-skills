@@ -17,6 +17,7 @@
 #   ./scripts/aws-fargate-setup.sh --yes           # assume yes to every step (CI/non-interactive)
 #   ./scripts/aws-fargate-setup.sh --region us-east-1 --cluster mycluster
 #   ./scripts/aws-fargate-setup.sh --skip-logging  # omit CloudWatch logging (restricted IAM)
+#   ./scripts/aws-fargate-setup.sh --tag Environment=prod --tag Owner=platform
 #
 # NOTE: deliberately NOT `set -e`. This is a stepwise, resumable provisioner —
 # a declined step (confirm returns non-zero) and a reuse-skip are normal control
@@ -40,6 +41,51 @@ CONTAINER_CLI="${CONTAINER_CLI:-}"
 VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-3}"
 VERIFY_RETRY_DELAY_SECONDS="${VERIFY_RETRY_DELAY_SECONDS:-15}"
 
+# --tag KEY=VALUE, repeatable. Some organisations deny every untagged create, so
+# the same tags must reach all six create calls this script makes.
+TAGS_KV=()
+TAG_ARGS=()
+
+# Defined ABOVE the argument loop below, because that loop runs at source time.
+# Validating here makes a typo fail at parse time rather than as an opaque AWS
+# error five steps in. An empty VALUE is legal to AWS; an empty KEY is not.
+add_tag() {
+  local kv="$1"
+  if [[ "$kv" != *=* || -z "${kv%%=*}" ]]; then
+    printf 'Invalid --tag "%s": expected KEY=VALUE\n' "$kv" >&2
+    return 1
+  fi
+  TAGS_KV+=("$kv")
+}
+
+# AWS never standardised tag shorthand. Render TAGS_KV into TAG_ARGS as one of
+# the three shapes the services below actually accept:
+#   upper -> --tags Key=K,Value=V ...   ECR, IAM, Secrets Manager, EventBridge
+#   lower -> --tags key=K,value=V ...   ECS
+#   map   -> --tags K=V,K2=V2           CloudWatch Logs (ONE argument, not a list)
+# Call sites expand ${TAG_ARGS[@]+"${TAG_ARGS[@]}"}. The `+` guard is required:
+# /bin/bash 3.2 treats an empty array under `set -u` as an unbound variable, and
+# the suite parses this script under that bash on purpose.
+tag_args() {
+  TAG_ARGS=()
+  [[ ${#TAGS_KV[@]} -eq 0 ]] && return 0
+  local kv joined=""
+  case "$1" in
+    upper)
+      TAG_ARGS=(--tags)
+      for kv in "${TAGS_KV[@]}"; do TAG_ARGS+=("Key=${kv%%=*},Value=${kv#*=}"); done ;;
+    lower)
+      TAG_ARGS=(--tags)
+      for kv in "${TAGS_KV[@]}"; do TAG_ARGS+=("key=${kv%%=*},value=${kv#*=}"); done ;;
+    map)
+      for kv in "${TAGS_KV[@]}"; do joined="${joined:+$joined,}$kv"; done
+      TAG_ARGS=(--tags "$joined") ;;
+    *)
+      printf 'internal error: unknown tag style "%s"\n' "$1" >&2
+      return 1 ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
@@ -49,9 +95,10 @@ while [[ $# -gt 0 ]]; do
     --cluster) CLUSTER="$2"; shift 2 ;;
     --ecr-repo) ECR_REPO="$2"; shift 2 ;;
     --secret-name) SECRET_NAME="$2"; shift 2 ;;
+    --tag) add_tag "$2" || exit 2; shift 2 ;;
     --subnets) SUBNETS="$2"; shift 2 ;;
     --security-group) SECURITY_GROUP="$2"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -598,6 +645,16 @@ show_plan() {
   fi
   note "  7. On-demand VERIFY run (safe pre-start failures retry up to $VERIFY_MAX_ATTEMPTS times) — optional"
   note "  8. EventBridge schedule '$SCHEDULE_NAME'  ($SCHEDULE_CRON UTC, daily)"
+  if [[ ${#TAGS_KV[@]} -gt 0 ]]; then
+    note ""
+    note "  Tags applied to every create above:"
+    local kv
+    for kv in "${TAGS_KV[@]}"; do note "    ${kv%%=*} = ${kv#*=}"; done
+    note "  Step 8 creates an EventBridge RULE, not a Scheduler schedule, because"
+    note "  Scheduler cannot tag a schedule at creation."
+    note "  NOT tagged: the ECS task definition and the on-demand verify task."
+    note "  Add those by hand if your policy also covers ecs:RegisterTaskDefinition."
+  fi
   note ""
   note "  Each create asks before it runs. Existing resources are reused; the API-key"
   note "  secret explicitly offers an update so key rotation or tenant changes take effect."
@@ -645,9 +702,11 @@ step_secret() {
     if [[ $r -eq 0 ]]; then
       # NEVER echo the key — print a masked command, pass the real value only to aws.
       printf '    $ aws secretsmanager create-secret --name %s --secret-string ****hidden**** --region %s\n' "$SECRET_NAME" "$AWS_REGION" >&2
+      tag_args upper
       if [[ $DRY_RUN -eq 0 ]] && ! aws secretsmanager create-secret --name "$SECRET_NAME" \
         --description "Moolabs API key for moo-cloud-bill push" \
-        --secret-string "$API_KEY" --region "$AWS_REGION" >/dev/null; then
+        --secret-string "$API_KEY" --region "$AWS_REGION" \
+        ${TAG_ARGS[@]+"${TAG_ARGS[@]}"} >/dev/null; then
         note "! Could not create secret '$SECRET_NAME' (see the AWS error above)."
         return 1
       fi
@@ -665,7 +724,8 @@ step_image() {
     note "✓ ECR repo '$ECR_REPO' exists — reusing."
   else
     confirm "Create ECR repo '$ECR_REPO'?"; local r=$?; abort_if_quit $r
-    [[ $r -eq 0 ]] && run aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null || { note "  skipped repo; cannot push image."; return 0; }
+    tag_args upper
+    [[ $r -eq 0 ]] && run aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" ${TAG_ARGS[@]+"${TAG_ARGS[@]}"} >/dev/null || { note "  skipped repo; cannot push image."; return 0; }
   fi
   confirm "Build the image (linux/amd64) and push to ECR? (using $CONTAINER_CLI)"; local b=$?; abort_if_quit $b
   if [[ $b -eq 0 ]]; then
@@ -683,7 +743,9 @@ create_role_if_absent() {  # $1 role name, $2 trust json, $3 description
   fi
   confirm "Create IAM role $1 ($3)?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped $1."; return 2; }
-  run aws iam create-role --role-name "$1" --assume-role-policy-document "$2" >/dev/null
+  tag_args upper
+  run aws iam create-role --role-name "$1" --assume-role-policy-document "$2" \
+    ${TAG_ARGS[@]+"${TAG_ARGS[@]}"} >/dev/null
   return 0
 }
 
@@ -737,7 +799,9 @@ ensure_log_group() {
   if [[ "$existing" == "$group" ]]; then
     note "✓ CloudWatch log group $group exists — reusing."
   else
-    if ! run aws logs create-log-group --log-group-name "$group" --region "$AWS_REGION"; then
+    tag_args map
+    if ! run aws logs create-log-group --log-group-name "$group" --region "$AWS_REGION" \
+         ${TAG_ARGS[@]+"${TAG_ARGS[@]}"}; then
       note "! Could not create log group $group (see the AWS error above)."
       note "  Without it, the push task's awslogs driver has nowhere to write — it will"
       note "  keep running on schedule but produce ZERO log output. Fix the error above"
@@ -783,7 +847,8 @@ step_cluster_taskdef() {
     note "✓ ECS cluster '$CLUSTER' exists — reusing."
   else
     confirm "Create ECS (Fargate) cluster '$CLUSTER'?"; local r=$?; abort_if_quit $r
-    [[ $r -eq 0 ]] && run aws ecs create-cluster --cluster-name "$CLUSTER" --region "$AWS_REGION" >/dev/null || note "  skipped."
+    tag_args lower
+    [[ $r -eq 0 ]] && run aws ecs create-cluster --cluster-name "$CLUSTER" --region "$AWS_REGION" ${TAG_ARGS[@]+"${TAG_ARGS[@]}"} >/dev/null || note "  skipped."
   fi
   if [[ $SKIP_LOGGING -eq 1 ]]; then
     note "! CloudWatch logging skipped by request; task stdout/stderr will not be retained."
@@ -928,6 +993,13 @@ step_schedule_via_scheduler() {
   if aws scheduler get-schedule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
     note "✓ schedule '$SCHEDULE_NAME' exists — reusing (delete it first to change cadence)."; return 0
   fi
+  # An earlier run WITH --tag created an EventBridge Rule under this same name.
+  # Adding a Scheduler schedule beside it would run the push twice a day.
+  if aws events describe-rule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    note "✓ EventBridge rule '$SCHEDULE_NAME' already runs this task daily — reusing it."
+    note "  Delete that rule first if you want a Scheduler schedule instead."
+    return 0
+  fi
   confirm "Create the daily EventBridge schedule '$SCHEDULE_NAME' ($SCHEDULE_CRON UTC)?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped schedule."; return 0; }
   local target; target="$(schedule_ecs_target_json)"
@@ -946,6 +1018,14 @@ step_schedule_via_events_rule() {
   if aws events describe-rule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
     note "✓ EventBridge rule '$SCHEDULE_NAME' exists — reusing (delete it first to change cadence)."; return 0
   fi
+  # An earlier run WITHOUT --tag created a Scheduler schedule under this same
+  # name. Adding a Rule beside it would run the push twice a day.
+  if aws scheduler get-schedule --name "$SCHEDULE_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    note "✓ EventBridge Scheduler schedule '$SCHEDULE_NAME' already runs this task daily — reusing it."
+    note "  Scheduler cannot carry tags. If your organisation requires the schedule"
+    note "  itself to be tagged, delete it and re-run so a tagged rule replaces it."
+    return 0
+  fi
   confirm "Create the daily EventBridge rule '$SCHEDULE_NAME' ($SCHEDULE_CRON UTC)?"; local r=$?; abort_if_quit $r
   [[ $r -eq 0 ]] || { note "  skipped schedule."; return 0; }
   local target targets
@@ -956,13 +1036,22 @@ step_schedule_via_events_rule() {
     printf '    $ aws events put-targets --rule %s --targets <targets>\n' "$SCHEDULE_NAME"
     return 0
   fi
+  tag_args upper
   run aws events put-rule --name "$SCHEDULE_NAME" --schedule-expression "$SCHEDULE_CRON" \
-    --state ENABLED --region "$AWS_REGION" >/dev/null
+    --state ENABLED --region "$AWS_REGION" ${TAG_ARGS[@]+"${TAG_ARGS[@]}"} >/dev/null
   run aws events put-targets --rule "$SCHEDULE_NAME" --targets "$targets" --region "$AWS_REGION" >/dev/null
 }
 
 step_schedule() {
-  if aws scheduler help >/dev/null 2>&1; then
+  # EventBridge Scheduler has no --tags on create-schedule; it tags the schedule
+  # GROUP instead. A classic EventBridge Rule does accept --tags, so when tags
+  # are required the Rules path is the only one that can satisfy the policy.
+  if [[ ${#TAGS_KV[@]} -gt 0 ]]; then
+    note "  Tags were supplied. EventBridge Scheduler cannot tag a schedule at"
+    note "  creation, so this creates a classic EventBridge Rule instead — same"
+    note "  daily cadence, same task, and the rule carries your tags."
+    step_schedule_via_events_rule
+  elif aws scheduler help >/dev/null 2>&1; then
     step_schedule_via_scheduler
   else
     note "  (this AWS CLI predates EventBridge Scheduler — using classic EventBridge Rules instead; same daily cadence, same task.)"
