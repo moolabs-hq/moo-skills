@@ -18,6 +18,7 @@
 #   ./scripts/aws-fargate-setup.sh --region us-east-1 --cluster mycluster
 #   ./scripts/aws-fargate-setup.sh --skip-logging  # omit CloudWatch logging (restricted IAM)
 #   ./scripts/aws-fargate-setup.sh --tag Environment=prod --tag Owner=platform
+#   ./scripts/aws-fargate-setup.sh --min-tags 0    # fallback when no tag policy: 0 tags (default: 3)
 #
 # NOTE: deliberately NOT `set -e`. This is a stepwise, resumable provisioner —
 # a declined step (confirm returns non-zero) and a reuse-skip are normal control
@@ -45,18 +46,26 @@ VERIFY_RETRY_DELAY_SECONDS="${VERIFY_RETRY_DELAY_SECONDS:-15}"
 # the same tags must reach all six create calls this script makes.
 TAGS_KV=()
 TAG_ARGS=()
+# The tag rule comes from the organisation's tag policy when AWS reports one
+# (see tag-rules.sh). Otherwise the fallback is at least MIN_TAGS tags.
+# --min-tags 0 turns the fallback off.
+MIN_TAGS="${MIN_TAGS:-3}"
 
-# Defined ABOVE the argument loop below, because that loop runs at source time.
-# Validating here makes a typo fail at parse time rather than as an opaque AWS
-# error five steps in. An empty VALUE is legal to AWS; an empty KEY is not.
-add_tag() {
-  local kv="$1"
-  if [[ "$kv" != *=* || -z "${kv%%=*}" ]]; then
-    printf 'Invalid --tag "%s": expected KEY=VALUE\n' "$kv" >&2
-    return 1
-  fi
-  TAGS_KV+=("$kv")
-}
+# add_tag, discover_tag_rule and ensure_tags live in tag-rules.sh, which
+# install.sh also loads. It is sourced ABOVE the argument loop below, because
+# that loop calls add_tag at source time: a typo then fails at parse time
+# rather than as an opaque AWS error five steps in.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"   # the Dockerfile lives here (build context)
+# shellcheck source=SCRIPTDIR/tag-rules.sh
+source "$SCRIPT_DIR/tag-rules.sh"
+# Set by discover_tag_rule and read by ensure_tags, both in tag-rules.sh.
+# shellcheck disable=SC2034
+REQUIRED_TAG_KEYS=()
+# shellcheck disable=SC2034
+TAG_RULE_SOURCE="fallback"
+# shellcheck disable=SC2034
+TAG_RULE_REASON="unreadable"
 
 # AWS never standardised tag shorthand. Render TAGS_KV into TAG_ARGS as one of
 # the three shapes the services below actually accept:
@@ -96,15 +105,15 @@ while [[ $# -gt 0 ]]; do
     --ecr-repo) ECR_REPO="$2"; shift 2 ;;
     --secret-name) SECRET_NAME="$2"; shift 2 ;;
     --tag) add_tag "$2" || exit 2; shift 2 ;;
+    --min-tags)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || { printf 'Invalid --min-tags "%s": expected a whole number\n' "${2:-}" >&2; exit 2; }
+      MIN_TAGS="$2"; shift 2 ;;
     --subnets) SUBNETS="$2"; shift 2 ;;
     --security-group) SECURITY_GROUP="$2"; shift 2 ;;
-    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"   # the Dockerfile lives here (build context)
 
 say()  { printf '%s\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
@@ -1075,6 +1084,12 @@ main() {
 
   load_cli_config
   choose_region
+  # Read-only, and before any create: find the tag rule, then ask for what is
+  # missing. Under --yes, a missing tag stops the run here.
+  discover_tag_rule "$AWS_REGION"
+  if ! ensure_tags "$ASSUME_YES"; then
+    exit 2
+  fi
   resolve_api_key
   discover_network
   show_plan

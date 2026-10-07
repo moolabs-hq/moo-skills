@@ -56,6 +56,12 @@
 #   ./install.sh --setup-cur --tag Environment=prod --tag Owner=platform
 #                                             # tag every AWS resource the setup creates,
 #                                             # for orgs that deny untagged creates.
+#                                             # The setup reads the required tag keys
+#                                             # from your organisation's tag policy and
+#                                             # asks for each missing one. With no tag
+#                                             # policy, it asks for at least 3 tags.
+#                                             # You can add as many tags as you need.
+#   ./install.sh --setup-cur --min-tags 0     # fallback when no tag policy: 0 tags (default: 3)
 #
 # Env vars honored:
 #   CLAUDE_CONFIG_DIR    Claude Code user-scope root (overrides ~/.claude); installs go to $CLAUDE_CONFIG_DIR/skills/
@@ -272,6 +278,11 @@ SKIP_LOGGING=0
 # renders the per-service tag shapes. Kept as an array: a tag VALUE may contain
 # a space or a comma, and re-joining into one string would corrupt it.
 SETUP_TAGS=()
+# When no tag policy names required keys, the guided setup needs at least this
+# many tags. Forwarded only when given, so the setup script keeps its own
+# default otherwise.
+SETUP_MIN_TAGS=3
+SETUP_MIN_TAGS_SET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -307,6 +318,9 @@ while [[ $# -gt 0 ]]; do
     --setup-cur) SETUP_CUR=1; shift ;;
     --skip-logging) SKIP_LOGGING=1; shift ;;
     --tag) SETUP_TAGS+=("$2"); shift 2 ;;
+    --min-tags)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "Invalid --min-tags \"${2:-}\": expected a whole number" >&2; exit 2; }
+      SETUP_MIN_TAGS="$2"; SETUP_MIN_TAGS_SET=1; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)
@@ -1215,6 +1229,41 @@ choose_push_schedule() {
   done
 }
 
+# Find the organisation's tag rule on AWS, then ask for the missing tags ONCE,
+# before the dry-run, so the dry-run, the real run and the "run it later" hints
+# all carry the same tags. The rule and the prompt live in the CLI's
+# tag-rules.sh, which aws-fargate-setup.sh also loads:
+#   • the tag policy names required keys -> ask for a value for each one;
+#   • no tag policy, or AWS will not say -> at least SETUP_MIN_TAGS tags.
+# The operator can add any number of extra tags either way. A member account
+# cannot read SCPs, so an SCP-only rule is covered by the count fallback only.
+# Returns 1 when the rule is not met (input ended), so the setup does not run.
+_collect_setup_tags() {
+  local cli_dir="$1" aws_profile="$2" region
+  local rules="$cli_dir/scripts/tag-rules.sh"
+  if [[ ! -f "$rules" ]]; then
+    echo "  ! Tag rules not found at $rules — cannot check tags. Nothing was changed."
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "$rules"
+  TAGS_KV=(${SETUP_TAGS[@]+"${SETUP_TAGS[@]}"})
+  # Read by ensure_tags in tag-rules.sh.
+  # shellcheck disable=SC2034
+  MIN_TAGS="$SETUP_MIN_TAGS"
+  # Tag policies apply to the whole organisation, so the region here only
+  # picks an endpoint. aws-fargate-setup.sh checks again in its chosen region.
+  if [[ -n "$aws_profile" ]]; then
+    region="${AWS_REGION:-$(AWS_PROFILE="$aws_profile" aws configure get region 2>/dev/null || true)}"
+    AWS_PROFILE="$aws_profile" discover_tag_rule "${region:-us-east-1}"
+  else
+    region="${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}"
+    discover_tag_rule "${region:-us-east-1}"
+  fi
+  ensure_tags 0 || return 1
+  SETUP_TAGS=(${TAGS_KV[@]+"${TAGS_KV[@]}"})
+}
+
 # Offer to RUN the guided AWS Fargate provisioner (scripts/aws-fargate-setup.sh).
 # The script itself discloses a plan and confirms before EACH AWS mutation, so this
 # wrapper just explains, offers a dry-run, and hands off (or prints alternatives).
@@ -1228,13 +1277,7 @@ _run_aws_fargate_setup() {
     logging_suffix=" --skip-logging"
     setup_args+=("--skip-logging")
   fi
-  # Forward each tag as TWO argv entries. A value may hold a space or a comma,
-  # so the display string is %q-quoted and the real call never re-joins them.
   local tags_suffix="" _t
-  for _t in ${SETUP_TAGS[@]+"${SETUP_TAGS[@]}"}; do
-    setup_args+=("--tag" "$_t")
-    tags_suffix="$tags_suffix --tag $(printf '%q' "$_t")"
-  done
   # load_cli_config() inside aws-fargate-setup.sh shells out to plain `python3`
   # to read the config `configure` just saved a few lines above. That python3
   # has no reason to already know about moo_cloud_bill — the CLI we just ran
@@ -1264,6 +1307,20 @@ _run_aws_fargate_setup() {
   echo "    d) Dry-run first (print every command, change nothing)"
   echo "    n) Not now — show alternatives"
   local a; read -r -p "  Run the AWS Fargate setup? [y/d/N]: " a
+  case "$a" in
+    y|Y|yes|YES|d|D|dry|dry-run)
+      _collect_setup_tags "$cli_dir" "$aws_profile" || return 0 ;;
+  esac
+  # Forward each tag as TWO argv entries. A value may hold a space or a comma,
+  # so the display string is %q-quoted and the real call never re-joins them.
+  for _t in ${SETUP_TAGS[@]+"${SETUP_TAGS[@]}"}; do
+    setup_args+=("--tag" "$_t")
+    tags_suffix="$tags_suffix --tag $(printf '%q' "$_t")"
+  done
+  if [[ $SETUP_MIN_TAGS_SET -eq 1 ]]; then
+    setup_args+=("--min-tags" "$SETUP_MIN_TAGS")
+    tags_suffix="$tags_suffix --min-tags $SETUP_MIN_TAGS"
+  fi
   case "$a" in
     y|Y|yes|YES)
       if [[ -n "$aws_profile" ]]; then AWS_PROFILE="$aws_profile" PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; else PYTHONPATH="$pypath" bash "$script" "${setup_args[@]+"${setup_args[@]}"}"; fi ;;

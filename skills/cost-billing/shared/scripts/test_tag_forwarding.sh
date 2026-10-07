@@ -7,17 +7,32 @@ CLI_DIR="$HERE/../../cloud-bill-cli"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
-# Exercise the real guided-setup function without executing the installer's
+# Exercise the real guided-setup functions without executing the installer's
 # top-level flow. Its closing brace is the first one at column zero after the
 # declaration; nested blocks are indented.
 install_function="$(awk '
-  /^_run_aws_fargate_setup\(\) \{/ { capture=1 }
+  /^(_collect_setup_tags|_run_aws_fargate_setup)\(\) \{/ { capture=1 }
   capture { print }
-  capture && /^}/ { exit }
+  capture && /^}/ { capture=0; if (++done == 2) exit }
 ' "$INSTALL")"
-[[ -n "$install_function" ]] || fail "could not extract _run_aws_fargate_setup"
+[[ -n "$install_function" ]] || fail "could not extract the guided-setup functions"
 # shellcheck disable=SC2294
 eval "$install_function"
+
+# The tag rule lookup is the only AWS call the installer makes here. By default
+# it fails, as a denied call does, so the count fallback applies. A test that
+# needs a tag policy sets AWS_REQUIRED_TAGS_JSON.
+AWS_REQUIRED_TAGS_JSON=""
+# shellcheck disable=SC2329
+aws() {
+  case "${1:-} ${2:-}" in
+    "resourcegroupstaggingapi list-required-tags")
+      [[ -n "$AWS_REQUIRED_TAGS_JSON" ]] || return 254
+      printf '%s\n' "$AWS_REQUIRED_TAGS_JSON" ;;
+    "configure get") return 1 ;;
+    *) printf 'unexpected AWS call in installer test: %s\n' "$*" >&2; return 1 ;;
+  esac
+}
 
 # Replace only the child-shell boundary. The captured text shows the exact argv
 # that the installer would pass to aws-fargate-setup.sh. Each argv entry is
@@ -34,6 +49,12 @@ bash() {
 
 # shellcheck disable=SC2034
 SKIP_LOGGING=0
+# The forwarding cases below are about argv shape, not the tag minimum, which
+# has its own cases at the end.
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS=0
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS_SET=0
 
 # A tag must reach the setup script as TWO argv entries: the flag, then the
 # pair. The setup script renders the per-service shapes; the installer only
@@ -90,5 +111,75 @@ default_run="$(printf 'y\n' | _run_aws_fargate_setup "$CLI_DIR" "")"
 if printf '%s\n' "$default_run" | grep -q -- '--tag'; then
   fail "a run with no tags must not pass --tag"
 fi
+
+
+# ── minimum tag count ────────────────────────────────────────────────────────
+# With fewer than SETUP_MIN_TAGS tags, the installer asks for more right after
+# the operator chooses to run. The operator can add any number. The dry-run and
+# the real run that follows must both get the SAME tags, so it asks only once.
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS=3
+# shellcheck disable=SC2034
+SETUP_TAGS=("Environment=prod")
+prompted="$(printf 'd\nOwner=platform\nCost-Center=42\nTeam=data ops\n\ny\n' | _run_aws_fargate_setup "$CLI_DIR" "")"
+expected='<--tag> <Environment=prod> <--tag> <Owner=platform> <--tag> <Cost-Center=42> <--tag> <Team=data ops>'
+printf '%s\n' "$prompted" | grep -q -- "<--dry-run> $expected" \
+  || fail "dry-run did not get the prompted tags: $prompted"
+[[ "$(printf '%s\n' "$prompted" | grep -c -- "$expected")" == "2" ]] \
+  || fail "the real run after the dry-run did not reuse the prompted tags"
+
+# A bad entry is asked again and never forwarded.
+# shellcheck disable=SC2034
+SETUP_TAGS=()
+bad="$(printf 'y\nnovalue\nA=1\nA=2\nB=2\nC=3\n\n' | _run_aws_fargate_setup "$CLI_DIR" "" 2>&1)"
+printf '%s\n' "$bad" | grep -q -- '<--tag> <A=1> <--tag> <B=2> <--tag> <C=3>$' \
+  || fail "bad or duplicate prompted tags were forwarded: $bad"
+
+# End of input below the minimum: do not run the setup at all.
+# shellcheck disable=SC2034
+SETUP_TAGS=()
+short="$(printf 'y\nA=1\n' | _run_aws_fargate_setup "$CLI_DIR" "" 2>&1)"
+if printf '%s\n' "$short" | grep -q 'CALL'; then
+  fail "setup ran although input ended below the tag minimum"
+fi
+
+# "Not now" asks for nothing.
+# shellcheck disable=SC2034
+SETUP_TAGS=()
+later="$(printf 'n\n' | _run_aws_fargate_setup "$CLI_DIR" "" 2>&1)"
+if printf '%s\n' "$later" | grep -q 'Tag 1'; then
+  fail "choosing 'not now' must not ask for tags"
+fi
+
+# An explicit --min-tags reaches the setup script, so it does not ask again.
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS=0
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS_SET=1
+none="$(printf 'y\n' | _run_aws_fargate_setup "$CLI_DIR" "")"
+printf '%s\n' "$none" | grep -q -- '<--min-tags> <0>' \
+  || fail "--min-tags was not forwarded: $none"
+
+
+# A tag policy that names required keys is the rule: the installer asks for
+# each missing key by name, then for any extra tags. The count fallback does
+# not apply, so two keys are enough when the policy names two.
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS=3
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS_SET=0
+AWS_REQUIRED_TAGS_JSON='{"RequiredTags":[{"ResourceType":"ecr:repository","ReportingTagKeys":["CostCenter","Owner"]},{"ResourceType":"s3:bucket","ReportingTagKeys":["DataClass"]}]}'
+# shellcheck disable=SC2034
+SETUP_TAGS=("owner=platform")
+policy="$(printf 'y\n42\n\n' | _run_aws_fargate_setup "$CLI_DIR" "" 2>&1)"
+printf '%s\n' "$policy" | grep -q -- '<--tag> <owner=platform> <--tag> <CostCenter=42>$' \
+  || fail "the tag policy keys were not asked for and forwarded: $policy"
+printf '%s\n' "$policy" | grep -q 'CostCenter = ' || fail "the installer did not ask for CostCenter by name"
+if printf '%s\n' "$policy" | grep -q 'DataClass'; then
+  fail "a key for a service the setup does not create was asked for"
+fi
+printf '%s\n' "$policy" | grep -q 'service control policies' \
+  || fail "the installer did not state the SCP limit"
+AWS_REQUIRED_TAGS_JSON=""
 
 printf 'PASS: install.sh forwards --tag through every guided setup path\n'

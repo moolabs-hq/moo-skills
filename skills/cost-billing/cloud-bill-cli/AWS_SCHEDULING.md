@@ -126,6 +126,32 @@ tag:
 ./scripts/aws-fargate-setup.sh --tag Environment=integration --tag Owner=platform
 ```
 
+Before it creates anything, the setup finds your organisation's tag rule:
+
+1. It runs `aws resourcegroupstaggingapi list-required-tags`. This returns the
+   tag keys that your tag policy marks as required (`report_required_tag_for`).
+   The setup keeps the keys for the services it creates: ECR, ECS, IAM,
+   Secrets Manager, CloudWatch Logs and EventBridge.
+2. If the policy names keys, those keys are the rule. The setup asks for a
+   value for each missing key by name.
+3. If the policy names no keys, or AWS refuses the call, the setup needs at
+   least 3 tags of any keys. Use `--min-tags N` to change the number.
+   `--min-tags 0` turns this fallback off.
+
+In both cases you can then add as many more tags as you need, one `KEY=VALUE`
+per line. An empty line ends the input. Under `--yes`, the setup cannot ask,
+so it stops with an error that names what is missing. A repeated key is
+rejected. The check ignores case, because IAM role tag keys ignore case.
+
+> **Limit:** a member account cannot read service control policies (SCPs). An
+> SCP can deny a create for a key that the tag policy does not list. If a step
+> fails with `explicit deny in a service control policy`, ask your AWS admin for
+> the required keys and re-run with a `--tag` for each one.
+
+`./install.sh --setup-cur` accepts the same `--tag` and `--min-tags` flags. It
+does the same check once, before the dry-run, so the dry-run and the real run
+use the same tags.
+
 ## 1. Store the Moolabs API key in Secrets Manager
 
 The key is generated in the Moolabs UI. The task reads it at runtime (it is **never**

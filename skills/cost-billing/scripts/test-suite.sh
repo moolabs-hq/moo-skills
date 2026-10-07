@@ -106,6 +106,7 @@ check "AWS SSO session reuse"  bash "$SUITE_ROOT/shared/scripts/test_aws_session
 check "skip-logging forwarding" bash "$SUITE_ROOT/shared/scripts/test_skip_logging_forwarding.sh"
 check "tag forwarding" bash "$SUITE_ROOT/shared/scripts/test_tag_forwarding.sh"
 check "Fargate verify retries" bash "$SUITE_ROOT/cloud-bill-cli/tests/test_aws_fargate_setup.sh"
+check "tag rules" bash "$SUITE_ROOT/cloud-bill-cli/tests/test_tag_rules.sh"
 # Also parse under /bin/bash (macOS ships 3.2.57). Catches array / parameter
 # expansion syntax that modern bash silently accepts but 3.2 rejects.
 if [[ -x /bin/bash ]]; then
@@ -116,6 +117,7 @@ if [[ -x /bin/bash ]]; then
   check "skip-logging forwarding (/bin/bash)" /bin/bash "$SUITE_ROOT/shared/scripts/test_skip_logging_forwarding.sh"
   check "tag forwarding (/bin/bash)" /bin/bash "$SUITE_ROOT/shared/scripts/test_tag_forwarding.sh"
   check "Fargate verify retries (/bin/bash)" /bin/bash "$SUITE_ROOT/cloud-bill-cli/tests/test_aws_fargate_setup.sh"
+  check "tag rules (/bin/bash)" /bin/bash "$SUITE_ROOT/cloud-bill-cli/tests/test_tag_rules.sh"
 fi
 echo ""
 

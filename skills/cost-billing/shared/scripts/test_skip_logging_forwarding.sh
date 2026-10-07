@@ -7,17 +7,32 @@ CLI_DIR="$HERE/../../cloud-bill-cli"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
-# Exercise the real guided-setup function without executing the installer's
-# top-level flow. Its closing brace is the first one at column zero after the
+# Exercise the real guided-setup functions without executing the installer's
+# top-level flow. Each closing brace is the first one at column zero after its
 # declaration; nested blocks are indented.
 install_function="$(awk '
-  /^_run_aws_fargate_setup\(\) \{/ { capture=1 }
+  /^(_collect_setup_tags|_run_aws_fargate_setup)\(\) \{/ { capture=1 }
   capture { print }
-  capture && /^}/ { exit }
+  capture && /^}/ { capture=0; if (++done == 2) exit }
 ' "$INSTALL")"
-[[ -n "$install_function" ]] || fail "could not extract _run_aws_fargate_setup"
+[[ -n "$install_function" ]] || fail "could not extract the guided-setup functions"
 # shellcheck disable=SC2294
 eval "$install_function"
+
+# The tag rule lookup is the only AWS call the installer makes here. By default
+# it fails, as a denied call does, so the count fallback applies. A test that
+# needs a tag policy sets AWS_REQUIRED_TAGS_JSON.
+AWS_REQUIRED_TAGS_JSON=""
+# shellcheck disable=SC2329
+aws() {
+  case "${1:-} ${2:-}" in
+    "resourcegroupstaggingapi list-required-tags")
+      [[ -n "$AWS_REQUIRED_TAGS_JSON" ]] || return 254
+      printf '%s\n' "$AWS_REQUIRED_TAGS_JSON" ;;
+    "configure get") return 1 ;;
+    *) printf 'unexpected AWS call in installer test: %s\n' "$*" >&2; return 1 ;;
+  esac
+}
 
 # Replace only the child-shell boundary. The captured text shows the exact argv
 # that the installer would pass to aws-fargate-setup.sh.
@@ -30,6 +45,13 @@ bash() {
   printf '\n'
 }
 
+# This file is about --skip-logging, not tags: no tags and no tag minimum.
+# shellcheck disable=SC2034
+SETUP_TAGS=()
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS=0
+# shellcheck disable=SC2034
+SETUP_MIN_TAGS_SET=0
 # shellcheck disable=SC2034
 SKIP_LOGGING=1
 immediate="$(printf 'y\n' | _run_aws_fargate_setup "$CLI_DIR" "test-profile")"

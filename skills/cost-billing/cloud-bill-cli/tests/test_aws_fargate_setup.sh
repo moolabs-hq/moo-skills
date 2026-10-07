@@ -26,6 +26,9 @@ SECURITY_GROUP="sg-test"
 VERIFY_MAX_ATTEMPTS=3
 # shellcheck disable=SC2034
 VERIFY_RETRY_DELAY_SECONDS=0
+# The main() cases below run untagged. The tag minimum has its own cases.
+# shellcheck disable=SC2034
+MIN_TAGS=0
 
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
@@ -562,5 +565,52 @@ fi
   || fail "main continued to image/task mutations after secret setup failed"
 grep -q "Secret setup did not complete" "$TEST_DIR/main-secret-failure-output" \
   || fail "main did not explain that secret failure stopped the setup"
+
+
+# ── tag rules ────────────────────────────────────────────────────────────────
+# The rule discovery and the prompt are in tag-rules.sh and have their own
+# test file. Here: the script loads them, and its own flags use them.
+
+# main() reads the rule from AWS after the region is known and before any
+# create. Under --yes, a missing required key stops the run before Step 1.
+tag_marker="$TEST_DIR/step1-ran"
+step_secret() { : > "$tag_marker"; return 1; }
+aws() {
+  case "${1:-} ${2:-}" in
+    "sts get-caller-identity") printf '123456789012\n' ;;
+    "resourcegroupstaggingapi list-required-tags")
+      printf '{"RequiredTags":[{"ResourceType":"ecr:repository","ReportingTagKeys":["CostCenter"]}]}\n' ;;
+    *) return 1 ;;
+  esac
+}
+# shellcheck disable=SC2034
+ASSUME_YES=1
+TAGS_KV=()
+if (main >"$TEST_DIR/main-tag-missing" 2>&1); then
+  fail "main must stop when a required tag key is missing under --yes"
+fi
+[[ ! -e "$tag_marker" ]] || fail "main reached Step 1 although a required tag key was missing"
+grep -q "Missing: CostCenter" "$TEST_DIR/main-tag-missing" \
+  || fail "main did not name the missing required key"
+
+# The same key in another case satisfies the rule, and main goes on.
+TAGS_KV=("costcenter=42")
+(main >"$TEST_DIR/main-tag-present" 2>&1) || true
+[[ -e "$tag_marker" ]] || fail "main stopped although the required key was given"
+
+# add_tag rejects a duplicate key: AWS rejects it, and it would count twice.
+TAGS_KV=("A=1")
+if add_tag "A=2" 2>/dev/null; then fail "add_tag must reject a duplicate key"; fi
+[[ "${TAGS_KV[*]}" == "A=1" ]] || fail "a duplicate --tag must not be recorded"
+# IAM roles treat tag keys as case-insensitive, so case is not a new key.
+if add_tag "a=2" 2>/dev/null; then fail "add_tag must reject a key that differs only in case"; fi
+if bash "$SCRIPT" --tag Owner=a --tag owner=b --help >/dev/null 2>&1; then
+  fail "--tag with a repeated key must be rejected at parse time"
+fi
+
+# --min-tags must be a whole number; parse it in a child so exit stays local.
+if bash "$SCRIPT" --min-tags x --help >/dev/null 2>&1; then
+  fail "--min-tags x must be rejected"
+fi
 
 printf 'PASS: Fargate setup rotates secrets, configures optional logging, and verifies safely\n'
